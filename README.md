@@ -120,6 +120,10 @@ gitsync status          # health check
 gitsync doctor          # full diagnostics
 ```
 
+**New here?** Follow the step-by-step walkthrough — copy the install
+command, paste it in a terminal, log in to your accounts, pick your local
+backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
+
 ---
 
 ## Commands
