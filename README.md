@@ -252,42 +252,78 @@ also come from `GITHUB_TOKEN`, `GITLAB_TOKEN`, `FORGEJO_TOKEN`, `GITEA_TOKEN`,
 You can enable **several platforms of the same type** — two Forgejo servers,
 GitHub plus a self-hosted Gitea, each with its own token and route.
 
+### Any account, any folder, any direction
+
+Everything is config-driven, so the tool is fully generic:
+
+- **Any account** - GitHub, GitLab, Forgejo, Gitea, Bitbucket, or several
+  accounts of the same type side by side (`gitsync platforms add ...`)
+- **Any folder** - local mirrors to any path (NAS, USB drive, another disk)
+- **Any direction** - `github -> gitlab`, `gitlab -> forgejo`,
+  `folder -> github`, `bitbucket -> everything`
+- **Any subset** - per-route include/exclude globs, fork filtering,
+  per-target pushes (`gitsync sync --to gitlab`)
+
 ---
 
-## Notifications (Discord)
+## Notifications (Discord + Telegram)
 
-```bash
-gitsync notify                       # show the current setup
-gitsync notify --test                # send a test message
+**Set them up from inside the TUI** - press `N`:
+
+```
+ NOTIFICATIONS
+ Discord webhook : configured
+   https://discord.com/api/webhooks/1568...wjrQ
+ Telegram bot    : not set
+   chat id: (missing)
+ Notify on       : failure
+
+ credentials are stored in YOUR config file
+ (~/.config/gitsync/config.json) - never in the code
+
+ [D]iscord  [T]elegram  [M]ode  [Enter]test  [B]back
 ```
 
-Configure in `~/.config/gitsync/config.json`:
+| Key | Action |
+|---|---|
+| `D` | add/edit the Discord webhook (masked input) |
+| `T` | add/edit the Telegram bot token + chat id |
+| `M` | cycle: failure -> success -> always -> never |
+| `Enter` | send a test message to both channels |
+
+Or from the shell:
+
+```bash
+gitsync notify                        # show the current setup
+gitsync notify --test                 # send a test message
+```
+
+Config reference:
 
 ```jsonc
 "settings": {
     "notify": {
         "discord_webhook": "https://discord.com/api/webhooks/...",
+        "telegram_token":  "123456:ABC-DEF...",
+        "telegram_chat_id": "123456789",
         "on": "failure"          // failure | success | always | never
     }
 }
 ```
 
-You get an embed with repos synced / failed / partial, duration, and the
-first few failure reasons — so a broken sync tells you instead of waiting
-to be discovered.
+Telegram: create a bot with @BotFather (https://t.me/BotFather), then get
+your chat id from @userinfobot (https://t.me/userinfobot).
 
-## SSH transport
+You get an embed/message with repos synced / failed / partial, duration and
+the first few failure reasons - so a broken sync tells you instead of
+waiting to be discovered.
 
-Any platform can use SSH instead of HTTPS:
+## Privacy: nothing personal in the code
 
-```jsonc
-"homelab": {"type": "forgejo", "protocol": "ssh",
-            "url": "http://192.168.0.10:3000", "ssh_port": 2222,
-            "owner": "you"}
-```
-
-`ssh_port` defaults to 22; your SSH keys must already be authorized with
-the platform. (Forgejo/Gitea often run SSH on a non-standard port.)
+This repository contains **no credentials, no tokens, no webhooks and no
+personal paths** - everything lives in your own
+`~/.config/gitsync/config.json` (gitignored, mode 0600). The tool is
+generic: any account, any folder, any direction.
 
 ## Scheduling
 
