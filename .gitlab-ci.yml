@@ -62,6 +62,16 @@ syntax-and-tests:
       assert [r["name"] for r in kept] == ["SeaVault", "Sea-Wallpaper"], kept
       kept = SY._filter_repos(repos, {"exclude": ["trade*"]})
       assert [r["name"] for r in kept] == ["SeaVault", "Sea-Wallpaper"], kept
+      # selective sync: 'only' is an exact, case-insensitive name list
+      only = SY._filter_repos(repos, {}, ["SEAVAULT", " tradex "])
+      assert [r["name"] for r in only] == ["SeaVault", "tradex"], only
+      # 'only' narrows whatever the route globs already kept
+      both = SY._filter_repos(repos, {"include": ["Sea*"]}, ["SeaVault", "tradex"])
+      assert [r["name"] for r in both] == ["SeaVault"], both
+      # a name that isn't there is dropped, an empty list filters nothing
+      assert SY._filter_repos(repos, {}, ["nope"]) == []
+      assert len(SY._filter_repos(repos, {}, [])) == 3
+      assert len(SY._filter_repos(repos, {}, None)) == 3
 
       # sparkline
       from gitsync import tui

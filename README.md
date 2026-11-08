@@ -105,6 +105,7 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **Discord alerts** | webhook notifications on failure/success — a broken backup tells you |
 | **Drift repair** | `gitsync fix` detects divergence across platforms and re-syncs |
 | **Repo filters** | per-route `include`/`exclude` globs |
+| **Selective sync** | browse the account's repos in the TUI (`E`) and sync only the ones you pick |
 | **Self-repair** | `doctor --fix` removes broken mirror shells automatically |
 | **Watch mode** | `gitsync watch --interval 60` for near-real-time sync |
 | **SSH transport** | `"protocol": "ssh"` per platform (+ `ssh_port`) |
@@ -136,7 +137,13 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync sync` | sync all routes now |
 | `gitsync sync --route main` | sync one route |
 | `gitsync sync --to gitlab` | push to **one target only** |
+| `gitsync sync --repos "tradex,SeaVault"` | sync **only these repos** |
+| `gitsync repos` | **browse the logged account's repo list** |
+| `gitsync repos --platform gitlab --forks` | list another account, forks included |
 | `gitsync mirror tradex` | sync a **single repo** |
+| `gitsync mirror tradex SeaVault` | sync **several repos at once** |
+| `gitsync mirror tradex --to backup` | one repo, **one target only** |
+| `gitsync mirror tradex --from gitlab` | pull from a **specific platform** |
 | `gitsync routes` | list routes |
 | `gitsync routes add NAME SRC t1,t2` | add a route — **any direction** |
 | `gitsync routes remove NAME` | remove a route |
@@ -153,11 +160,54 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync notify --test` | send a Discord test message |
 | `gitsync fix` | detect drift across platforms and repair it |
 | `gitsync watch --interval 60` | sync every 60 s in the foreground |
-| `gitsync sync --to gitlab` | push to one target only |
 | `gitsync install --schedule daily` | (re)install the scheduler |
 | `gitsync doctor` | full health check |
 | `gitsync ci` | run all checks locally — no CI provider needed |
 | `gitsync uninstall` | remove scheduler + symlink |
+
+---
+
+## Selective sync
+
+Full-account sync is the default, but you don't have to take all of it.
+
+**From the TUI** — press `E`:
+
+```
+ REPOS - 53 repos, 2 selected
+ [ ] 9router                pub  fork
+ [x] AceRoute               priv
+ [x] agentskills            pub
+ [ ] Amazmail               priv
+ ...
+ space=select  a=all  n=none  /=filter  S=sync all targets  L=local only  B=back
+```
+
+| Key | Action |
+|---|---|
+| `space` | select / deselect the repo under the cursor |
+| `a` / `n` | select **all** / **none** (respects the active filter) |
+| `/` | filter the list by name |
+| `S` | sync the selection to **every target** on the route |
+| `L` | clone/sync the selection to the **local hub only** |
+| `B` / `Esc` | back (Esc clears an active filter first) |
+
+**From the CLI:**
+
+```bash
+gitsync repos                                  # what's in the account?
+gitsync repos --forks --private-only           # filter the listing
+gitsync sync --repos "tradex,SeaVault"         # only these, all targets
+gitsync sync --repos tradex --to backup        # only these, one target
+gitsync mirror tradex SeaVault SeaDash         # several at once
+gitsync mirror tradex --to backup              # one repo, local only
+gitsync mirror tradex --from gitlab            # use another platform as source
+```
+
+`--repos` matches names **exactly** (case-insensitive) and applies on top of the
+route's `include`/`exclude` globs — so a repo excluded by the route stays
+excluded. Names that don't exist on the source are reported, not silently
+skipped.
 
 ---
 
@@ -180,7 +230,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 │ [52/52] OK   Sea-Wallpaper -> gitlab,forgejo,backup                   │
 │ === sync done: 52 ok, 0 failed, 37.8s ===                             │
 └───────────────────────────────────────────────────────────────────────┘
- [S]ync  [L]og  [H]istory  [C]chedule  [O]ptions  [A]ccounts  [Q]uit
+ [S]ync  [L]og  [H]istory  [C]chedule  [O]ptions  [A]ccounts  [E]repos  [Q]uit
 ```
 
 | Key | Action |
@@ -191,6 +241,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `C` | schedule: hourly / 6h / 12h / daily / OFF |
 | `O` | options: workers (1–8), mirror mode, include forks |
 | `A` | accounts & platforms (tokens, scopes, how to add more) |
+| `E` | **repo browser** — see the account's repos, pick some, sync just those |
 | `W` | re-run the setup wizard |
 | `R` / `P` | refresh platform connections |
 | `1`–`6` | switch tabs: Dashboard / Platforms / Routes / Log / History / Settings |

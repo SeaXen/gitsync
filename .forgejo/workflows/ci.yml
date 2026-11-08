@@ -68,6 +68,16 @@ jobs:
           repos = [{'name': 'SeaVault'}, {'name': 'tradex'}, {'name': 'Sea-Wallpaper'}]
           assert [r['name'] for r in SY._filter_repos(repos, {'include': ['Sea*']})] == ['SeaVault', 'Sea-Wallpaper']
           assert [r['name'] for r in SY._filter_repos(repos, {'exclude': ['trade*']})] == ['SeaVault', 'Sea-Wallpaper']
+          # selective sync: 'only' is an exact, case-insensitive name list
+          only = SY._filter_repos(repos, {}, ['SEAVAULT', ' tradex '])
+          assert [r['name'] for r in only] == ['SeaVault', 'tradex'], only
+          # 'only' narrows whatever the route globs already kept
+          both = SY._filter_repos(repos, {'include': ['Sea*']}, ['SeaVault', 'tradex'])
+          assert [r['name'] for r in both] == ['SeaVault'], both
+          # a name that isn't there is dropped, an empty list filters nothing
+          assert SY._filter_repos(repos, {}, ['nope']) == []
+          assert len(SY._filter_repos(repos, {}, [])) == 3
+          assert len(SY._filter_repos(repos, {}, None)) == 3
           spark = tui._sparkline([0, 5, 10])
           assert len(spark) == 3 and spark[0] == ' ' and spark[-1] == '@'
           print('all unit checks passed')

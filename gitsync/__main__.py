@@ -61,7 +61,9 @@ def cmd_sync(args):
         if not any(r.get("targets") for r in routes):
             print("no route targets '%s'" % args.to)
             return 2
-    t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet)
+    only = [r for r in (args.repos or "").split(",") if r.strip()]
+    t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet,
+                      only=only or None)
     print("\n%d ok, %d partial, %d failed of %d repos in %ss"
           % (t["ok"], t["partial"], t["failed"], t["repos"],
              t["elapsed_sec"]))
@@ -402,36 +404,103 @@ def _head_of(plat, repo):
     return out.split("\t")[0] if out else None
 
 
+def cmd_repos(args):
+    """list the repos of a platform's logged account"""
+    cfg = C.load_config()
+    name = args.platform
+    if not name:
+        routes = C.routes(cfg)
+        name = routes[0]["source"] if routes else None
+    if not name:
+        print("no platform configured - run: gitsync setup")
+        return 2
+    p = C.platform(cfg, name)
+    if not p:
+        print("no such platform: %s" % name)
+        return 2
+    plat = P.make(name, p)
+    try:
+        repos = plat.list_repos()
+    except Exception as e:
+        print("cannot list repos on %s: %s" % (name, e))
+        return 1
+    if not args.forks:
+        repos = [r for r in repos if not r.get("fork")]
+    if args.private_only:
+        repos = [r for r in repos if r.get("private")]
+    if args.public_only:
+        repos = [r for r in repos if not r.get("private")]
+    repos.sort(key=lambda r: r["name"].lower())
+    print("repos on %s (%d):\n" % (name, len(repos)))
+    for r in repos:
+        vis = "private" if r.get("private") else "public "
+        fork = " fork" if r.get("fork") else ""
+        print("  %-34s %s%s" % (r["name"][:34], vis, fork))
+    print("\nsync selected repos with:")
+    print("  gitsync mirror %s ...            # one or more repo names"
+          % (repos[0]["name"] if repos else "REPO"))
+    print("  gitsync sync --repos \"a,b,c\"     # only these repos")
+    return 0
+
+
 def cmd_mirror(args):
-    """sync a single repo through the first matching route"""
+    """sync one or more repos (from a platform, to its targets or --to)"""
+    from . import sync as SY
     cfg = C.load_config()
     routes = C.routes(cfg)
     if args.route:
         routes = [r for r in routes if r.get("name") == args.route]
+    if args.src:
+        routes = [r for r in routes if r.get("source") == args.src]
     if not routes:
-        print("no routes configured")
+        print("no matching route - configure one with: gitsync routes add")
         return 2
     route = routes[0]
-    sp = C.platform(cfg, route["source"])
-    source = P.make(route["source"], sp)
-    targets = {t: P.make(t, C.platform(cfg, t))
-               for t in route.get("targets", [])
-               if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")}
-    from . import sync as SY
-    repo = {"name": args.repo, "private": args.private,
-            "clone_url": args.url}
-    if not repo["clone_url"]:
-        for r in source.list_repos():
-            if r["name"] == args.repo:
-                repo = r
-                break
+    src_name = args.src or route["source"]
+    sp = C.platform(cfg, src_name)
+    if not sp or not sp.get("enabled"):
+        print("source platform '%s' is not enabled" % src_name)
+        return 2
+    source = P.make(src_name, sp)
+    tnames = [t for t in route.get("targets", [])
+              if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")]
+    if args.to:
+        if args.to not in tnames:
+            print("route '%s' has no target '%s' (has: %s)"
+                  % (route.get("name"), args.to, ", ".join(tnames) or "none"))
+            return 2
+        tnames = [args.to]
+    targets = {t: P.make(t, C.platform(cfg, t)) for t in tnames}
+    if not targets:
+        print("no targets - add one with: gitsync platforms add")
+        return 2
+    names = [r for r in args.repos if r.strip()]
+    try:
+        available = source.list_repos()
+    except Exception as e:
+        print("cannot list repos on %s: %s" % (src_name, e))
+        return 1
+    by_name = {r["name"].lower(): r for r in available}
+    ok = failed = 0
+    for name in names:
+        if args.url:
+            repo = {"name": name, "private": args.private,
+                    "clone_url": args.url}
+        elif name.lower() in by_name:
+            repo = by_name[name.lower()]
         else:
-            print("repo '%s' not found on %s" % (args.repo, route["source"]))
-            return 1
-    status, detail, errors = SY.sync_repo(repo, source, targets,
-                                          C.setting(cfg, "mode", "full"))
-    print("%s: %s %s" % (args.repo, status, detail))
-    return 0 if status == "ok" else 1
+            print("%s: not found on %s" % (name, src_name))
+            failed += 1
+            continue
+        status, detail, errors = SY.sync_repo(
+            repo, source, targets, C.setting(cfg, "mode", "full"))
+        print("%s: %s %s" % (name, status, detail))
+        if status in ("ok", "partial"):
+            ok += 1
+        else:
+            failed += 1
+    print("\n%d ok, %d failed" % (ok, failed))
+    return 0 if failed == 0 else 1
 
 
 def sh(cmd, timeout=30, stdin_text=None, cwd=None):
@@ -634,7 +703,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (15 assertions)", c_units)
+    check("unit checks (20 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -675,6 +744,16 @@ assert p._push_url('me', 'repo') == 'ssh://git@localhost:2222/me/repo.git'
 repos = [{'name': 'SeaVault'}, {'name': 'tradex'}, {'name': 'Sea-Wallpaper'}]
 assert [r['name'] for r in SY._filter_repos(repos, {'include': ['Sea*']})] == ['SeaVault', 'Sea-Wallpaper']
 assert [r['name'] for r in SY._filter_repos(repos, {'exclude': ['trade*']})] == ['SeaVault', 'Sea-Wallpaper']
+# selective sync: 'only' is an exact, case-insensitive name list
+only = SY._filter_repos(repos, {}, ['SEAVAULT', ' tradex '])
+assert [r['name'] for r in only] == ['SeaVault', 'tradex'], only
+# 'only' narrows whatever the route globs already kept
+both = SY._filter_repos(repos, {'include': ['Sea*']}, ['SeaVault', 'tradex'])
+assert [r['name'] for r in both] == ['SeaVault'], both
+# a name that isn't there is dropped, an empty list filters nothing
+assert SY._filter_repos(repos, {}, ['nope']) == []
+assert len(SY._filter_repos(repos, {}, [])) == 3
+assert len(SY._filter_repos(repos, {}, None)) == 3
 spark = tui._sparkline([0, 5, 10])
 assert len(spark) == 3 and spark[0] == ' ' and spark[-1] == '@'
 print('all unit checks passed')
@@ -811,6 +890,7 @@ def main(argv=None):
     sp = sub.add_parser("sync", help="run a sync now")
     sp.add_argument("--route", help="only this route")
     sp.add_argument("--to", help="only push to this platform")
+    sp.add_argument("--repos", help="comma-separated repo names to sync")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(func=cmd_sync)
 
@@ -867,12 +947,21 @@ def main(argv=None):
     sp.add_argument("--route", help="only this route")
     sp.set_defaults(func=cmd_compare)
 
-    sp = sub.add_parser("mirror", help="sync a single repo now")
-    sp.add_argument("repo")
+    sp = sub.add_parser("mirror", help="sync one or more repos now")
+    sp.add_argument("repos", nargs="+", help="repo names")
     sp.add_argument("--route", help="use this route")
-    sp.add_argument("--url", help="explicit clone URL (skip source lookup)")
+    sp.add_argument("--from", dest="src", help="source platform")
+    sp.add_argument("--to", help="only this target platform")
+    sp.add_argument("--url", help="explicit clone URL (single repo)")
     sp.add_argument("--private", action="store_true")
     sp.set_defaults(func=cmd_mirror)
+
+    sp = sub.add_parser("repos", help="list the repos of a platform")
+    sp.add_argument("--platform", help="platform name (default: route source)")
+    sp.add_argument("--forks", action="store_true", help="include forks")
+    sp.add_argument("--private-only", action="store_true")
+    sp.add_argument("--public-only", action="store_true")
+    sp.set_defaults(func=cmd_repos)
 
     sp = sub.add_parser("doctor", help="health check: everything")
     sp.add_argument("--fix", action="store_true",

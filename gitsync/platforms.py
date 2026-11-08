@@ -145,6 +145,7 @@ class GitHubPlatform:
             for r in json.loads(out):
                 repos.append({"name": r["name"], "private":
                               r.get("visibility") != "PUBLIC",
+                              "fork": bool(r.get("isFork")),
                               "clone_url": r["url"]})
             return repos
         # REST: owned repos, paginated
@@ -157,6 +158,7 @@ class GitHubPlatform:
             for r in out:
                 repos.append({"name": r["name"],
                               "private": bool(r.get("private")),
+                              "fork": bool(r.get("fork")),
                               "clone_url": self._clone_url(r["full_name"])})
             if len(out) < 100:
                 break
@@ -225,6 +227,7 @@ class GitLabPlatform:
             for p in out:
                 repos.append({"name": p["name"], "private":
                               p.get("visibility") == "private",
+                              "fork": bool(p.get("forked_from_project")),
                               "clone_url": self._url_with_token(
                                   p.get("http_url_to_repo"))})
             if len(out) < 100:
@@ -330,6 +333,7 @@ class ForgejoPlatform:
             for r in out:
                 repos.append({"name": r["name"],
                               "private": bool(r.get("private")),
+                              "fork": bool(r.get("fork")),
                               "clone_url": self._push_url(
                                   r["owner"]["login"], r["name"])})
             if len(out) < 50:
@@ -392,7 +396,7 @@ class LocalPlatform:
                                  cwd=full, timeout=30)
                 if rc == 0 and out.strip():
                     repos.append({"name": entry[:-4], "private": True,
-                                  "clone_url": full})
+                                  "fork": False, "clone_url": full})
         return repos
 
     def ensure_repo(self, repo):
@@ -464,6 +468,7 @@ class BitbucketPlatform:
             for r in out["values"]:
                 repos.append({"name": r["name"],
                               "private": bool(r.get("is_private")),
+                              "fork": False,
                               "clone_url": self._clone_url(
                                   r.get("links", {}).get("clone"))})
             nxt = out.get("next")

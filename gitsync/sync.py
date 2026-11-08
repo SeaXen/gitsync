@@ -116,8 +116,9 @@ def sync_repo(repo, source, targets, mode):
     return "ok", ",".join(pushed), []
 
 
-def _filter_repos(repos, route):
-    """route-level include/exclude globs on repo names"""
+def _filter_repos(repos, route, only=None):
+    """route-level include/exclude globs on repo names, plus an exact
+    'only' list (comma-separated names) for one-off selective syncs"""
     inc = route.get("include") or []
     exc = route.get("exclude") or []
     if inc:
@@ -126,10 +127,13 @@ def _filter_repos(repos, route):
     if exc:
         repos = [r for r in repos
                  if not any(fnmatch.fnmatch(r["name"], p) for p in exc)]
+    if only:
+        wanted = {n.strip().lower() for n in only if n.strip()}
+        repos = [r for r in repos if r["name"].lower() in wanted]
     return repos
 
 
-def run_sync(cfg=None, route_name=None, quiet=False):
+def run_sync(cfg=None, route_name=None, quiet=False, only=None):
     """Run all routes (or one). Returns a summary dict."""
     global _start
     # one run at a time — the timer and manual runs must never overlap
@@ -186,7 +190,7 @@ def run_sync(cfg=None, route_name=None, quiet=False):
             totals["failures"].append({"route": route.get("name"),
                                        "repo": "-", "error": str(e)[:200]})
             continue
-        repos = _filter_repos(repos, route)
+        repos = _filter_repos(repos, route, only)
         if not include_forks:
             # best-effort fork filter (platforms that expose it)
             repos = [r for r in repos if not r.get("fork", False)]

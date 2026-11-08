@@ -4,6 +4,41 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-09
+
+Selective sync: browse an account's repos and sync only the ones you pick,
+instead of always mirroring the whole account.
+
+### Added
+
+- **`gitsync repos`** — list the repos of any configured platform
+  (`--platform`, `--forks`, `--private-only`, `--public-only`). Forks are
+  hidden by default so you see your own repos first.
+- **Repo browser in the TUI** — press `E` to open a scrollable list of the
+  source account's repos with private/fork markers, live filtering (`/`),
+  multi-select (`space`, `a` = all, `n` = none) and a running count.
+  `S` syncs the selection to every target on the route, `L` clones it to
+  the local hub only, `B`/`Esc` goes back (Esc clears an active filter
+  first).
+- **`gitsync sync --repos "a,b,c"`** — run a sync restricted to specific
+  repos. Names match exactly (case-insensitive) and apply on top of the
+  route's `include`/`exclude` globs.
+- **Multi-repo `gitsync mirror`** — `mirror tradex SeaVault SeaDash` syncs
+  several repos in one call, plus `--from` to pick the source platform and
+  `--to` to restrict the target. Reports `N ok, M failed` at the end and
+  names any repo it could not find on the source.
+- **`fork` flag on every platform adapter** — `list_repos()` now reports
+  whether a repo is a fork (GitHub `isFork`/`fork`, GitLab
+  `forked_from_project`, Forgejo/Gitea `fork`), so forks can be filtered
+  out of listings.
+
+### Fixed
+
+- **Arrow keys, PgUp/PgDn and Home/End now work throughout the TUI** —
+  `stdscr.keypad(True)` was never enabled, so escape sequences arrived as
+  raw bytes instead of `curses.KEY_UP`/`KEY_DOWN`/`KEY_NPAGE`. This
+  affected every scrollable view, not just the new repo browser.
+
 ## [1.0.0] - 2026-11-08
 
 Initial public release.

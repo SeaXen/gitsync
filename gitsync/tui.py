@@ -2,8 +2,9 @@
 
 Tabs (number keys):  1 Dashboard  2 Platforms  3 Routes  4 Log  5 History
                       6 Settings
-Keys:  S sync now | / search (log/history) | arrows scroll | R refresh |
-       C schedule | O options | A accounts | W wizard | Q quit
+Keys:  S sync now | E repos (browse + selective sync) | / search |
+       arrows scroll | R refresh | C schedule | O options | A accounts |
+       N notify | W wizard | Q quit
 """
 
 import curses
@@ -42,6 +43,10 @@ state = {
     "tab": 0,
     "search": "",
     "search_mode": False,
+    "repo_list": [],        # [(name, private, fork)]
+    "repo_sel": set(),      # selected repo names
+    "repo_scroll": 0,
+    "repo_loaded": False,
 }
 
 
@@ -421,6 +426,160 @@ def notifications_screen(stdscr):
             flash("test: %s" % msg, 6)
 
 
+def load_repos():
+    """fetch the source platform's repo list (cached per R / per sync)"""
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if not routes:
+        flash("no routes configured", 6)
+        return
+    src = routes[0]["source"]
+    try:
+        repos = P.make(src, C.platform(cfg, src)).list_repos()
+    except Exception as e:
+        flash("cannot list repos on %s: %s" % (src, e), 8)
+        repos = []
+    state["repo_list"] = sorted(
+        [(r["name"], bool(r.get("private")), bool(r.get("fork")))
+         for r in repos], key=lambda t: t[0].lower())
+    state["repo_loaded"] = True
+    state["repo_scroll"] = 0
+    state["dirty"] = True
+
+
+def _local_target():
+    """name of the route's local-disk target (where 'L' clones to)"""
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if not routes:
+        return None
+    plats = cfg.get("platforms") or {}
+    for t in routes[0].get("targets", []):
+        p = plats.get(t) or {}
+        if p.get("type") == "local" and p.get("enabled", True):
+            return t
+    return None
+
+
+def repos_screen(stdscr):
+    """browse the source account's repos, pick some, sync just those"""
+    if not state["repo_loaded"]:
+        load_repos()
+    query = ""
+    scroll = state["repo_scroll"]
+    while True:
+        q = query.lower()
+        items = [r for r in state["repo_list"] if q in r[0].lower()]
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        n_sel = len(state["repo_sel"])
+        safe_add(stdscr, 0, 0,
+                 (" REPOS - %d repos, %d selected "
+                  % (len(state["repo_list"]), n_sel)).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        if q:
+            safe_add(stdscr, 1, 0,
+                     (" filter: %s (%d match) "
+                      % (query, len(items)))[:w - 1], curses.A_DIM)
+        rows = max(1, h - 4)
+        scroll = max(0, min(scroll, max(0, len(items) - 1)))
+        view = items[scroll:scroll + rows]
+        for i, (name, priv, fork) in enumerate(view):
+            mark = "[x]" if name in state["repo_sel"] else "[ ]"
+            attr = curses.color_pair(2) if name in state["repo_sel"] else 0
+            line = " %s %-30s %s%s" % (mark, name[:30],
+                                       "priv" if priv else "pub ",
+                                       " fork" if fork else "")
+            safe_add(stdscr, 2 + i, 0, line[:w - 1], attr)
+        if not view:
+            safe_add(stdscr, 2, 0, " (no matching repos)", curses.A_DIM)
+        safe_add(stdscr, h - 1, 0,
+                 (" space=select  a=all  n=none  /=filter  S=sync all targets"
+                  "  L=local only  B=back ").center(w - 1)[:w - 1],
+                 curses.A_REVERSE)
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch == 27:                      # Esc: clear filter first, then exit
+            if query:
+                query = ""
+                scroll = 0
+                continue
+            state["repo_scroll"] = scroll
+            return
+        if ch in (ord("b"), ord("B")):
+            state["repo_scroll"] = scroll
+            return
+        elif ch == curses.KEY_UP:
+            scroll = max(0, scroll - 1)
+        elif ch == curses.KEY_DOWN:
+            scroll = min(max(0, len(items) - 1), scroll + 1)
+        elif ch == curses.KEY_PPAGE:
+            scroll = max(0, scroll - rows)
+        elif ch == curses.KEY_NPAGE:
+            scroll = min(max(0, len(items) - 1), scroll + rows)
+        elif ch == ord(" "):
+            if view:
+                name = view[0][0]
+                if name in state["repo_sel"]:
+                    state["repo_sel"].discard(name)
+                else:
+                    state["repo_sel"].add(name)
+        elif ch in (ord("a"), ord("A")):
+            state["repo_sel"] = {n for n, _, _ in items}
+        elif ch in (ord("n"), ord("N")):
+            state["repo_sel"] = set()
+        elif ch == ord("/"):
+            query = prompt_line(stdscr, " filter: ")
+            scroll = 0
+        elif ch in (ord("s"), ord("S"), ord("l"), ord("L")):
+            if not state["repo_sel"]:
+                flash("nothing selected - press space on a repo", 5)
+                continue
+            cmd = ["python3", "-m", "gitsync", "sync", "--repos",
+                   ",".join(sorted(state["repo_sel"]))]
+            if ch in (ord("l"), ord("L")):
+                local = _local_target()
+                if not local:
+                    flash("no local-disk target in this route", 6)
+                    continue
+                cmd += ["--to", local]         # local hub only
+            state["repo_scroll"] = scroll
+            curses.def_prog_mode()
+            curses.endwin()
+            try:
+                subprocess.run(cmd, env=dict(os.environ,
+                                             PYTHONPATH=_app_dir()))
+                input("\npress Enter to return...")
+            finally:
+                curses.reset_prog_mode()
+                curses.curs_set(0)
+            state["repo_loaded"] = False
+            query = ""
+
+
+def prompt_line(stdscr, label):
+    """one-line text input at the bottom of the screen"""
+    curses.curs_set(1)
+    buf = ""
+    while True:
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, h - 1, 0, (label + buf + "_").ljust(w - 1)[:w - 1],
+                 curses.A_REVERSE)
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (10, 13, curses.KEY_ENTER):
+            break
+        if ch in (curses.KEY_BACKSPACE, 127, 8):
+            buf = buf[:-1]
+        elif ch == 27:
+            buf = ""
+            break
+        elif 32 <= ch < 127:
+            buf += chr(ch)
+    curses.curs_set(0)
+    return buf
+
+
 def history_screen(stdscr):
     recs = SYNC.last_records(40)
     if not recs:
@@ -592,7 +751,7 @@ def draw(stdscr):
     safe_add(stdscr, 2, 0, (" " + tab_bar(w) + " ").center(w - 1)[:w - 1],
              curses.A_REVERSE)
     foot = (" [1-6]tabs  [S]ync  [L]og  [C]ron  [O]pt  [A]cc  [N]otify  "
-            "[W]izard  [R]efresh  [Q]uit ")
+            "[E]repos  [W]izard  [R]efresh  [Q]uit ")
     if state["search_mode"]:
         foot = " filter: %s_   (Enter = apply, Esc = clear) " % state["search"]
     elif state["search"]:
@@ -876,6 +1035,7 @@ def main():
 
 def _run(stdscr):
     curses.curs_set(0)
+    stdscr.keypad(True)          # decode arrows/PgUp/PgDn as curses.KEY_*
     try:
         curses.set_escdelay(25)
     except (AttributeError, curses.error):
@@ -953,6 +1113,8 @@ def _run(stdscr):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("n"), ord("N")):
             notifications_screen(stdscr)
+        elif ch in (ord("e"), ord("E")):
+            repos_screen(stdscr)
         elif ch == ord("/"):
             state["search_mode"] = True
             state["search"] = ""
