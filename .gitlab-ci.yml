@@ -70,9 +70,3 @@ syntax-and-tests:
 
       print("all unit checks passed")
       PY
-  rules:
-    # run on pushes and merge requests to main, plus manual runs
-    - if: $CI_PIPELINE_SOURCE == "push"
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_PIPELINE_SOURCE == "web"
-    - if: $CI_PIPELINE_SOURCE == "schedule"
