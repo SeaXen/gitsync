@@ -48,6 +48,10 @@ DEFAULT_CONFIG = {
         "mode": "full",          # full = exact mirror (prunes), safe = never delete
         "schedule": "hourly",    # hourly | 6h | 12h | daily | off
         "include_forks": False,
+        "notify": {              # Discord webhook alerts
+            "discord_webhook": "",
+            "on": "failure",     # failure | success | always | never
+        },
     },
 }
 

@@ -5,6 +5,7 @@ repo, then pushed from the hub to each target. The hub makes the sync
 resumable and gives an offline copy for free.
 """
 
+import fnmatch
 import os
 import threading
 import time
@@ -12,10 +13,20 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from . import config as C
+from . import notify as NT
 from . import platforms as P
 
 _log_lock = threading.Lock()
 _start = None
+
+# live per-repo progress, read by the TUI while a sync runs
+progress = {"active": {}, "done": 0, "total": 0, "route": ""}
+
+
+def reset_progress():
+    progress["active"] = {}
+    progress["done"] = 0
+    progress["total"] = 0
 
 
 def log(msg):
@@ -105,6 +116,19 @@ def sync_repo(repo, source, targets, mode):
     return "ok", ",".join(pushed), []
 
 
+def _filter_repos(repos, route):
+    """route-level include/exclude globs on repo names"""
+    inc = route.get("include") or []
+    exc = route.get("exclude") or []
+    if inc:
+        repos = [r for r in repos
+                 if any(fnmatch.fnmatch(r["name"], p) for p in inc)]
+    if exc:
+        repos = [r for r in repos
+                 if not any(fnmatch.fnmatch(r["name"], p) for p in exc)]
+    return repos
+
+
 def run_sync(cfg=None, route_name=None, quiet=False):
     """Run all routes (or one). Returns a summary dict."""
     global _start
@@ -122,6 +146,7 @@ def run_sync(cfg=None, route_name=None, quiet=False):
                 "routes": 0, "skipped": "locked"}
 
     _start = time.time()
+    reset_progress()
     cfg = cfg or C.load_config()
     workers = int(C.setting(cfg, "workers", 4) or 4)
     mode = C.setting(cfg, "mode", "full")
@@ -153,6 +178,7 @@ def run_sync(cfg=None, route_name=None, quiet=False):
 
         log("=== route '%s': %s -> %s (workers=%d, mode=%s) ==="
             % (route.get("name"), sname, ", ".join(targets), workers, mode))
+        progress["route"] = route.get("name")
         try:
             repos = source.list_repos()
         except Exception as e:
@@ -160,6 +186,7 @@ def run_sync(cfg=None, route_name=None, quiet=False):
             totals["failures"].append({"route": route.get("name"),
                                        "repo": "-", "error": str(e)[:200]})
             continue
+        repos = _filter_repos(repos, route)
         if not include_forks:
             # best-effort fork filter (platforms that expose it)
             repos = [r for r in repos if not r.get("fork", False)]
@@ -169,8 +196,16 @@ def run_sync(cfg=None, route_name=None, quiet=False):
         done = {"n": 0}
         dlock = threading.Lock()
 
+        progress["total"] = len(repos)
+
         def work(repo):
-            status, detail, errors = sync_repo(repo, source, targets, mode)
+            progress["active"][repo["name"]] = "syncing"
+            try:
+                status, detail, errors = sync_repo(repo, source, targets,
+                                                   mode)
+            finally:
+                progress["active"].pop(repo["name"], None)
+                progress["done"] += 1
             with dlock:
                 done["n"] += 1
                 idx = done["n"]
@@ -215,6 +250,11 @@ def run_sync(cfg=None, route_name=None, quiet=False):
         % (totals["ok"], totals["partial"], totals["failed"],
            totals["repos"], elapsed))
     _record(totals)
+    try:
+        if NT.enabled(cfg):
+            NT.notify_run(cfg, totals)
+    except Exception as e:
+        log("  notification failed: %s" % e)
     return totals
 
 

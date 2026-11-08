@@ -15,12 +15,15 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 
 from . import __version__
 from . import config as C
 from . import permissions as PERM
 from . import platforms as P
 from . import scheduler as S
+from . import notify as NT
+from datetime import datetime
 from . import sync as SYNC
 
 
@@ -290,8 +293,14 @@ def cmd_routes(args):
         if any(r.get("name") == name for r in cfg.get("routes", [])):
             print("route '%s' already exists" % name)
             return 2
-        cfg.setdefault("routes", []).append(
-            {"name": name, "source": source, "targets": targets})
+        route = {"name": name, "source": source, "targets": targets}
+        if args.include:
+            route["include"] = [p.strip() for p in args.include.split(",")
+                                if p.strip()]
+        if args.exclude:
+            route["exclude"] = [p.strip() for p in args.exclude.split(",")
+                                if p.strip()]
+        cfg.setdefault("routes", []).append(route)
         C.save_config(cfg)
         print("route added: %s (%s -> %s)" % (name, source, ", ".join(targets)))
         return 0
@@ -424,10 +433,10 @@ def cmd_mirror(args):
     return 0 if status == "ok" else 1
 
 
-def sh(cmd, timeout=30, stdin_text=None):
+def sh(cmd, timeout=30, stdin_text=None, cwd=None):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
-                           timeout=timeout, input=stdin_text)
+                           timeout=timeout, input=stdin_text, cwd=cwd)
         return r.returncode, r.stdout, r.stderr
     except Exception as e:
         return 1, "", str(e)
@@ -490,9 +499,49 @@ def cmd_doctor(args):
               % (r.get("finished_at"), r.get("ok", 0), r.get("failed", 0)))
         if r.get("failed"):
             problems.append("last run had %d failures" % r["failed"])
+    if getattr(args, "fix", False):
+        fixed = _doctor_fix()
+        if fixed:
+            print("\nauto-repaired %d item(s):" % len(fixed))
+            for f in fixed:
+                print("  - %s" % f)
+            print("run 'gitsync sync' to re-clone them")
+        else:
+            print("\nnothing to auto-repair")
+
     print("\n" + ("ALL HEALTHY" if not problems
                   else "ISSUES: " + "; ".join(problems)))
     return 0 if not problems else 1
+
+
+def _doctor_fix():
+    """remove broken mirror shells so the next sync re-clones them"""
+    import shutil
+    fixed = []
+    hub = C.MIRROR_DIR
+    if not os.path.isdir(hub):
+        return fixed
+    for entry in sorted(os.listdir(hub)):
+        if not entry.endswith(".git"):
+            continue
+        path = os.path.join(hub, entry)
+        # a bare mirror with no refs is a failed clone -> remove it
+        rc, out, _ = sh(["git", "for-each-ref"], cwd=path, timeout=30)
+        if rc != 0 or not out.strip():
+            try:
+                shutil.rmtree(path)
+                fixed.append("removed broken mirror: %s" % entry)
+            except OSError as e:
+                fixed.append("could not remove %s: %s" % (entry, e))
+    # stale sync lock
+    lock = os.path.join(C.DATA_DIR, "sync.lock")
+    if os.path.exists(lock):
+        try:
+            os.remove(lock)
+            fixed.append("removed stale sync lock")
+        except OSError:
+            pass
+    return fixed
 
 
 def cmd_update(args):
@@ -527,6 +576,102 @@ def cmd_update(args):
     rc = subprocess.run(cmd).returncode
     print("updated" if rc == 0 else "update failed (rc=%d)" % rc)
     return rc
+
+
+def cmd_notify(args):
+    cfg = C.load_config()
+    if args.test:
+        ok, msg = NT.notify_test(cfg)
+        print("discord notification: %s" % msg)
+        return 0 if ok else 1
+    url, on = NT._settings(cfg)
+    print("discord webhook : %s" % ("configured" if url else "NOT configured"))
+    print("notify on       : %s" % on)
+    if not url:
+        print("\nset it with:")
+        print("  gitsync notify --set-url https://discord.com/api/webhooks/...")
+    return 0
+
+
+def cmd_fix(args):
+    """detect drift across a route and re-sync the mismatched repos"""
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if args.route:
+        routes = [r for r in routes if r.get("name") == args.route]
+    if not routes:
+        print("no routes configured")
+        return 2
+    fixed = failed = checked = 0
+    for route in routes:
+        sp = C.platform(cfg, route["source"])
+        if not sp or not sp.get("enabled"):
+            continue
+        source = P.make(route["source"], sp)
+        targets = {t: P.make(t, C.platform(cfg, t))
+                   for t in route.get("targets", [])
+                   if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")}
+        if not targets:
+            continue
+        try:
+            repos = source.list_repos()
+        except Exception as e:
+            print("  cannot list source: %s" % e)
+            continue
+        repos = SYNC._filter_repos(repos, route)
+        print("route %s: checking %d repos against %s..."
+              % (route.get("name"), len(repos), ", ".join(targets)))
+        mode = C.setting(cfg, "mode", "full")
+        for repo in repos:
+            checked += 1
+            try:
+                src_head = _head_of(source, repo)
+                drifted = []
+                for tname, tplat in targets.items():
+                    thead = _head_of(tplat, repo)
+                    if thead != src_head:
+                        drifted.append(tname)
+                if not drifted:
+                    continue
+                print("  fixing %-28s -> %s" % (repo["name"],
+                                                ", ".join(drifted)))
+                status, detail, errors = SYNC.sync_repo(repo, source, targets,
+                                                        mode)
+                if status in ("ok", "partial"):
+                    fixed += 1
+                else:
+                    failed += 1
+                    print("    FAILED: %s" % detail)
+            except Exception as e:
+                failed += 1
+                print("    error: %s" % str(e)[:80])
+    print("\nchecked %d repos: %d fixed, %d failed" % (checked, fixed, failed))
+    if NT.enabled(cfg) and (fixed or failed):
+        NT.send(cfg, "gitsync: drift repair",
+                [("Checked", str(checked), True),
+                 ("Fixed", str(fixed), True),
+                 ("Failed", str(failed), True)],
+                color="ok" if not failed else "warn")
+    return 0 if failed == 0 else 1
+
+
+def cmd_watch(args):
+    """foreground poller: sync every N seconds (faster than the hourly timer)"""
+    cfg = C.load_config()
+    interval = args.interval
+    print("gitsync watch: syncing every %ds — Ctrl+C to stop" % interval)
+    runs = 0
+    try:
+        while True:
+            runs += 1
+            t = SYNC.run_sync(cfg)
+            print("[%s] run #%d: %d ok, %d failed — next in %ds"
+                  % (datetime.now().strftime("%H:%M:%S"), runs, t["ok"],
+                     t["failed"], interval))
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        print("\nstopped after %d runs" % runs)
+        return 0
 
 
 def cmd_uninstall(args):
@@ -611,6 +756,8 @@ def main(argv=None):
                     choices=["list", "add", "remove"], default="list")
     sp.add_argument("rest", nargs="*",
                     help="add: NAME SOURCE t1,t2 | remove: NAME")
+    sp.add_argument("--include", help="comma-separated globs to include")
+    sp.add_argument("--exclude", help="comma-separated globs to skip")
     sp.set_defaults(func=cmd_routes)
 
     sp = sub.add_parser("compare", help="drift check: HEADs across platforms")
@@ -625,10 +772,25 @@ def main(argv=None):
     sp.set_defaults(func=cmd_mirror)
 
     sp = sub.add_parser("doctor", help="health check: everything")
+    sp.add_argument("--fix", action="store_true",
+                    help="auto-repair: remove broken mirror shells")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("update", help="update gitsync (keeps your config)")
     sp.set_defaults(func=cmd_update)
+
+    sp = sub.add_parser("notify", help="Discord notification settings")
+    sp.add_argument("--test", action="store_true", help="send a test message")
+    sp.add_argument("--set-url", help="set the Discord webhook URL")
+    sp.set_defaults(func=cmd_notify)
+
+    sp = sub.add_parser("fix", help="detect drift and re-sync mismatched repos")
+    sp.add_argument("--route", help="only this route")
+    sp.set_defaults(func=cmd_fix)
+
+    sp = sub.add_parser("watch", help="sync every N seconds in the foreground")
+    sp.add_argument("--interval", type=int, default=60)
+    sp.set_defaults(func=cmd_watch)
 
     sp = sub.add_parser("uninstall", help="remove scheduler + symlink")
     sp.add_argument("--yes", action="store_true")

@@ -24,6 +24,14 @@ def _norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
+def ssh_url(host, owner, name, port=None):
+    """scp-style SSH url: git@host:owner/name.git (port: ssh://git@host:port/...)"""
+    host = host.replace("https://", "").replace("http://", "").rstrip("/")
+    if port and int(port) != 22:
+        return "ssh://git@%s:%s/%s/%s.git" % (host, int(port), owner, name)
+    return "git@%s:%s/%s.git" % (host, owner, name)
+
+
 def _fs_safe(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
 
@@ -119,6 +127,8 @@ class GitHubPlatform:
                                           else out.get("message", out))
 
     def _clone_url(self, full_name):
+        if self.cfg.get("protocol") == "ssh":
+            return ssh_url(self.url, *full_name.split("/", 1))
         if self.token:
             return "https://x-access-token:%s@%s/%s.git" % (
                 self.token, self.url.replace("https://", ""), full_name)
@@ -223,6 +233,12 @@ class GitLabPlatform:
         return repos
 
     def _url_with_token(self, http_url):
+        if self.cfg.get("protocol") == "ssh" and http_url:
+            # https://gitlab.com/group/repo.git -> git@gitlab.com:group/repo.git
+            path = http_url.split("://", 1)[-1].split("/", 1)[-1]
+            if path.endswith(".git"):
+                path = path[:-4]
+            return ssh_url(self.url, *path.rsplit("/", 1))
         if self.token and http_url:
             return http_url.replace("://", "://oauth2:%s@" % self.token, 1)
         return http_url
@@ -294,6 +310,14 @@ class ForgejoPlatform:
                           else out))
 
     def _push_url(self, owner, name):
+        if self.cfg.get("protocol") == "ssh":
+            host = self.url.replace("https://", "").replace("http://", "")
+            if ":" in host:                     # strip the HTTP port
+                host = host.rsplit(":", 1)[0]
+            # the http port (3000/3002...) is NOT the ssh port - use ssh_port
+            # from the config, defaulting to standard 22
+            port = self.cfg.get("ssh_port") or 22
+            return ssh_url(host, owner, name, port)
         return "%s/%s/%s.git" % (self.url, owner, name)
 
     def list_repos(self):
@@ -422,6 +446,10 @@ class BitbucketPlatform:
                                           if isinstance(out, dict) else out)
 
     def _clone_url(self, clone_links):
+        if self.cfg.get("protocol") == "ssh":
+            for c in clone_links or []:
+                if c.get("name") == "ssh":
+                    return c["href"]
         for c in clone_links or []:
             if c.get("name") == "https":
                 return c["href"]

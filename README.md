@@ -100,6 +100,13 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **Parallel** | 4 repos in flight by default (tunable 1–8) |
 | **Mirror modes** | `full` (exact mirror, prunes deleted refs) or `safe` (never delete) |
 | **Adaptive UI** | compact layout on phones/narrow terminals — no "terminal too small" |
+| **Tabbed TUI** | 6 tabs (Dashboard/Platforms/Routes/Log/History/Settings), `/` search, sparklines, live per-repo progress |
+| **Discord alerts** | webhook notifications on failure/success — a broken backup tells you |
+| **Drift repair** | `gitsync fix` detects divergence across platforms and re-syncs |
+| **Repo filters** | per-route `include`/`exclude` globs |
+| **Self-repair** | `doctor --fix` removes broken mirror shells automatically |
+| **Watch mode** | `gitsync watch --interval 60` for near-real-time sync |
+| **SSH transport** | `"protocol": "ssh"` per platform (+ `ssh_port`) |
 | **Zero dependencies** | Python 3.8+ standard library only. No pip. No npm. |
 
 ---
@@ -138,6 +145,10 @@ gitsync doctor          # full diagnostics
 | `gitsync scopes` | required token scopes per platform |
 | `gitsync log -n 50` | last 50 log lines |
 | `gitsync records` | run history with failure details |
+| `gitsync notify --test` | send a Discord test message |
+| `gitsync fix` | detect drift across platforms and repair it |
+| `gitsync watch --interval 60` | sync every 60 s in the foreground |
+| `gitsync sync --to gitlab` | push to one target only |
 | `gitsync install --schedule daily` | (re)install the scheduler |
 | `gitsync doctor` | full health check |
 | `gitsync uninstall` | remove scheduler + symlink |
@@ -176,6 +187,8 @@ gitsync doctor          # full diagnostics
 | `A` | accounts & platforms (tokens, scopes, how to add more) |
 | `W` | re-run the setup wizard |
 | `R` / `P` | refresh platform connections |
+| `1`–`6` | switch tabs: Dashboard / Platforms / Routes / Log / History / Settings |
+| `/` | search-filter the log or history |
 | `Q` | quit (Esc = back inside menus) |
 
 **Adaptive:** switches to a compact single-column layout on phones and narrow
@@ -240,6 +253,41 @@ You can enable **several platforms of the same type** — two Forgejo servers,
 GitHub plus a self-hosted Gitea, each with its own token and route.
 
 ---
+
+## Notifications (Discord)
+
+```bash
+gitsync notify                       # show the current setup
+gitsync notify --test                # send a test message
+```
+
+Configure in `~/.config/gitsync/config.json`:
+
+```jsonc
+"settings": {
+    "notify": {
+        "discord_webhook": "https://discord.com/api/webhooks/...",
+        "on": "failure"          // failure | success | always | never
+    }
+}
+```
+
+You get an embed with repos synced / failed / partial, duration, and the
+first few failure reasons — so a broken sync tells you instead of waiting
+to be discovered.
+
+## SSH transport
+
+Any platform can use SSH instead of HTTPS:
+
+```jsonc
+"homelab": {"type": "forgejo", "protocol": "ssh",
+            "url": "http://192.168.0.222:3002", "ssh_port": 2222,
+            "owner": "you"}
+```
+
+`ssh_port` defaults to 22; your SSH keys must already be authorized with
+the platform. (Forgejo/Gitea often run SSH on a non-standard port.)
 
 ## Scheduling
 
