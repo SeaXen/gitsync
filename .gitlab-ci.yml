@@ -1,0 +1,78 @@
+# gitsync CI — runs the same checks as .github/workflows/ci.yml
+# Hosted on GitLab because GitHub Actions is disabled for this account.
+
+stages:
+  - check
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+syntax-and-tests:
+  stage: check
+  image: python:3.8-slim
+  before_script:
+    - python3 --version
+  script:
+    # 1. python syntax
+    - python3 -m py_compile gitsync/*.py
+    # 2. shell syntax (installers)
+    - bash -n install.sh
+    - bash -n quickinstall.sh
+    # 3. CLI smoke tests
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync --version
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync --help > /dev/null
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync scopes | grep -q "GitHub"
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync platforms --help > /dev/null
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync routes --help > /dev/null
+    # 4. pure-logic unit checks
+    - |
+      PYTHONPATH=$CI_PROJECT_DIR python3 - <<'PY'
+      from gitsync import platforms as P
+      from gitsync import config as C
+      from gitsync import notify as NT
+
+      # URL builders
+      assert P.ssh_url("https://github.com", "me", "repo") == "git@github.com:me/repo.git"
+      assert P.ssh_url("git.example.com", "me", "repo", 2222) == "ssh://git@git.example.com:2222/me/repo.git"
+      assert P.ssh_url("https://codeberg.org", "me", "repo") == "git@codeberg.org:me/repo.git"
+      assert P._norm("My-Repo.Name") == "myreponame"
+      assert P._fs_safe("a b/c") == "a_b_c"
+
+      # schedule table
+      assert set(C.SCHEDULES) == {"hourly", "6h", "12h", "daily", "off"}
+      assert C.SCHEDULES["hourly"]["cron"] == "0 * * * *"
+      assert C.SCHEDULES["daily"]["calendar"] == "*-*-* 03:00:00"
+
+      # notification defaults are inert (no credentials -> no send)
+      cfg = {"settings": {"notify": {}}}
+      assert NT.enabled(cfg) is False
+      assert NT.send(cfg, "t", [], color="info") is True  # nothing configured = no-op
+
+      # platform factory
+      p = P.make("gh", {"type": "github", "url": "https://github.com"})
+      assert isinstance(p, P.GitHubPlatform)
+      p = P.make("fj", {"type": "forgejo", "url": "http://localhost:3002",
+                        "protocol": "ssh", "ssh_port": 2222, "owner": "me"})
+      assert p._push_url("me", "repo") == "ssh://git@localhost:2222/me/repo.git"
+
+      # route filters
+      repos = [{"name": "SeaVault"}, {"name": "tradex"}, {"name": "Sea-Wallpaper"}]
+      from gitsync import sync as SY
+      kept = SY._filter_repos(repos, {"include": ["Sea*"]})
+      assert [r["name"] for r in kept] == ["SeaVault", "Sea-Wallpaper"], kept
+      kept = SY._filter_repos(repos, {"exclude": ["trade*"]})
+      assert [r["name"] for r in kept] == ["SeaVault", "Sea-Wallpaper"], kept
+
+      # sparkline
+      from gitsync import tui
+      spark = tui._sparkline([0, 5, 10])
+      assert len(spark) == 3 and spark[0] == " " and spark[-1] == "@", spark
+
+      print("all unit checks passed")
+      PY
+  rules:
+    # run on pushes and merge requests to main, plus manual runs
+    - if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_PIPELINE_SOURCE == "web"
+    - if: $CI_PIPELINE_SOURCE == "schedule"

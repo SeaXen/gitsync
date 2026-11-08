@@ -57,5 +57,6 @@ jobs:
           # notification defaults are inert
           cfg = {"settings": {"notify": {}}}
           assert NT.enabled(cfg) is False
+          assert NT.send(cfg, "t", [], color="info") is True  # nothing configured = no-op
           print("unit checks passed")
           PY
