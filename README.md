@@ -123,13 +123,18 @@ gitsync doctor          # full diagnostics
 | `gitsync setup` | guided first-run configuration |
 | `gitsync sync` | sync all routes now |
 | `gitsync sync --route main` | sync one route |
+| `gitsync sync --to gitlab` | push to **one target only** |
 | `gitsync mirror tradex` | sync a **single repo** |
 | `gitsync routes` | list routes |
 | `gitsync routes add NAME SRC t1,t2` | add a route — **any direction** |
 | `gitsync routes remove NAME` | remove a route |
 | `gitsync compare` | **drift check** — compare HEADs across platforms |
 | `gitsync status` | platforms, routes, scheduler, last run |
-| `gitsync platforms` | test every platform connection |
+| `gitsync platforms` | list accounts + test every connection |
+| `gitsync platforms add NAME --type gitlab --token glpat-...` | **add an account** (no wizard needed) |
+| `gitsync platforms edit NAME --token ... --url ... --owner ...` | **edit an account** |
+| `gitsync platforms remove NAME` | **remove an account** (warns if a route uses it) |
+| `gitsync platforms test [NAME]` | test one or all connections |
 | `gitsync scopes` | required token scopes per platform |
 | `gitsync log -n 50` | last 50 log lines |
 | `gitsync records` | run history with failure details |
