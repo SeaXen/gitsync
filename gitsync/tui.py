@@ -189,15 +189,17 @@ def menu(stdscr, title, items, note=None):
                  curses.A_BOLD | curses.color_pair(1))
         if note:
             safe_add(stdscr, 1, 0, " %s" % note[:w - 2], curses.A_DIM)
+        lbl_w = max(12, min(40, w - 16))     # adapt to narrow screens
         for i, (label, right, _) in enumerate(items):
             if 3 + i >= h - 1:
                 break
             attr = curses.A_REVERSE if i == idx else 0
             safe_add(stdscr, 3 + i, 0,
-                     ("  %-40s %s" % (label[:40], right or ""))[:w - 1], attr)
+                     ("  %-*s %s" % (lbl_w, label[:lbl_w],
+                                     right or ""))[:w - 1], attr)
         safe_add(stdscr, h - 1, 0,
-                 " up/down = move, Enter = select, B/Esc = back "
-                 .center(w - 1)[:w - 1], curses.A_REVERSE)
+                 " up/dn=move Enter=ok B=back ".center(w - 1)[:w - 1],
+                 curses.A_REVERSE)
         commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
@@ -312,7 +314,7 @@ def accounts_screen(stdscr):
             attr = curses.A_BOLD if line.isupper() and line.strip() else 0
             safe_add(stdscr, 1 + i, 0, line[:w - 1], attr)
         safe_add(stdscr, h - 1, 0,
-                 " up/down = scroll, B/Esc = back ".center(w - 1)[:w - 1],
+                 " up/dn=scroll B=back ".center(w - 1)[:w - 1],
                  curses.A_REVERSE)
         commit_screen(stdscr)
         ch = stdscr.getch()
@@ -348,7 +350,7 @@ def history_screen(stdscr):
         for i, line in enumerate(lines[scroll:scroll + h - 2]):
             safe_add(stdscr, 1 + i, 0, line[:w - 1])
         safe_add(stdscr, h - 1, 0,
-                 " up/down = scroll, B/Esc = back ".center(w - 1)[:w - 1],
+                 " up/dn=scroll B=back ".center(w - 1)[:w - 1],
                  curses.A_REVERSE)
         commit_screen(stdscr)
         ch = stdscr.getch()
@@ -439,26 +441,74 @@ def update_clock(stdscr):
 def draw(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
-    if h < 18 or w < 70:
-        safe_add(stdscr, 0, 0, "terminal too small (need >= 70x18)",
-                 curses.A_BOLD)
+    if h < 10 or w < 34:
+        safe_add(stdscr, 0, 0,
+                 "terminal too small (need ~34x10) - rotate to "
+                 "landscape or widen the window", curses.A_BOLD)
         commit_screen(stdscr)
         return
+
     Cc, G, Y, R = (curses.color_pair(1), curses.color_pair(2),
                    curses.color_pair(3), curses.color_pair(4))
     dim = curses.A_DIM
-
-    sched = C.setting(C.load_config(), "schedule", "hourly")
-    age = int(time.time() - state["counts_age"])
-    age_txt = "loading..." if not state["platforms"] else (
-        "%ds" % age if age < 3600 else "stale")
+    compact = h < 18 or w < 70      # phones / narrow splits
 
     safe_add(stdscr, 0, 0,
-             (" gitsync %s — repository sync control " % __version__)
-             .center(w - 1)[:w - 1], curses.A_BOLD | Cc)
+             (" gitsync %s " % __version__).center(w - 1)[:w - 1],
+             curses.A_BOLD | Cc)
     safe_add(stdscr, 1, 0, status_line().ljust(w - 1)[:w - 1], dim)
 
-    # platforms
+    if compact:
+        # ---------------- compact (mobile) layout ----------------
+        row = 3
+        lr = (state.get("records") or [{}])[-1] or {}
+        if lr.get("finished_at"):
+            attr = R if (lr.get("failed") or lr.get("forgejo_failed")) else G
+            safe_add(stdscr, row, 0,
+                     (" last: %s ok, %s fail of %s (%ss)"
+                      % (lr.get("synced_ok", "?"), lr.get("failed", "?"),
+                         lr.get("github_repos", "?"),
+                         lr.get("elapsed_sec", "?")))[:w - 1], attr)
+            row += 1
+        safe_add(stdscr, row, 0,
+                 (" cron: %s | %s" % (cached_status()[:26],
+                                      "SYNCING..." if state["syncing"]
+                                      else "idle"))[:w - 1], dim)
+        row += 2
+
+        # platforms: condensed line(s), wrapped to the width
+        plats = state["platforms"]
+        if plats:
+            txt = " ".join("%s:%s%s" % (n[:10], "OK" if ok else "FAIL",
+                                        "" if on else "(off)")
+                           for n, _t, on, ok, _i, _c in plats)
+            while txt and row < h - 3:
+                safe_add(stdscr, row, 0, txt[:w - 1],
+                         G if "FAIL" not in txt else R)
+                txt = txt[w - 1:]
+                row += 1
+        else:
+            safe_add(stdscr, row, 0, " platforms: loading...", dim)
+            row += 1
+
+        # log fills the rest
+        row += 1
+        lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
+        avail = max(0, h - row - 1)
+        for i, line in enumerate(lines[-avail:][:avail] if avail else []):
+            attr = 0
+            if "FAIL" in line or "failed" in line.lower():
+                attr = R
+            elif " OK " in line or "done" in line:
+                attr = G
+            safe_add(stdscr, row + i, 0, line[:w - 1], attr)
+        foot = " [S]ync [L]og [C]ron [O]pt [A]cc [Q]uit "
+        safe_add(stdscr, h - 1, 0, foot.center(w - 1)[:w - 1],
+                 curses.A_REVERSE | curses.A_BOLD)
+        commit_screen(stdscr)
+        return
+
+    # ---------------- full (desktop) layout ----------------
     top, ph = 3, min(len(state["platforms"]) + 2, 8)
     pw = curses.newwin(ph, w - 2, top, 1)
     box(pw, "PLATFORMS")
@@ -471,7 +521,6 @@ def draw(stdscr):
                      count, info))[:w - 6], attr)
     pw.noutrefresh()
 
-    # routes + settings
     top2 = top + ph
     rh = 3
     rw = curses.newwin(rh, w - 2, top2, 1)
@@ -486,11 +535,10 @@ def draw(stdscr):
                            cached_status()))[:w - 6], dim)
     rw.noutrefresh()
 
-    # log
     top3 = top2 + rh
     log_h = h - top3 - 2
     lw = curses.newwin(log_h, w - 2, top3, 1)
-    box(lw, "LOG (live tail — L for full log, H for history)")
+    box(lw, "LOG (live tail - L for full log, H for history)")
     lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
     for i, line in enumerate(lines[-(log_h - 2):][:log_h - 2]):
         attr = 0
@@ -511,8 +559,6 @@ def draw(stdscr):
              curses.A_REVERSE | curses.A_BOLD)
     commit_screen(stdscr)
 
-
-# ---------------------------------------------------------------- main
 
 def main():
     if not sys.stdout.isatty():
