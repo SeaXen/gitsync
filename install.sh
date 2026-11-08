@@ -86,6 +86,9 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+Environment=HOME=%h
+Environment=GH_CONFIG_DIR=%h/.config/gh
+Environment=XDG_CONFIG_HOME=%h/.config
 ExecStart=$INSTALL_DIR/bin/gitsync sync --quiet
 StandardOutput=journal
 StandardError=journal

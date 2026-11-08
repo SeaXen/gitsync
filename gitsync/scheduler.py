@@ -17,6 +17,10 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
+# gh/glab read their config from $HOME — systemd does not set it by default
+Environment=HOME=%h
+Environment=GH_CONFIG_DIR=%h/.config/gh
+Environment=XDG_CONFIG_HOME=%h/.config
 ExecStart={gitsync} sync --quiet
 StandardOutput=journal
 StandardError=journal
