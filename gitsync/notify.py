@@ -1,14 +1,19 @@
-"""Notifications: Discord webhooks (and a generic HTTP hook) for sync results.
+"""Notifications: Discord webhooks and Telegram bot messages for sync results.
 
 Config (~/.config/gitsync/config.json):
     "settings": {
         "notify": {
             "discord_webhook": "https://discord.com/api/webhooks/...",
+            "telegram_token":  "123456:ABC-DEF...",
+            "telegram_chat_id": "123456789",
             "on": "failure"          // failure | success | always | never
         }
     }
 
-Environment overrides: GITSYNC_DISCORD_WEBHOOK, GITSYNC_NOTIFY_ON
+Environment overrides: GITSYNC_DISCORD_WEBHOOK, GITSYNC_TELEGRAM_TOKEN,
+GITSYNC_TELEGRAM_CHAT_ID, GITSYNC_NOTIFY_ON
+
+All credentials live in the user's own config file - never in the code.
 """
 
 import json
@@ -29,17 +34,22 @@ def _settings(cfg):
     return url, on
 
 
-def enabled(cfg):
-    url, on = _settings(cfg)
-    return bool(url) and on != "never"
+def _telegram(cfg):
+    n = (cfg.get("settings", {}) or {}).get("notify", {}) or {}
+    token = (n.get("telegram_token")
+             or os.environ.get("GITSYNC_TELEGRAM_TOKEN", ""))
+    chat = (n.get("telegram_chat_id")
+            or os.environ.get("GITSYNC_TELEGRAM_CHAT_ID", ""))
+    return token, chat
 
 
-def _post(url, payload):
+def _post_raw(url, payload, headers=None):
     data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=data, method="POST",
-        headers={"Content-Type": "application/json",
-                 "User-Agent": "gitsync/1.0 (+https://github.com/SeaXen/gitsync)"})
+    h = {"Content-Type": "application/json",
+         "User-Agent": "gitsync/1.0 (+https://github.com/SeaXen/gitsync)"}
+    if headers:
+        h.update(headers)
+    req = urllib.request.Request(url, data=data, method="POST", headers=h)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
             return r.status in (200, 204)
@@ -47,9 +57,41 @@ def _post(url, payload):
         return False
 
 
-def send(cfg, title, fields, color="ok", content=None):
-    """send a Discord embed. fields = [(name, value, inline)]"""
+def enabled(cfg):
     url, on = _settings(cfg)
+    tg_token, tg_chat = _telegram(cfg)
+    return bool((url or (tg_token and tg_chat))) and on != "never"
+
+
+def _post(url, payload):
+    return _post_raw(url, payload)
+
+
+def telegram_send(cfg, text):
+    """send a plain message via the Telegram Bot API"""
+    token, chat = _telegram(cfg)
+    if not token or not chat:
+        return False
+    url = "https://api.telegram.org/bot%s/sendMessage" % token
+    return _post_raw(url, {"chat_id": chat, "text": text[:4000],
+                           "disable_web_page_preview": True})
+
+
+def send(cfg, title, fields, color="ok", content=None):
+    """send to Discord (embed) and/or Telegram (plain text)"""
+    url, on = _settings(cfg)
+    ok_d = True
+    if url:
+        ok_d = _send_discord(url, title, fields, color, content)
+    token, chat = _telegram(cfg)
+    if token and chat:
+        lines = [title] + ["%s: %s" % (n, v) for n, v, _ in fields]
+        ok_t = telegram_send(cfg, "\n".join(lines))
+        return ok_d and ok_t
+    return ok_d
+
+
+def _send_discord(url, title, fields, color="ok", content=None):
     if not url:
         return False
     embed = {
@@ -102,13 +144,20 @@ def notify_run(cfg, summary):
 
 def notify_test(cfg):
     url, on = _settings(cfg)
-    if not url:
-        return False, "no webhook configured"
-    ok = send(cfg, "gitsync: test notification",
-              [("Status", "notifications are working", False),
-               ("Mode", on, True)],
-              color="info")
-    return ok, ("sent" if ok else "discord rejected the request")
+    token, chat = _telegram(cfg)
+    if not url and not (token and chat):
+        return False, "nothing configured"
+    results = []
+    if url:
+        ok = _send_discord(url, "gitsync: test notification",
+                           [("Status", "notifications are working", False),
+                            ("Mode", on, True)], color="info")
+        results.append("discord: %s" % ("sent" if ok else "FAILED"))
+    if token and chat:
+        ok = telegram_send(cfg, "gitsync: test notification\nmode: %s" % on)
+        results.append("telegram: %s" % ("sent" if ok else "FAILED"))
+    ok = "FAILED" not in " ".join(results)
+    return ok, ", ".join(results)
 
 
 # ---------------------------------------------------------------- progress

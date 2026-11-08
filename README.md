@@ -162,8 +162,8 @@ gitsync doctor          # full diagnostics
  2026-11-08 09:14:22  syncing: no  schedule: Every hour  counts: 3s old
 ┌ PLATFORMS ────────────────────────────────────────────────────────────┐
 │ github      github    ON   OK    repos=53    gh CLI authenticated    │
-│ gitlab      gitlab    ON   OK    repos=56    token OK — user seaxen   │
-│ forgejo     forgejo   ON   OK    repos=56    token OK — user sagar    │
+│ gitlab      gitlab    ON   OK    repos=56    token OK — user alice   │
+│ forgejo     forgejo   ON   OK    repos=56    token OK — user bob    │
 │ backup      local     ON   OK    repos=53    folder ready: /mnt/...   │
 └───────────────────────────────────────────────────────────────────────┘
 ┌ ROUTES & SETTINGS ────────────────────────────────────────────────────┐
@@ -282,7 +282,7 @@ Any platform can use SSH instead of HTTPS:
 
 ```jsonc
 "homelab": {"type": "forgejo", "protocol": "ssh",
-            "url": "http://192.168.0.222:3002", "ssh_port": 2222,
+            "url": "http://192.168.0.10:3000", "ssh_port": 2222,
             "owner": "you"}
 ```
 

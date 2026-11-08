@@ -18,6 +18,7 @@ from datetime import datetime
 
 from . import __version__
 from . import config as C
+from . import notify as NT
 from . import permissions as PERM
 from . import platforms as P
 from . import scheduler as S
@@ -322,6 +323,104 @@ def accounts_screen(stdscr):
     _scroll_view(stdscr, " ACCOUNTS & PLATFORMS ", lines)
 
 
+def _input_line(stdscr, prompt, secret=False):
+    """single-line text input (used by the notifications setup screen)"""
+    h, w = stdscr.getmaxyx()
+    text = ""
+    curses.curs_set(1)
+    try:
+        while True:
+            stdscr.erase()
+            safe_add(stdscr, 0, 0, (" %s " % prompt).center(w - 1)[:w - 1],
+                     curses.A_BOLD | curses.color_pair(1))
+            shown = ("*" * len(text)) if secret else text
+            safe_add(stdscr, 2, 1, "> %s_" % shown[:w - 6])
+            safe_add(stdscr, h - 1, 0,
+                     " type, Enter = save, Esc = cancel ".center(w - 1)[:w - 1],
+                     curses.A_REVERSE)
+            commit_screen(stdscr)
+            ch = stdscr.getch()
+            if ch in (27,):
+                return None
+            if ch in (10, 13, curses.KEY_ENTER):
+                return text.strip()
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                text = text[:-1]
+            elif 32 <= ch < 127:
+                text += chr(ch)
+    finally:
+        curses.curs_set(0)
+
+
+def notifications_screen(stdscr):
+    """add / edit / test Discord + Telegram notification channels"""
+    cfg = C.load_config()
+    while True:
+        n = cfg.get("settings", {}).get("notify", {}) or {}
+        d_url = n.get("discord_webhook", "")
+        t_tok = n.get("telegram_token", "")
+        t_chat = n.get("telegram_chat_id", "")
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0, " NOTIFICATIONS ".center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        G, R, dim = (curses.color_pair(2), curses.color_pair(4),
+                     curses.A_DIM)
+        safe_add(stdscr, 2, 1, "Discord webhook : %s"
+                 % ("configured" if d_url else "not set"),
+                 G if d_url else dim)
+        if d_url:
+            safe_add(stdscr, 3, 1, "  %s...%s" % (d_url[:38], d_url[-12:]),
+                     dim)
+        safe_add(stdscr, 4, 1, "Telegram bot    : %s"
+                 % ("configured" if t_tok else "not set"),
+                 G if t_tok else dim)
+        if t_tok:
+            safe_add(stdscr, 5, 1, "  chat id: %s" % (t_chat or "(missing)"),
+                     dim)
+        safe_add(stdscr, 7, 1, "Notify on       : %s"
+                 % n.get("on", "failure"), curses.A_BOLD)
+        safe_add(stdscr, 9, 1, "credentials are stored in YOUR config file",
+                 dim)
+        safe_add(stdscr, 10, 1, "(%s) - never in the code" % C.CONFIG_FILE,
+                 dim)
+        safe_add(stdscr, h - 1, 0,
+                 " [D]iscord  [T]elegram  [M]ode  [Enter]test  [B]ack "
+                 .center(w - 1)[:w - 1], curses.A_REVERSE)
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        elif ch in (ord("d"), ord("D")):
+            val = _input_line(stdscr, "Discord webhook URL", secret=True)
+            if val is not None:
+                cfg.setdefault("settings", {}).setdefault("notify", {})
+                cfg["settings"]["notify"]["discord_webhook"] = val
+                C.save_config(cfg)
+                flash("discord webhook saved")
+        elif ch in (ord("t"), ord("T")):
+            tok = _input_line(stdscr, "Telegram bot token", secret=True)
+            if tok:
+                chat = _input_line(stdscr, "Telegram chat id")
+                if chat is not None:
+                    cfg.setdefault("settings", {}).setdefault("notify", {})
+                    cfg["settings"]["notify"]["telegram_token"] = tok
+                    cfg["settings"]["notify"]["telegram_chat_id"] = chat
+                    C.save_config(cfg)
+                    flash("telegram credentials saved")
+        elif ch in (ord("m"), ord("M")):
+            order = ["failure", "success", "always", "never"]
+            cur = n.get("on", "failure")
+            cfg["settings"]["notify"]["on"] = \
+                order[(order.index(cur) + 1) % len(order)] \
+                if cur in order else "failure"
+            C.save_config(cfg)
+            flash("notify on: %s" % cfg["settings"]["notify"]["on"])
+        elif ch in (10, 13, curses.KEY_ENTER):
+            ok, msg = NT.notify_test(cfg)
+            flash("test: %s" % msg, 6)
+
+
 def history_screen(stdscr):
     recs = SYNC.last_records(40)
     if not recs:
@@ -492,7 +591,7 @@ def draw(stdscr):
     # tab bar + footer
     safe_add(stdscr, 2, 0, (" " + tab_bar(w) + " ").center(w - 1)[:w - 1],
              curses.A_REVERSE)
-    foot = (" [1-6]tabs  [S]ync  [L]og  [C]ron  [O]pt  [A]cc  "
+    foot = (" [1-6]tabs  [S]ync  [L]og  [C]ron  [O]pt  [A]cc  [N]otify  "
             "[W]izard  [R]efresh  [Q]uit ")
     if state["search_mode"]:
         foot = " filter: %s_   (Enter = apply, Esc = clear) " % state["search"]
@@ -598,6 +697,8 @@ def draw_settings(stdscr, h, w, dim):
         ("Schedule           : %s" % st.get("schedule", "hourly"), 0),
         ("Discord webhook    : %s"
          % ("configured" if notify.get("discord_webhook") else "not set"), 0),
+        ("Telegram bot       : %s"
+         % ("configured" if notify.get("telegram_token") else "not set"), 0),
         ("Notify on          : %s" % notify.get("on", "failure"), 0),
         ("Scheduler          : %s" % cached_status(), 0),
         ("Config file        : %s" % C.CONFIG_FILE, dim),
@@ -850,6 +951,8 @@ def _run(stdscr):
             launch_wizard(stdscr)
         elif ch in (ord("r"), ord("R"), ord("p"), ord("P")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
+        elif ch in (ord("n"), ord("N")):
+            notifications_screen(stdscr)
         elif ch == ord("/"):
             state["search_mode"] = True
             state["search"] = ""
