@@ -85,6 +85,14 @@ def sync_repo(repo, source, targets, mode):
                 errors.append("%s: %s" % (tname, err.strip()[:120]))
             else:
                 pushed.append(tname)
+                if tplat.ptype == "local":
+                    # git init --bare defaults HEAD to master; point it at the
+                    # branch we actually pushed so clones are not empty
+                    rc2, head_ref, _ = P.run(["git", "symbolic-ref", "HEAD"],
+                                             cwd=hub, timeout=30)
+                    if rc2 == 0 and head_ref.strip():
+                        P.run(["git", "-C", push_url, "symbolic-ref",
+                               "HEAD", head_ref.strip()], timeout=30)
         except Exception as e:
             errors.append("%s: %s" % (tname, str(e)[:120]))
 

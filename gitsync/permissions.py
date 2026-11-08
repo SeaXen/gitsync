@@ -62,6 +62,33 @@ GUIDES = {
         "alt_auth": "",
         "env": "GITEA_TOKEN",
     },
+    "bitbucket": {
+        "title": "Bitbucket",
+        "token_url": "https://id.atlassian.com/manage-profile/security/api-tokens "
+                     "(create an Atlassian API token with Bitbucket access)",
+        "token_note": "Sent as a Bearer token. You also need your workspace "
+                      "name (the owner in bitbucket.org/<workspace>/<repo>).",
+        "scopes": [
+            ("Bitbucket: repositories (read+write)",
+             "List repos, create repositories, push"),
+        ],
+        "minimum": "Atlassian API token with Bitbucket repository read+write",
+        "alt_auth": "",
+        "env": "BITBUCKET_TOKEN",
+    },
+    "generic": {
+        "title": "Generic git server (no API)",
+        "token_url": "",
+        "token_note": "No API needed — give a URL template like "
+                      "https://git.example.com/{owner}/{name}.git. Works as a "
+                      "push TARGET only (it cannot list repos, so it cannot be "
+                      "a sync source). Codeberg.org also works here, or via the "
+                      "forgejo adapter with url=https://codeberg.org.",
+        "scopes": [],
+        "minimum": "none (optional token embedded in the URL)",
+        "alt_auth": "",
+        "env": "",
+    },
     "local": {
         "title": "Local folder",
         "token_url": "",

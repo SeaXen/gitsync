@@ -3,7 +3,11 @@
 **Professional multi-platform git repository sync — with a TUI dashboard.**
 
 Mirror your repositories between **GitHub**, **GitLab**, **Forgejo**, **Gitea**,
-and **local folders** — in any direction — from one terminal UI.
+**Bitbucket**, any **generic git server** (URL template), and **local folders**
+— in any direction — from one terminal UI.
+
+Codeberg.org works too: use the `forgejo` adapter with
+`url: https://codeberg.org`, or the `generic` adapter with a URL template.
 
 ```
 GitHub ──┐
@@ -50,16 +54,41 @@ then lets you pick the **source** and **targets** — that's your sync direction
 
 | Command | What it does |
 |---|---|
+| `gitsync` | **open the TUI** (no args needed) |
 | `gitsync setup` | guided first-run configuration |
 | `gitsync sync` | run a sync now (all routes) |
 | `gitsync sync --route main` | sync one route |
+| `gitsync mirror tradex` | sync a **single repo** now |
+| `gitsync routes` | list routes |
+| `gitsync routes add NAME SRC t1,t2` | add a route — **any direction** |
+| `gitsync routes remove NAME` | remove a route |
+| `gitsync compare` | **drift check** — compare HEADs across platforms |
 | `gitsync status` | platforms, routes, scheduler, last run |
 | `gitsync tui` | the dashboard |
 | `gitsync log -n 50` | last 50 log lines |
 | `gitsync records` | run history with failure details |
 | `gitsync platforms` | test every platform connection |
 | `gitsync scopes` | required token scopes per platform |
+| `gitsync doctor` | full health check |
 | `gitsync install --schedule daily` | (re)install the scheduler |
+| `gitsync uninstall` | remove scheduler + symlink |
+
+### Any direction, any combination
+
+A **route** is `source -> targets`, and every platform can be either side:
+
+```
+github -> gitlab, forgejo, backup        (cloud out, keep a local copy)
+gitlab -> forgejo                        (GitLab to your homelab Forgejo)
+backup -> github                         (restore: local folder back to cloud)
+forgejo -> gitlab, generic               (self-hosted to anywhere)
+```
+
+```bash
+gitsync routes add restore backup github      # local folder -> GitHub
+gitsync routes add gl-to-fj gitlab forgejo    # GitLab -> Forgejo
+gitsync sync --route restore
+```
 
 ## TUI keys
 

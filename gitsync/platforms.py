@@ -157,10 +157,10 @@ class GitHubPlatform:
         if isinstance(out, dict) and out.get("full_name"):
             return self._clone_url(out["full_name"])
         if rc == 404 or (isinstance(out, dict) and out.get("message") == "Not Found"):
-            rc2, out2, _ = self._http(
-                "POST", "https://api.github.com/user/repos", token=self.token,
-                payload={"name": name, "private": repo.get("private", False),
-                         "auto_init": False})
+            rc2, out2 = self._api("/user/repos", "POST",
+                                  {"name": name,
+                                   "private": repo.get("private", False),
+                                   "auto_init": False})
             if isinstance(out2, dict) and out2.get("full_name"):
                 return self._clone_url(out2["full_name"])
             raise RuntimeError("GitHub create failed: %s"
@@ -379,6 +379,134 @@ class LocalPlatform:
         return dest
 
 
+
+# ---------------------------------------------------------------- Bitbucket
+
+class BitbucketPlatform:
+    """Bitbucket Cloud (api.bitbucket.org/2.0).
+
+    Auth: an Atlassian API token sent as a Bearer token (app passwords are
+    deprecated). Needs the workspace (owner) to list and create repositories.
+    """
+
+    ptype = "bitbucket"
+
+    def __init__(self, name, cfg):
+        self.name = name
+        self.cfg = cfg
+        self.url = (cfg.get("url") or "https://api.bitbucket.org").rstrip("/")
+        self.owner = cfg.get("owner") or ""      # workspace
+        self.token = cfg.get("token") or os.environ.get("BITBUCKET_TOKEN", "")
+
+    def _api(self, path, method="GET", payload=None):
+        return _http(method, self.url + "/2.0" + path, token=self.token,
+                     payload=payload, auth_style="bearer")
+
+    def user(self):
+        rc, out, _ = self._api("/user")
+        if isinstance(out, dict) and out.get("username"):
+            return out["username"]
+        return None
+
+    def test(self):
+        if not self.owner:
+            return False, "workspace (owner) is required for Bitbucket"
+        rc, out, _ = self._api("/repositories/%s?pagelen=1" % self.owner)
+        if isinstance(out, dict) and "values" in out:
+            return True, "token OK — workspace %s" % self.owner
+        return False, "API failed: %s" % (out.get("message")
+                                          if isinstance(out, dict) else out)
+
+    def _clone_url(self, clone_links):
+        for c in clone_links or []:
+            if c.get("name") == "https":
+                return c["href"]
+        return None
+
+    def list_repos(self):
+        repos, path = [], "/repositories/%s?pagelen=100" % self.owner
+        while path:
+            rc, out, _ = self._api(path)
+            if not isinstance(out, dict) or "values" not in out:
+                raise RuntimeError("Bitbucket API failed: %s" % out)
+            for r in out["values"]:
+                repos.append({"name": r["name"],
+                              "private": bool(r.get("is_private")),
+                              "clone_url": self._clone_url(
+                                  r.get("links", {}).get("clone"))})
+            nxt = out.get("next")
+            path = nxt.replace(self.url + "/2.0", "") if nxt else None
+        return repos
+
+    def ensure_repo(self, repo):
+        name = repo["name"]
+        slug = name.lower().replace(" ", "-").replace("_", "-")
+        rc, out, _ = self._api("/repositories/%s/%s" % (self.owner, slug))
+        if isinstance(out, dict) and out.get("links"):
+            url = self._clone_url(out["links"].get("clone"))
+            if url:
+                return url
+        rc, out, _ = self._api("/repositories/%s/%s" % (self.owner, slug),
+                               "POST", {"scm": "git",
+                                        "is_private": bool(repo.get("private"))})
+        if isinstance(out, dict) and out.get("links"):
+            url = self._clone_url(out["links"].get("clone"))
+            if url:
+                return url
+        raise RuntimeError("Bitbucket create failed: %s"
+                           % (out.get("message") if isinstance(out, dict)
+                              else out))
+
+
+# ---------------------------------------------------------------- Generic
+
+class GenericPlatform:
+    """Any git server without an API — pure URL templates.
+
+    Config example:
+        {"type": "generic", "enabled": true,
+         "url_template": "https://git.example.com/{owner}/{name}.git",
+         "owner": "me", "token": "", "user": ""}
+
+    Works as a TARGET (push). Cannot LIST repositories, so it cannot be a
+    sync source — use `gitsync mirror <repo> --url ...` for one-off pushes,
+    or pair it as a target of any API platform (github -> generic works).
+    """
+
+    ptype = "generic"
+
+    def __init__(self, name, cfg):
+        self.name = name
+        self.cfg = cfg
+        self.template = cfg.get("url_template") or ""
+        self.owner = cfg.get("owner") or ""
+        self.token = cfg.get("token") or ""
+        self.git_user = cfg.get("user") or "git"
+
+    def user(self):
+        return None
+
+    def test(self):
+        if not self.template or "{name}" not in self.template:
+            return False, "url_template must contain {name}"
+        return True, "template: %s" % self.template
+
+    def list_repos(self):
+        raise RuntimeError("generic platforms cannot list repos — "
+                           "they have no API (use as a target only)")
+
+    def _url(self, name):
+        url = self.template.replace("{owner}", self.owner) \
+                           .replace("{name}", name)
+        if self.token:
+            # embed credentials so pushes authenticate
+            scheme, rest = url.split("://", 1)
+            url = "%s://%s:%s@%s" % (scheme, self.git_user, self.token, rest)
+        return url
+
+    def ensure_repo(self, repo):
+        return self._url(repo["name"])
+
 # ---------------------------------------------------------------- factory
 
 ADAPTERS = {
@@ -386,6 +514,8 @@ ADAPTERS = {
     "gitlab": GitLabPlatform,
     "forgejo": ForgejoPlatform,
     "gitea": GiteaPlatform,
+    "bitbucket": BitbucketPlatform,
+    "generic": GenericPlatform,
     "local": LocalPlatform,
 }
 

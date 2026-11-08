@@ -153,9 +153,231 @@ def cmd_platforms(args):
 
 
 def cmd_scopes(args):
-    for ptype in ("github", "gitlab", "forgejo", "gitea", "local"):
+    for ptype in ("github", "gitlab", "forgejo", "gitea", "bitbucket",
+                  "generic", "local"):
         print(PERM.format_guide(ptype))
         print()
+    return 0
+
+
+def cmd_routes(args):
+    cfg = C.load_config()
+    action = args.action or "list"
+
+    if action == "add":
+        if len(args.rest) < 3:
+            print("usage: gitsync routes add NAME SOURCE t1,t2")
+            print("   e.g. gitsync routes add gl-to-fj gitlab forgejo")
+            print("        gitsync routes add local-to-gh backup github")
+            return 2
+        name, source = args.rest[0], args.rest[1]
+        targets = [t.strip() for t in args.rest[2].split(",") if t.strip()]
+        if any(r.get("name") == name for r in cfg.get("routes", [])):
+            print("route '%s' already exists" % name)
+            return 2
+        cfg.setdefault("routes", []).append(
+            {"name": name, "source": source, "targets": targets})
+        C.save_config(cfg)
+        print("route added: %s (%s -> %s)" % (name, source, ", ".join(targets)))
+        return 0
+
+    if action == "remove":
+        if not args.rest:
+            print("usage: gitsync routes remove NAME")
+            return 2
+        name = args.rest[0]
+        before = len(cfg.get("routes", []))
+        cfg["routes"] = [r for r in cfg.get("routes", [])
+                         if r.get("name") != name]
+        C.save_config(cfg)
+        if len(cfg["routes"]) < before:
+            print("route removed: %s" % name)
+        else:
+            print("route not found: %s" % name)
+        return 0
+
+    # list
+    for r in C.routes(cfg):
+        print("%-18s %s -> %s" % (r.get("name"), r.get("source"),
+                                  ", ".join(r.get("targets", []))))
+    if not C.routes(cfg):
+        print("(no routes - add one: gitsync routes add main github gitlab)")
+    return 0
+
+
+def cmd_compare(args):
+    """drift check: compare the HEAD of every repo across a route"""
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if args.route:
+        routes = [r for r in routes if r.get("name") == args.route]
+    if not routes:
+        print("no routes configured")
+        return 2
+    problems = 0
+    for route in routes:
+        sp = C.platform(cfg, route["source"])
+        if not sp or not sp.get("enabled"):
+            print("route %s: source not enabled" % route.get("name"))
+            continue
+        source = P.make(route["source"], sp)
+        targets = {t: P.make(t, C.platform(cfg, t))
+                   for t in route.get("targets", [])
+                   if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")}
+        print("route %s: %s vs %s" % (route.get("name"), route["source"],
+                                      ", ".join(targets)))
+        try:
+            repos = source.list_repos()
+        except Exception as e:
+            print("  cannot list source: %s" % e)
+            continue
+        for repo in repos:
+            try:
+                src_head = _head_of(source, repo)
+            except Exception as e:
+                print("  ?? %-28s source error: %s" % (repo["name"],
+                                                       str(e)[:60]))
+                problems += 1
+                continue
+            for tname, tplat in targets.items():
+                try:
+                    thead = _head_of(tplat, repo)
+                except Exception as e:
+                    thead = "error: %s" % str(e)[:40]
+                if thead and thead == src_head:
+                    mark = "  "
+                else:
+                    mark = "!!"
+                    problems += 1
+                print("  %s %-28s src=%s %s=%s"
+                      % (mark, repo["name"], str(src_head)[:8], tname,
+                         str(thead)[:8]))
+    print("\n%s" % ("all in sync" if problems == 0
+                    else "%d mismatched refs" % problems))
+    return 0 if problems == 0 else 1
+
+
+def _head_of(plat, repo):
+    """resolve a repo HEAD sha on a platform (best effort)"""
+    name = repo["name"]
+    if plat.ptype == "local":
+        path = os.path.join(plat.path, P._fs_safe(name) + ".git")
+        rc, out, _ = P.run(["git", "rev-parse", "--verify", "HEAD"],
+                           cwd=path, timeout=30)
+        if rc == 0 and out.strip():
+            return out.strip()
+        # HEAD may reference an unborn branch (git init defaults to master)
+        rc, out, _ = P.run(["git", "for-each-ref", "--format=%(objectname)",
+                            "refs/heads/"], cwd=path, timeout=30)
+        if rc == 0 and out.strip():
+            return out.strip().splitlines()[0]
+        return None
+    url = repo.get("clone_url") or plat.ensure_repo(repo)
+    rc, out, _ = P.run(["git", "ls-remote", url, "HEAD"], timeout=120)
+    return out.split("\t")[0] if out else None
+
+
+def cmd_mirror(args):
+    """sync a single repo through the first matching route"""
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if args.route:
+        routes = [r for r in routes if r.get("name") == args.route]
+    if not routes:
+        print("no routes configured")
+        return 2
+    route = routes[0]
+    sp = C.platform(cfg, route["source"])
+    source = P.make(route["source"], sp)
+    targets = {t: P.make(t, C.platform(cfg, t))
+               for t in route.get("targets", [])
+               if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")}
+    from . import sync as SY
+    repo = {"name": args.repo, "private": args.private,
+            "clone_url": args.url}
+    if not repo["clone_url"]:
+        for r in source.list_repos():
+            if r["name"] == args.repo:
+                repo = r
+                break
+        else:
+            print("repo '%s' not found on %s" % (args.repo, route["source"]))
+            return 1
+    status, detail, errors = SY.sync_repo(repo, source, targets,
+                                          C.setting(cfg, "mode", "full"))
+    print("%s: %s %s" % (args.repo, status, detail))
+    return 0 if status == "ok" else 1
+
+
+def cmd_doctor(args):
+    """health check: config, platforms, disk, scheduler, hub"""
+    cfg = C.load_config()
+    problems = []
+    print("gitsync doctor")
+    print("=" * 60)
+    print("config file    : %s (%s)"
+          % (C.CONFIG_FILE, "ok" if os.path.exists(C.CONFIG_FILE)
+             else "MISSING - run gitsync setup"))
+    if not os.path.exists(C.CONFIG_FILE):
+        problems.append("no config")
+    print("\nplatforms:")
+    for name, ptype, en, ok, info in _platforms_table(cfg):
+        if en and not ok:
+            problems.append("platform %s failing" % name)
+        print("  %-14s %-9s %-4s %-5s %s"
+              % (name, ptype, en, ok, info))
+    print("\nroutes:")
+    if not C.routes(cfg):
+        problems.append("no routes")
+        print("  (none)")
+    for r in C.routes(cfg):
+        srcp = C.platform(cfg, r.get("source"))
+        src_ok = bool(srcp) and srcp.get("enabled")
+        tgts = [t for t in r.get("targets", [])
+                if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")]
+        good = bool(src_ok) and bool(tgts)
+        if not good:
+            problems.append("route %s incomplete" % r.get("name"))
+        print("  %-16s %s -> %s  %s"
+              % (r.get("name"), r.get("source"), ", ".join(tgts) or "(none)",
+                 "ok" if good else "INCOMPLETE"))
+    print("\nstorage:")
+    rc, out, _ = sh(["bash", "-c",
+                     "du -sh %s 2>/dev/null | cut -f1" % C.MIRROR_DIR])
+    print("  mirror hub    : %s (%s)" % ((out or "?").strip(), C.MIRROR_DIR))
+    rc, out, _ = sh(["bash", "-c", "df -h %s | tail -1" % C.DATA_DIR])
+    print("  disk          : %s" % " ".join((out or "").split()[3:5]))
+    print("\nscheduler      : %s" % S.status())
+    if "not scheduled" in S.status() and C.setting(cfg, "schedule") != "off":
+        problems.append("scheduler not installed (run: gitsync install)")
+    recs = SY.last_records(1)
+    if recs:
+        r = recs[-1]
+        print("last run       : %s | %d ok, %d failed"
+              % (r.get("finished_at"), r.get("ok", 0), r.get("failed", 0)))
+        if r.get("failed"):
+            problems.append("last run had %d failures" % r["failed"])
+    print("\n" + ("ALL HEALTHY" if not problems
+                  else "ISSUES: " + "; ".join(problems)))
+    return 0 if not problems else 1
+
+
+def cmd_uninstall(args):
+    if not args.yes:
+        ans = input("remove gitsync scheduler + symlink? (y/N) ").strip().lower()
+        if not ans.startswith("y"):
+            print("cancelled")
+            return 1
+    if S.systemd_installed():
+        S.uninstall_systemd()
+        print("systemd timer removed")
+    S.install_cron("off")
+    for p in ("/usr/local/bin/gitsync", "/usr/bin/gitsync"):
+        if os.path.exists(p):
+            os.remove(p)
+            print("removed %s" % p)
+    print("config and mirrors kept: %s , %s" % (C.CONFIG_DIR, C.DATA_DIR))
+    print("to remove those too: rm -rf %s %s" % (C.CONFIG_DIR, C.DATA_DIR))
     return 0
 
 
@@ -203,8 +425,36 @@ def main(argv=None):
     sp = sub.add_parser("scopes", help="show required token scopes")
     sp.set_defaults(func=cmd_scopes)
 
+    sp = sub.add_parser("routes", help="list / add / remove sync routes")
+    sp.add_argument("action", nargs="?",
+                    choices=["list", "add", "remove"], default="list")
+    sp.add_argument("rest", nargs="*",
+                    help="add: NAME SOURCE t1,t2 | remove: NAME")
+    sp.set_defaults(func=cmd_routes)
+
+    sp = sub.add_parser("compare", help="drift check: HEADs across platforms")
+    sp.add_argument("--route", help="only this route")
+    sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("mirror", help="sync a single repo now")
+    sp.add_argument("repo")
+    sp.add_argument("--route", help="use this route")
+    sp.add_argument("--url", help="explicit clone URL (skip source lookup)")
+    sp.add_argument("--private", action="store_true")
+    sp.set_defaults(func=cmd_mirror)
+
+    sp = sub.add_parser("doctor", help="health check: everything")
+    sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("uninstall", help="remove scheduler + symlink")
+    sp.add_argument("--yes", action="store_true")
+    sp.set_defaults(func=cmd_uninstall)
+
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):
+        # no subcommand: open the TUI if we have a terminal, else print help
+        if sys.stdout.isatty():
+            return cmd_tui(args)
         ap.print_help()
         return 0
     return args.func(args)

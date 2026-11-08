@@ -36,6 +36,7 @@ state = {
     "message": ("", 0),
     "full_log": [],
     "scroll": 0,
+    "dirty": True,
 }
 
 
@@ -77,6 +78,7 @@ def refresh_platforms():
                        for r in C.routes(cfg)]
     state["settings"] = dict(cfg.get("settings", {}))
     state["counts_age"] = time.time()
+    state["dirty"] = True
 
 
 def read_log_tail(n=150):
@@ -112,6 +114,7 @@ def run_sync():
                                           PYTHONPATH=_app_dir()))
             for line in p.stdout:
                 state["sync_lines"].append(line.rstrip())
+                state["dirty"] = True
             p.wait()
             state["sync_lines"].append("--- finished (rc=%d) %s ---"
                                        % (p.returncode,
@@ -122,6 +125,7 @@ def run_sync():
             state["syncing"] = False
             read_log_tail()
             state["records"] = SYNC.last_records(10)
+            state["dirty"] = True
             threading.Thread(target=refresh_platforms, daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
 
@@ -151,6 +155,12 @@ def box(win, title):
     safe_add(win, 0, 2, " %s " % title, curses.A_BOLD)
 
 
+def commit_screen(stdscr):
+    """atomic screen update — prevents flicker (draw offscreen, flip once)"""
+    stdscr.noutrefresh()
+    curses.doupdate()
+
+
 def menu(stdscr, title, items, note=None):
     idx = 0
     while True:
@@ -169,7 +179,7 @@ def menu(stdscr, title, items, note=None):
         safe_add(stdscr, h - 1, 0,
                  " up/down = move, Enter = select, B/Esc = back "
                  .center(w - 1)[:w - 1], curses.A_REVERSE)
-        stdscr.refresh()
+        commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
             return
@@ -285,7 +295,7 @@ def accounts_screen(stdscr):
         safe_add(stdscr, h - 1, 0,
                  " up/down = scroll, B/Esc = back ".center(w - 1)[:w - 1],
                  curses.A_REVERSE)
-        stdscr.refresh()
+        commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
             return
@@ -321,7 +331,7 @@ def history_screen(stdscr):
         safe_add(stdscr, h - 1, 0,
                  " up/down = scroll, B/Esc = back ".center(w - 1)[:w - 1],
                  curses.A_REVERSE)
-        stdscr.refresh()
+        commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
             return
@@ -349,7 +359,7 @@ def log_view(stdscr):
             elif " OK " in line:
                 attr = curses.color_pair(2)
             safe_add(stdscr, 1 + i, 0, line[:w - 1], attr)
-        stdscr.refresh()
+        commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
             return
@@ -371,7 +381,7 @@ def draw(stdscr):
     if h < 18 or w < 70:
         safe_add(stdscr, 0, 0, "terminal too small (need >= 70x18)",
                  curses.A_BOLD)
-        stdscr.refresh()
+        commit_screen(stdscr)
         return
     Cc, G, Y, R = (curses.color_pair(1), curses.color_pair(2),
                    curses.color_pair(3), curses.color_pair(4))
@@ -403,7 +413,7 @@ def draw(stdscr):
                  ("%-14s %-9s %-4s %-5s repos=%-5s %s"
                   % (name, ptype, "ON" if on else "off", "OK" if ok else "FAIL",
                      count, info))[:w - 6], attr)
-    pw.refresh()
+    pw.noutrefresh()
 
     # routes + settings
     top2 = top + ph
@@ -417,7 +427,7 @@ def draw(stdscr):
     safe_add(rw, 2, 2, ("workers=%s  mode=%s  forks=%s   scheduler: %s"
                         % (st.get("workers"), st.get("mode"),
                            st.get("include_forks"), S.status()))[:w - 6], dim)
-    rw.refresh()
+    rw.noutrefresh()
 
     # log
     top3 = top2 + rh
@@ -434,7 +444,7 @@ def draw(stdscr):
         elif "===" in line:
             attr = curses.A_BOLD
         safe_add(lw, 1 + i, 2, line[:w - 6], attr)
-    lw.refresh()
+    lw.noutrefresh()
 
     foot = (" [S]ync  [L]og  [H]istory  [C]chedule  [O]ptions  "
             "[A]ccounts  [W]izard  [R]efresh  [Q]uit ")
@@ -442,7 +452,7 @@ def draw(stdscr):
         foot = " %s " % state["message"][0]
     safe_add(stdscr, h - 1, 0, foot.center(w - 1)[:w - 1],
              curses.A_REVERSE | curses.A_BOLD)
-    stdscr.refresh()
+    commit_screen(stdscr)
 
 
 # ---------------------------------------------------------------- main
@@ -512,10 +522,23 @@ def _run(stdscr):
     read_log_tail()
     state["records"] = SYNC.last_records(10)
     threading.Thread(target=refresh_platforms, daemon=True).start()
-    last = time.time()
+    last_draw = 0.0
+    dirty = True
     while True:
-        draw(stdscr)
+        now = time.time()
+        # threads raise state["dirty"] when new data arrives; merge it in
+        dirty = dirty or state.get("dirty")
+        # redraw when something changed, while syncing, or every 2s for the
+        # clock — never in a tight loop (that is what causes perceived flicker)
+        if dirty or (state["syncing"] and now - last_draw > 1.0) \
+                or now - last_draw > 2.0:
+            draw(stdscr)
+            last_draw = now
+            dirty = False
+            state["dirty"] = False
         ch = stdscr.getch()
+        if ch != -1:
+            dirty = True
         if ch in (ord("q"), ord("Q")):
             return
         elif ch in (ord("s"), ord("S")):
