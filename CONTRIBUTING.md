@@ -1,0 +1,80 @@
+# Contributing to gitsync
+
+Thanks for your interest in improving gitsync! This document covers the
+basics.
+
+## Ground rules
+
+- **Zero dependencies** — Python 3.8+ standard library only. Please don't
+  add third-party packages; that constraint is a feature.
+- **No credentials in the repo** — never commit tokens, webhooks, paths or
+  account names. Everything user-specific belongs in the user's
+  `~/.config/gitsync/config.json`.
+- **Bounded operations** — every subprocess/network call must have an
+  explicit timeout (see `platforms.API_TIMEOUT` / `GIT_TIMEOUT`).
+- **Flicker-free TUI** — draw offscreen, `noutrefresh()` sub-windows,
+  finish with a single `doupdate()`; never `stdscr.noutrefresh()` after
+  the panels (it blanks them).
+
+## Development setup
+
+```bash
+git clone https://github.com/SeaXen/gitsync.git
+cd gitsync
+export PYTHONPATH=$PWD          # run without installing
+python3 -m gitsync --help
+python3 -m gitsync tui          # the dashboard
+```
+
+Use an isolated config so you don't touch your real one:
+
+```bash
+export GITSYNC_CONFIG_DIR=/tmp/gitsync-dev/config
+export GITSYNC_DATA_DIR=/tmp/gitsync-dev/data
+```
+
+## Testing your change
+
+```bash
+# syntax
+python3 -m py_compile gitsync/*.py
+
+# the CLI still answers
+python3 -m gitsync --version
+python3 -m gitsync scopes | head -5
+
+# a real sync against a throwaway local folder
+python3 -m gitsync platforms add devbak --type local --path /tmp/devbak
+python3 -m gitsync routes add dev github devbak
+python3 -m gitsync sync --route dev
+python3 -m gitsync routes remove dev
+python3 -m gitsync platforms remove devbak --force
+```
+
+CI runs the syntax check plus a CLI smoke test on every push.
+
+## Adding a platform
+
+1. Add an adapter class in `gitsync/platforms.py` implementing
+   `test()`, `user()`, `list_repos()` and `ensure_repo()`.
+2. Register it in the `ADAPTERS` dict.
+3. Add its token guidance to `gitsync/permissions.py`
+   (where to create the token, required scopes, minimum).
+4. Mention it in `README.md` and `docs/PERMISSIONS.md`.
+
+## Commit style
+
+Short, imperative subjects with a body explaining *why*:
+
+```
+feat: add codeberg as a forgejo-compatible provider
+
+codeberg.org speaks the same API as Forgejo, so the existing adapter
+works with just a different default URL.
+```
+
+## Releasing
+
+1. Update `CHANGELOG.md`.
+2. `git tag -a vX.Y.Z -m "vX.Y.Z"` and push the tag.
+3. Publish the release notes.

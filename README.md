@@ -10,6 +10,7 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-GitHub%20%C2%B7%20GitLab%20%C2%B7%Forgejo%20%C2%B7%20Gitea%20%C2%B7%20Bitbucket%20%C2%B7%20Local-green.svg)](#platforms--tokens)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#requirements)
+[![CI](https://github.com/SeaXen/gitsync/actions/workflows/ci.yml/badge.svg)](https://github.com/SeaXen/gitsync/actions/workflows/ci.yml)
 
 </div>
 
@@ -523,6 +524,16 @@ config file and the machine accordingly.
 
 **Does it need root?**
 No — `--user` installs entirely under your home directory.
+
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) | step-by-step walkthrough: install → log in → pick folders → first sync |
+| [docs/PERMISSIONS.md](docs/PERMISSIONS.md) | exactly which token scopes every platform needs |
+| [CHANGELOG.md](CHANGELOG.md) | release history |
+| [SECURITY.md](SECURITY.md) | how credentials are stored, how to report issues |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | dev setup, conventions, how to add a platform |
 
 ## License
 

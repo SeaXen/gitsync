@@ -1,0 +1,60 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.8"
+
+      - name: Syntax check (all modules)
+        run: python3 -m py_compile gitsync/*.py
+
+      - name: Shell syntax (installers)
+        run: |
+          bash -n install.sh
+          bash -n quickinstall.sh
+
+      - name: CLI smoke test
+        run: |
+          export PYTHONPATH=$PWD
+          python3 -m gitsync --version
+          python3 -m gitsync --help > /dev/null
+          python3 -m gitsync scopes | grep -q "GitHub"
+          python3 -m gitsync platforms --help > /dev/null
+
+      - name: Unit checks (pure logic)
+        run: |
+          export PYTHONPATH=$PWD
+          python3 - <<'PY'
+          from gitsync import platforms as P
+          from gitsync import config as C
+          from gitsync import notify as NT
+
+          # url builders
+          assert P.ssh_url("https://github.com", "me", "repo") == \
+              "git@github.com:me/repo.git"
+          assert P.ssh_url("git.example.com", "me", "repo", 2222) == \
+              "ssh://git@git.example.com:2222/me/repo.git"
+          assert P._norm("My-Repo.Name") == "myreponame"
+          assert P._fs_safe("a b/c") == "a_b_c"
+
+          # schedule table
+          assert set(C.SCHEDULES) == {"hourly", "6h", "12h", "daily", "off"}
+          assert C.SCHEDULES["hourly"]["cron"] == "0 * * * *"
+
+          # notification defaults are inert
+          cfg = {"settings": {"notify": {}}}
+          assert NT.enabled(cfg) is False
+          print("unit checks passed")
+          PY
