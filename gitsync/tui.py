@@ -155,9 +155,14 @@ def box(win, title):
     safe_add(win, 0, 2, " %s " % title, curses.A_BOLD)
 
 
-def commit_screen(stdscr):
-    """atomic screen update — prevents flicker (draw offscreen, flip once)"""
-    stdscr.noutrefresh()
+def commit_screen(stdscr=None):
+    """atomic screen update — prevents flicker (draw offscreen, flip once).
+
+    Sub-windows are noutrefreshed where they are drawn; stdscr's addstr
+    already updates the virtual screen, so a plain douupdate() flushes
+    everything at once. (Calling stdscr.noutrefresh() here would copy the
+    erased stdscr over the panels and blank them.)
+    """
     curses.doupdate()
 
 
@@ -375,6 +380,33 @@ def log_view(stdscr):
                                   state["scroll"] + (h - 3))
 
 
+CLOCK_X = 1          # column of the clock inside the status line
+CLOCK_LEN = 19       # len("2026-11-08 07:37:00")
+
+
+def status_line():
+    """the row-1 status text (clock at CLOCK_X, sync state, schedule, age)"""
+    sched = C.setting(C.load_config(), "schedule", "hourly")
+    age = int(time.time() - state["counts_age"])
+    age_txt = "loading..." if not state["platforms"] else (
+        "%ds" % age if age < 3600 else "stale")
+    return (" %s  syncing: %s  schedule: %s  counts: %s "
+            % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+               "YES" if state["syncing"] else "no",
+               C.SCHEDULES.get(sched, {}).get("label", sched), age_txt))
+
+
+def update_clock(stdscr):
+    """repaint ONLY the clock cells (19 chars at a fixed column) so the
+    terminal diff — and therefore the bytes on the wire — stays tiny"""
+    h, w = stdscr.getmaxyx()
+    if h < 2 or w < 24:
+        return
+    safe_add(stdscr, 1, CLOCK_X,
+             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), curses.A_DIM)
+    curses.doupdate()
+
+
 def draw(stdscr):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
@@ -395,12 +427,7 @@ def draw(stdscr):
     safe_add(stdscr, 0, 0,
              (" gitsync %s — repository sync control " % __version__)
              .center(w - 1)[:w - 1], curses.A_BOLD | Cc)
-    safe_add(stdscr, 1, 0,
-             (" %s  syncing: %s  schedule: %s  counts: %s "
-              % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                 "YES" if state["syncing"] else "no",
-                 C.SCHEDULES.get(sched, {}).get("label", sched), age_txt))
-             .ljust(w - 1)[:w - 1], dim)
+    safe_add(stdscr, 1, 0, status_line().ljust(w - 1)[:w - 1], dim)
 
     # platforms
     top, ph = 3, min(len(state["platforms"]) + 2, 8)
@@ -511,7 +538,7 @@ def _run(stdscr):
         curses.set_escdelay(25)
     except (AttributeError, curses.error):
         pass
-    stdscr.timeout(2000)
+    stdscr.timeout(1000)
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
@@ -521,21 +548,31 @@ def _run(stdscr):
         curses.init_pair(4, curses.COLOR_RED, -1)
     read_log_tail()
     state["records"] = SYNC.last_records(10)
+    # cheap config data immediately; only the API counts need the thread
+    _cfg = C.load_config()
+    state["routes"] = [(r.get("name"), r.get("source"),
+                        list(r.get("targets", [])))
+                       for r in C.routes(_cfg)]
+    state["settings"] = dict(_cfg.get("settings", {}))
     threading.Thread(target=refresh_platforms, daemon=True).start()
     last_draw = 0.0
+    last_clock = 0.0
     dirty = True
     while True:
         now = time.time()
         # threads raise state["dirty"] when new data arrives; merge it in
         dirty = dirty or state.get("dirty")
-        # redraw when something changed, while syncing, or every 2s for the
-        # clock — never in a tight loop (that is what causes perceived flicker)
-        if dirty or (state["syncing"] and now - last_draw > 1.0) \
-                or now - last_draw > 2.0:
+        if dirty or (state["syncing"] and now - last_draw > 2.0):
+            # full redraw — only when something actually changed
             draw(stdscr)
             last_draw = now
+            last_clock = now
             dirty = False
             state["dirty"] = False
+        elif now - last_clock >= 1.0:
+            # idle: repaint just the clock line (a few bytes, no flicker)
+            update_clock(stdscr)
+            last_clock = now
         ch = stdscr.getch()
         if ch != -1:
             dirty = True
@@ -557,11 +594,10 @@ def _run(stdscr):
             launch_wizard(stdscr)
         elif ch in (ord("r"), ord("R"), ord("p"), ord("P")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
-        if time.time() - last > 10:
+        if now - last_draw > 10:
             read_log_tail()
             if time.time() - state["counts_age"] > 60:
                 threading.Thread(target=refresh_platforms, daemon=True).start()
-            last = time.time()
 
 
 def launch_wizard(stdscr):
