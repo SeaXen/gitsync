@@ -368,7 +368,7 @@ def cmd_doctor(args):
     print("\nscheduler      : %s" % S.status())
     if "not scheduled" in S.status() and C.setting(cfg, "schedule") != "off":
         problems.append("scheduler not installed (run: gitsync install)")
-    recs = SY.last_records(1)
+    recs = SYNC.last_records(1)
     if recs:
         r = recs[-1]
         print("last run       : %s | %d ok, %d failed"
