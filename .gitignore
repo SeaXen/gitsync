@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# gitsync runtime data (never commit tokens or mirrors)
+config.json
+*.log
+mirrors/
+records.json
+sync.lock
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
