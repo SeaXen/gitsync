@@ -46,6 +46,17 @@ def cmd_sync(args):
     if not C.enabled_platforms(cfg):
         print("No platforms configured. Run: gitsync setup")
         return 2
+    if getattr(args, "to", None):
+        # restrict every route's targets to the requested platform
+        routes = C.routes(cfg)
+        if args.route:
+            routes = [r for r in routes if r.get("name") == args.route]
+        for r in routes:
+            r["targets"] = [t for t in r.get("targets", []) if t == args.to]
+        cfg["routes"] = routes
+        if not any(r.get("targets") for r in routes):
+            print("no route targets '%s'" % args.to)
+            return 2
     t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet)
     print("\n%d ok, %d partial, %d failed of %d repos in %ss"
           % (t["ok"], t["partial"], t["failed"], t["repos"],
@@ -147,10 +158,113 @@ def cmd_install(args):
 
 
 def cmd_platforms(args):
+    """list / add / remove / edit / test platforms (accounts)"""
     cfg = C.load_config()
-    for name, ptype, en, ok, info in _platforms_table(cfg):
-        print("%-14s %-9s %-4s %-5s %s" % (name, ptype, en, ok, info))
+    plats = cfg.setdefault("platforms", {})
+
+    if args.action == "add":
+        name = args.name
+        if name in plats:
+            print("platform '%s' already exists (edit it instead)" % name)
+            return 2
+        p = {"type": args.type, "enabled": True}
+        if args.type == "local":
+            if not args.path:
+                print("local platforms need --path")
+                return 2
+            p["path"] = os.path.expanduser(args.path)
+        else:
+            p["url"] = args.url or {
+                "github": "https://github.com",
+                "gitlab": "https://gitlab.com"}.get(args.type,
+                                                   "http://localhost:3000")
+            if args.token:
+                p["token"] = args.token
+            if args.owner:
+                p["owner"] = args.owner
+            if args.type == "github" and not args.token:
+                p["auth"] = "gh"          # fall back to the gh CLI
+        plats[name] = p
+        C.save_config(cfg)
+        print("added platform: %s (%s)" % (name, args.type))
+        return _test_one(name, p)
+
+    if args.action == "remove":
+        if args.name not in plats:
+            print("no such platform: %s" % args.name)
+            return 2
+        used = [r["name"] for r in C.routes(cfg)
+                if r.get("source") == args.name
+                or args.name in r.get("targets", [])]
+        if used and not args.force:
+            print("platform '%s' is used by route(s): %s"
+                  % (args.name, ", ".join(used)))
+            print("re-run with --force to remove anyway")
+            return 2
+        del plats[args.name]
+        C.save_config(cfg)
+        print("removed platform: %s" % args.name)
+        return 0
+
+    if args.action == "edit":
+        if args.name not in plats:
+            print("no such platform: %s" % args.name)
+            return 2
+        p = plats[args.name]
+        changed = []
+        for field, val in (("token", args.token), ("url", args.url),
+                           ("owner", args.owner), ("path", args.path)):
+            if val is not None:
+                p[field] = os.path.expanduser(val) if field == "path" else val
+                changed.append(field)
+        if args.enable:
+            p["enabled"] = True
+            changed.append("enabled")
+        if args.disable:
+            p["enabled"] = False
+            changed.append("disabled")
+        if not changed:
+            print("nothing to change (use --token/--url/--owner/--path/"
+                  "--enable/--disable)")
+            return 2
+        C.save_config(cfg)
+        print("updated %s: %s" % (args.name, ", ".join(changed)))
+        return _test_one(args.name, p)
+
+    if args.action == "test":
+        if args.name:
+            return _test_one(args.name, plats.get(args.name, {}))
+        bad = 0
+        for name, p in plats.items():
+            if _test_one(name, p) != 0:
+                bad += 1
+        return 1 if bad else 0
+
+    # default: list
+    for name, p in plats.items():
+        try:
+            ok, info = P.make(name, p).test()
+        except Exception as e:
+            ok, info = False, str(e)[:80]
+        print("%-14s %-9s %-4s %-5s %s"
+              % (name, p.get("type"), "ON" if p.get("enabled") else "off",
+                 "OK" if ok else "FAIL", info))
+    if not plats:
+        print("(no platforms - add one: gitsync platforms add gitlab "
+              "--type gitlab --token glpat-...)")
     return 0
+
+
+def _test_one(name, p):
+    if not p:
+        print("no such platform: %s" % name)
+        return 2
+    try:
+        ok, info = P.make(name, p).test()
+    except Exception as e:
+        ok, info = False, str(e)[:80]
+    print("%-14s %-5s %s" % (name, "OK" if ok else "FAIL", info))
+    return 0 if ok else 1
 
 
 def cmd_scopes(args):
@@ -448,6 +562,7 @@ def main(argv=None):
 
     sp = sub.add_parser("sync", help="run a sync now")
     sp.add_argument("--route", help="only this route")
+    sp.add_argument("--to", help="only push to this platform")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(func=cmd_sync)
 
@@ -472,7 +587,20 @@ def main(argv=None):
                     help="force cron instead of systemd")
     sp.set_defaults(func=cmd_install)
 
-    sp = sub.add_parser("platforms", help="list platforms + test them")
+    sp = sub.add_parser("platforms", help="manage accounts: add/remove/edit/test")
+    sp.add_argument("action", nargs="?", default="list",
+                    choices=["list", "add", "remove", "edit", "test"])
+    sp.add_argument("name", nargs="?", help="platform name")
+    sp.add_argument("--type",
+                    choices=["github", "gitlab", "forgejo", "gitea",
+                             "bitbucket", "generic", "local"])
+    sp.add_argument("--url", help="instance URL")
+    sp.add_argument("--token", help="API token")
+    sp.add_argument("--owner", help="username / workspace / namespace")
+    sp.add_argument("--path", help="local folder (type=local)")
+    sp.add_argument("--enable", action="store_true")
+    sp.add_argument("--disable", action="store_true")
+    sp.add_argument("--force", action="store_true")
     sp.set_defaults(func=cmd_platforms)
 
     sp = sub.add_parser("scopes", help="show required token scopes")
