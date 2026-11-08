@@ -104,6 +104,19 @@ gitsync sync --route restore
 | `R` / `P` | refresh platform connections |
 | `Q` | quit |
 
+### Adaptive layout (works on phones)
+
+The TUI picks its layout from the terminal size — no more
+"terminal too small" on phone SSH sessions:
+
+| Terminal | Layout |
+|---|---|
+| >= 70x18 | full dashboard (platforms / routes / log panels) |
+| smaller | compact single column: last run, cron state, condensed platform list, log tail |
+| < 34x10 | polite hint to rotate to landscape |
+
+Same keys in both layouts; resizing the window re-renders instantly.
+
 ## How sync works
 
 Each route is `source → targets`. Every repo is:
