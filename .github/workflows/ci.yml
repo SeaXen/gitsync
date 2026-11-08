@@ -1,24 +1,23 @@
-name: ci
+# gitsync CI on Forgejo Actions — same checks as .github/workflows/ci.yml
+# and .gitlab-ci.yml. Runs on the self-hosted Forgejo Runner (label: docker).
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:          # allows manual runs from the Actions tab
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
+  checks:
+    runs-on: docker
     steps:
-      - uses: actions/checkout@v4
+      - name: Check out the repository
+        uses: actions/checkout@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.8"
+      - name: Python version
+        run: python3 --version
 
-      - name: Syntax check (all modules)
+      - name: Python syntax (all modules)
         run: python3 -m py_compile gitsync/*.py
 
       - name: Shell syntax (installers)
@@ -26,37 +25,56 @@ jobs:
           bash -n install.sh
           bash -n quickinstall.sh
 
-      - name: CLI smoke test
+      - name: CLI smoke tests
         run: |
           export PYTHONPATH=$PWD
           python3 -m gitsync --version
           python3 -m gitsync --help > /dev/null
           python3 -m gitsync scopes | grep -q "GitHub"
           python3 -m gitsync platforms --help > /dev/null
+          python3 -m gitsync routes --help > /dev/null
 
-      - name: Unit checks (pure logic)
+      - name: Unit checks (15 assertions)
         run: |
           export PYTHONPATH=$PWD
           python3 - <<'PY'
           from gitsync import platforms as P
           from gitsync import config as C
           from gitsync import notify as NT
+          from gitsync import sync as SY
+          from gitsync import tui
 
-          # url builders
-          assert P.ssh_url("https://github.com", "me", "repo") == \
-              "git@github.com:me/repo.git"
-          assert P.ssh_url("git.example.com", "me", "repo", 2222) == \
-              "ssh://git@git.example.com:2222/me/repo.git"
-          assert P._norm("My-Repo.Name") == "myreponame"
-          assert P._fs_safe("a b/c") == "a_b_c"
+          # URL builders
+          assert P.ssh_url('https://github.com', 'me', 'repo') == 'git@github.com:me/repo.git'
+          assert P.ssh_url('git.example.com', 'me', 'repo', 2222) == 'ssh://git@git.example.com:2222/me/repo.git'
+          assert P.ssh_url('https://codeberg.org', 'me', 'repo') == 'git@codeberg.org:me/repo.git'
+          assert P._norm('My-Repo.Name') == 'myreponame'
+          assert P._fs_safe('a b/c') == 'a_b_c'
 
           # schedule table
-          assert set(C.SCHEDULES) == {"hourly", "6h", "12h", "daily", "off"}
-          assert C.SCHEDULES["hourly"]["cron"] == "0 * * * *"
+          assert set(C.SCHEDULES) == {'hourly', '6h', '12h', 'daily', 'off'}
+          assert C.SCHEDULES['hourly']['cron'] == '0 * * * *'
+          assert C.SCHEDULES['daily']['calendar'] == '*-*-* 03:00:00'
 
-          # notification defaults are inert
-          cfg = {"settings": {"notify": {}}}
+          # notification defaults are inert (no credentials -> no send)
+          cfg = {'settings': {'notify': {}}}
           assert NT.enabled(cfg) is False
-          assert NT.send(cfg, "t", [], color="info") is True  # nothing configured = no-op
-          print("unit checks passed")
+          assert NT.send(cfg, 't', [], color='info') is True
+
+          # platform factory
+          assert isinstance(P.make('gh', {'type': 'github', 'url': 'https://github.com'}), P.GitHubPlatform)
+          p = P.make('fj', {'type': 'forgejo', 'url': 'http://localhost:3002',
+                            'protocol': 'ssh', 'ssh_port': 2222, 'owner': 'me'})
+          assert p._push_url('me', 'repo') == 'ssh://git@localhost:2222/me/repo.git'
+
+          # route filters
+          repos = [{'name': 'SeaVault'}, {'name': 'tradex'}, {'name': 'Sea-Wallpaper'}]
+          assert [r['name'] for r in SY._filter_repos(repos, {'include': ['Sea*']})] == ['SeaVault', 'Sea-Wallpaper']
+          assert [r['name'] for r in SY._filter_repos(repos, {'exclude': ['trade*']})] == ['SeaVault', 'Sea-Wallpaper']
+
+          # sparkline
+          spark = tui._sparkline([0, 5, 10])
+          assert len(spark) == 3 and spark[0] == ' ' and spark[-1] == '@'
+
+          print('all unit checks passed')
           PY
