@@ -13,6 +13,7 @@
 
 import argparse
 import os
+import subprocess
 import sys
 
 from . import __version__
@@ -380,6 +381,40 @@ def cmd_doctor(args):
     return 0 if not problems else 1
 
 
+def cmd_update(args):
+    """re-run the one-click installer, keeping the existing configuration"""
+    cfg = C.load_config()
+    sched = C.setting(cfg, "schedule", "hourly")
+    home = os.environ.get("GITSYNC_HOME", "")
+    candidates = [os.path.join(home, "quickinstall.sh") if home else None,
+                  "/opt/gitsync/quickinstall.sh",
+                  os.path.expanduser("~/.local/share/gitsync/quickinstall.sh")]
+    script = next((c for c in candidates if c and os.path.exists(c)), None)
+    if script is None:
+        # not installed from a bundle - fetch the bootstrap directly
+        import urllib.request
+        url = ("https://raw.githubusercontent.com/SeaXen/gitsync/main/"
+               "quickinstall.sh")
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                script = "/tmp/gitsync-quickinstall.sh"
+                with open(script, "w") as f:
+                    f.write(r.read().decode())
+        except Exception as e:
+            print("could not fetch the installer: %s" % e)
+            print("update manually: git pull && bash install.sh")
+            return 1
+    user_mode = 1 if script.startswith(os.path.expanduser("~")) else 0
+    cmd = ["bash", script, "--no-setup", "--no-sync",
+           "--schedule", sched]
+    if user_mode:
+        cmd.append("--user")
+    print("updating gitsync (schedule: %s, config kept)..." % sched)
+    rc = subprocess.run(cmd).returncode
+    print("updated" if rc == 0 else "update failed (rc=%d)" % rc)
+    return rc
+
+
 def cmd_uninstall(args):
     if not args.yes:
         ans = input("remove gitsync scheduler + symlink? (y/N) ").strip().lower()
@@ -463,6 +498,9 @@ def main(argv=None):
 
     sp = sub.add_parser("doctor", help="health check: everything")
     sp.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("update", help="update gitsync (keeps your config)")
+    sp.set_defaults(func=cmd_update)
 
     sp = sub.add_parser("uninstall", help="remove scheduler + symlink")
     sp.add_argument("--yes", action="store_true")

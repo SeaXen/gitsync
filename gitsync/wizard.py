@@ -6,19 +6,43 @@ the token, and tests every connection before saving.
 """
 
 import os
+import sys
 
 from . import config as C
 from . import permissions as PERM
 from . import platforms as P
 
 
-def ask(prompt, default=None):
-    suffix = " [%s] " % default if default else " "
+def _tty():
+    """the controlling terminal, even when stdin is a pipe (curl | bash)"""
     try:
-        ans = input(prompt + suffix).strip()
+        if sys.stdin.isatty():
+            return sys.stdin
+        return open("/dev/tty", "r+")
+    except OSError:
+        return None
+
+
+def ask(prompt, default=None):
+    """prompt on the real terminal so `curl ... | bash` stays interactive"""
+    suffix = " [%s] " % default if default else " "
+    tty = _tty()
+    try:
+        if tty is None:
+            return default or ""
+        if tty is not sys.stdin:
+            tty.write(prompt + suffix)
+            tty.flush()
+            line = tty.readline()
+        else:
+            line = input(prompt + suffix)
+        ans = line.strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return default or ""
+    finally:
+        if tty is not None and tty is not sys.stdin:
+            tty.close()
     return ans or (default or "")
 
 
@@ -122,9 +146,10 @@ def run_wizard():
     sched = ask("Schedule", "hourly")
     cfg["settings"]["schedule"] = sched if sched in C.SCHEDULES else "hourly"
     cfg["settings"]["workers"] = int(ask("Parallel workers", "4") or 4)
+    # "Yes" = safe mode (never delete refs); "No" (default) = exact mirror
     cfg["settings"]["mode"] = "safe" if ask_yes(
             "Use safe mode? (No = exact mirror, prunes deleted refs)",
-            False) is False else "full"
+            False) else "full"
 
     C.save_config(cfg)
     hr("saved")

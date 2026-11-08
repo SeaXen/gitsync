@@ -48,9 +48,11 @@ echo "    target : $INSTALL_DIR"
 # --- copy the app ---
 sudo mkdir -p "$INSTALL_DIR" 2>/dev/null || mkdir -p "$INSTALL_DIR"
 sudo cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
-         "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$INSTALL_DIR/" 2>/dev/null \
+         "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$SRC_DIR/quickinstall.sh" \
+         "$INSTALL_DIR/" 2>/dev/null \
     || cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
-           "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$INSTALL_DIR/"
+           "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$SRC_DIR/quickinstall.sh" \
+           "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/gitsync"
 
 # --- symlink ---
