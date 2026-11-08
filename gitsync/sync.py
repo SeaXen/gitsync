@@ -54,11 +54,13 @@ def sync_repo(repo, source, targets, mode):
         P.run(["rm", "-rf", hub])
     if os.path.isdir(hub):
         P.run(["git", "remote", "set-url", "origin", src_url], cwd=hub)
-        rc, _, err = P.run(["git", "remote", "update", "--prune"], cwd=hub)
+        rc, _, err = P.run(["git", "remote", "update", "--prune"], cwd=hub,
+                            timeout=P.GIT_TIMEOUT)
         if rc != 0:
             return "mirror-update-failed", err.strip()[:200], []
     else:
-        rc, _, err = P.run(["git", "clone", "--mirror", src_url, hub])
+        rc, _, err = P.run(["git", "clone", "--mirror", src_url, hub],
+                            timeout=P.GIT_TIMEOUT)
         if rc != 0:
             P.run(["rm", "-rf", hub])
             return "clone-failed", err.strip()[:200], []
@@ -80,7 +82,7 @@ def sync_repo(repo, source, targets, mode):
                 cmd = ["git", "push", "--force", push_url,
                        "+refs/heads/*:refs/heads/*",
                        "+refs/tags/*:refs/tags/*"]
-            rc, _, err = P.run(cmd, cwd=hub)
+            rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
             if rc != 0:
                 errors.append("%s: %s" % (tname, err.strip()[:120]))
             else:

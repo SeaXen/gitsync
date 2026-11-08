@@ -56,9 +56,14 @@ def gitsync_bin():
     return "gitsync"
 
 
-def _sh(cmd, stdin_text=None):
-    return subprocess.run(cmd, capture_output=True, text=True,
-                          input=stdin_text)
+def _sh(cmd, stdin_text=None, timeout=20):
+    try:
+        return subprocess.run(cmd, capture_output=True, text=True,
+                              input=stdin_text, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(cmd, 124, "", "timeout")
+    except Exception as e:
+        return subprocess.CompletedProcess(cmd, 1, "", str(e))
 
 
 def systemd_installed():

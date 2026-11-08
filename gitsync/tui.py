@@ -55,7 +55,21 @@ def flash(text, secs=4):
 
 # ---------------------------------------------------------------- data
 
+_refreshing = threading.Lock()
+
+
 def refresh_platforms():
+    # never stack refreshes: a hung API call must not spawn another thread
+    if not _refreshing.acquire(blocking=False):
+        return
+    try:
+        _refresh_platforms_inner()
+    finally:
+        _refreshing.release()
+
+
+def _refresh_platforms_inner():
+    state["counts_age"] = time.time()   # advance first: hung calls can't re-arm
     cfg = C.load_config()
     rows = []
     for name, p in cfg.get("platforms", {}).items():
@@ -384,6 +398,21 @@ CLOCK_X = 1          # column of the clock inside the status line
 CLOCK_LEN = 19       # len("2026-11-08 07:37:00")
 
 
+_status_cache = {"txt": "checking...", "at": 0.0}
+
+
+def cached_status():
+    """scheduler status without shelling out on every frame"""
+    now = time.time()
+    if now - _status_cache["at"] > 15:
+        try:
+            _status_cache["txt"] = S.status()
+        except Exception:
+            _status_cache["txt"] = "unknown"
+        _status_cache["at"] = now
+    return _status_cache["txt"]
+
+
 def status_line():
     """the row-1 status text (clock at CLOCK_X, sync state, schedule, age)"""
     sched = C.setting(C.load_config(), "schedule", "hourly")
@@ -453,7 +482,8 @@ def draw(stdscr):
     st = state["settings"]
     safe_add(rw, 2, 2, ("workers=%s  mode=%s  forks=%s   scheduler: %s"
                         % (st.get("workers"), st.get("mode"),
-                           st.get("include_forks"), S.status()))[:w - 6], dim)
+                           st.get("include_forks"),
+                           cached_status()))[:w - 6], dim)
     rw.noutrefresh()
 
     # log

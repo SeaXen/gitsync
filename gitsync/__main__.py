@@ -309,6 +309,15 @@ def cmd_mirror(args):
     return 0 if status == "ok" else 1
 
 
+def sh(cmd, timeout=30, stdin_text=None):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=timeout, input=stdin_text)
+        return r.returncode, r.stdout, r.stderr
+    except Exception as e:
+        return 1, "", str(e)
+
+
 def cmd_doctor(args):
     """health check: config, platforms, disk, scheduler, hub"""
     cfg = C.load_config()
@@ -342,11 +351,20 @@ def cmd_doctor(args):
               % (r.get("name"), r.get("source"), ", ".join(tgts) or "(none)",
                  "ok" if good else "INCOMPLETE"))
     print("\nstorage:")
-    rc, out, _ = sh(["bash", "-c",
-                     "du -sh %s 2>/dev/null | cut -f1" % C.MIRROR_DIR])
-    print("  mirror hub    : %s (%s)" % ((out or "?").strip(), C.MIRROR_DIR))
-    rc, out, _ = sh(["bash", "-c", "df -h %s | tail -1" % C.DATA_DIR])
-    print("  disk          : %s" % " ".join((out or "").split()[3:5]))
+    try:
+        n_mirrors = len([d for d in os.listdir(C.MIRROR_DIR)
+                         if d.endswith(".git")])
+    except OSError:
+        n_mirrors = 0
+    print("  mirror hub    : %d mirrors (%s)" % (n_mirrors, C.MIRROR_DIR))
+    rc, out, _ = sh(["bash", "-c", "df -h %s | tail -1" % C.DATA_DIR],
+                    timeout=30)
+    parts = (out or "").split()
+    if len(parts) > 4:
+        print("  disk          : %s free of %s (%s used)"
+              % (parts[3], parts[1], parts[4]))
+    else:
+        print("  disk          : (df unavailable)")
     print("\nscheduler      : %s" % S.status())
     if "not scheduled" in S.status() and C.setting(cfg, "schedule") != "off":
         problems.append("scheduler not installed (run: gitsync install)")

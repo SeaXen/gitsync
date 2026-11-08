@@ -28,7 +28,11 @@ def _fs_safe(name):
     return re.sub(r"[^A-Za-z0-9._-]", "_", name)
 
 
-def run(cmd, cwd=None, timeout=14400):
+GIT_TIMEOUT = 14400        # long operations (clone/push) pass this explicitly
+API_TIMEOUT = 120          # CLI/API calls (gh repo list, glab api, ...)
+
+
+def run(cmd, cwd=None, timeout=300):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            cwd=cwd, timeout=timeout)
@@ -86,7 +90,7 @@ class GitHubPlatform:
 
     # -- helpers
     def _gh(self, args):
-        return run(["gh"] + args)
+        return run(["gh"] + args, timeout=API_TIMEOUT)
 
     def _api(self, path):
         return _http("GET", "https://api.github.com" + path, token=self.token)
