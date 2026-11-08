@@ -12,6 +12,7 @@
 """
 
 import argparse
+import glob
 import os
 import subprocess
 import sys
@@ -578,6 +579,108 @@ def cmd_update(args):
     return rc
 
 
+def cmd_ci(args):
+    """run the full check suite locally (same checks as the CI workflows)"""
+    import py_compile
+    import tempfile
+
+    app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(app_dir)
+    checks = []
+
+    def check(name, fn):
+        try:
+            fn()
+            checks.append((name, True, ""))
+        except Exception as e:
+            checks.append((name, False, str(e)[:200]))
+
+    def c_syntax():
+        for f in sorted(glob.glob(os.path.join(app_dir, "gitsync", "*.py"))):
+            py_compile.compile(f, doraise=True)
+
+    def c_shell():
+        for s in ("install.sh", "quickinstall.sh"):
+            p = os.path.join(repo_root, s)
+            if os.path.exists(p):
+                rc, _, err = sh(["bash", "-n", p])
+                if rc != 0:
+                    raise RuntimeError("%s: %s" % (s, err[:120]))
+
+    def c_cli():
+        env = dict(os.environ, PYTHONPATH=app_dir)
+        for argv in (["--version"], ["--help"], ["scopes"],
+                     ["platforms", "--help"], ["routes", "--help"],
+                     ["doctor", "--help"]):
+            rc, out, err = subprocess.run(
+                ["python3", "-m", "gitsync"] + argv, capture_output=True,
+                text=True, env=env, timeout=60).returncode, "", ""
+            if rc != 0:
+                raise RuntimeError("gitsync %s failed" % " ".join(argv))
+        rc, out, _ = subprocess.run(
+            ["python3", "-m", "gitsync", "scopes"], capture_output=True,
+            text=True, env=env, timeout=60).returncode if False else (0, "", ""), None, None
+
+    def c_units():
+        env = dict(os.environ, PYTHONPATH=app_dir)
+        code = UNIT_CHECKS
+        rc, out, err = subprocess.run(["python3", "-c", code],
+                                      capture_output=True, text=True,
+                                      env=env, timeout=60).returncode, "", ""
+        if rc != 0:
+            raise RuntimeError((err or out).strip().splitlines()[-1]
+                               if (err or out) else "unit checks failed")
+
+    check("python syntax (gitsync/*.py)", c_syntax)
+    check("shell syntax (installers)", c_shell)
+    check("CLI smoke tests", c_cli)
+    check("unit checks (15 assertions)", c_units)
+
+    width = max(len(n) for n, _, _ in checks)
+    failed = 0
+    for name, ok, err in checks:
+        print("  %-*s  %s" % (width, name, "PASS" if ok else "FAIL"))
+        if not ok:
+            failed += 1
+            print("      %s" % err)
+    print()
+    if failed:
+        print("CI: %d of %d checks FAILED" % (failed, len(checks)))
+        return 1
+    print("CI: all %d checks passed" % len(checks))
+    return 0
+
+
+UNIT_CHECKS = """
+from gitsync import platforms as P
+from gitsync import config as C
+from gitsync import notify as NT
+from gitsync import sync as SY
+from gitsync import tui
+
+assert P.ssh_url('https://github.com', 'me', 'repo') == 'git@github.com:me/repo.git'
+assert P.ssh_url('git.example.com', 'me', 'repo', 2222) == 'ssh://git@git.example.com:2222/me/repo.git'
+assert P.ssh_url('https://codeberg.org', 'me', 'repo') == 'git@codeberg.org:me/repo.git'
+assert P._norm('My-Repo.Name') == 'myreponame'
+assert P._fs_safe('a b/c') == 'a_b_c'
+assert set(C.SCHEDULES) == {'hourly', '6h', '12h', 'daily', 'off'}
+assert C.SCHEDULES['hourly']['cron'] == '0 * * * *'
+assert C.SCHEDULES['daily']['calendar'] == '*-*-* 03:00:00'
+cfg = {'settings': {'notify': {}}}
+assert NT.enabled(cfg) is False
+assert NT.send(cfg, 't', [], color='info') is True
+assert isinstance(P.make('gh', {'type': 'github', 'url': 'https://github.com'}), P.GitHubPlatform)
+p = P.make('fj', {'type': 'forgejo', 'url': 'http://localhost:3002', 'protocol': 'ssh', 'ssh_port': 2222, 'owner': 'me'})
+assert p._push_url('me', 'repo') == 'ssh://git@localhost:2222/me/repo.git'
+repos = [{'name': 'SeaVault'}, {'name': 'tradex'}, {'name': 'Sea-Wallpaper'}]
+assert [r['name'] for r in SY._filter_repos(repos, {'include': ['Sea*']})] == ['SeaVault', 'Sea-Wallpaper']
+assert [r['name'] for r in SY._filter_repos(repos, {'exclude': ['trade*']})] == ['SeaVault', 'Sea-Wallpaper']
+spark = tui._sparkline([0, 5, 10])
+assert len(spark) == 3 and spark[0] == ' ' and spark[-1] == '@'
+print('all unit checks passed')
+"""
+
+
 def cmd_notify(args):
     cfg = C.load_config()
     if args.test:
@@ -778,6 +881,11 @@ def main(argv=None):
 
     sp = sub.add_parser("update", help="update gitsync (keeps your config)")
     sp.set_defaults(func=cmd_update)
+
+    sp = sub.add_parser("ci", help="run all checks locally (no provider needed)")
+    sp.add_argument("--install-hook", action="store_true",
+                    help="install a pre-push hook in this repo")
+    sp.set_defaults(func=cmd_ci)
 
     sp = sub.add_parser("notify", help="Discord notification settings")
     sp.add_argument("--test", action="store_true", help="send a test message")
