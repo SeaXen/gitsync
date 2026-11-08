@@ -10,7 +10,7 @@
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![Platforms](https://img.shields.io/badge/platforms-GitHub%20%C2%B7%20GitLab%20%C2%B7%Forgejo%20%C2%B7%20Gitea%20%C2%B7%20Bitbucket%20%C2%B7%20Local-green.svg)](#platforms--tokens)
 [![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#requirements)
-[![CI](https://github.com/SeaXen/gitsync/actions/workflows/ci.yml/badge.svg)](https://github.com/SeaXen/gitsync/actions/workflows/ci.yml)
+[![CI](https://gitlab.com/seaxen/gitsync/badges/main/pipeline.svg)](https://gitlab.com/seaxen/gitsync/-/pipelines)
 
 </div>
 
@@ -156,6 +156,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync sync --to gitlab` | push to one target only |
 | `gitsync install --schedule daily` | (re)install the scheduler |
 | `gitsync doctor` | full health check |
+| `gitsync ci` | run all checks locally — no CI provider needed |
 | `gitsync uninstall` | remove scheduler + symlink |
 
 ---
@@ -524,6 +525,24 @@ config file and the machine accordingly.
 
 **Does it need root?**
 No — `--user` installs entirely under your home directory.
+
+## CI without a provider
+
+`gitsync ci` runs the entire check suite locally in about two seconds —
+no account, no runner, no verification:
+
+```bash
+gitsync ci
+#   python syntax (gitsync/*.py)  PASS
+#   shell syntax (installers)     PASS
+#   CLI smoke tests               PASS
+#   unit checks (15 assertions)   PASS
+# CI: all 4 checks passed
+```
+
+The same checks are also in `.github/workflows/ci.yml` and
+`.gitlab-ci.yml` for hosted CI, and this repo ships a `pre-push` hook that
+runs them before every push (`git push --no-verify` to bypass).
 
 ## Documentation
 
