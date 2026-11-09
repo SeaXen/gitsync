@@ -448,12 +448,17 @@ def _plan_repo(repo, source, targets, mode):
     Returns a list of human-readable action strings. Uses git ls-remote
     against the source and each target's expected URL, so it never creates
     a repo and never writes to the hub.
+
+    In "full" mode the push is `--mirror`, which *deletes* refs the target
+    has and the source does not. That is the one part of a sync that can
+    lose work, so a dry run names every ref that would be pruned.
     """
     name = repo["name"]
     src_url = repo.get("clone_url")
-    src_head = _remote_head(src_url) if src_url else None
-    if src_head is None:
+    src_refs = _ls_remote_map(src_url) if src_url else {}
+    if not src_refs:
         return ["cannot reach source %s" % name], "error"
+    src_head = src_refs.get("HEAD")
 
     hub = mirror_path(name)
     actions = []
@@ -463,10 +468,9 @@ def _plan_repo(repo, source, targets, mode):
             actions.append("hub up to date")
         else:
             actions.append("hub: %s -> %s" % ((hub_head or "none")[:8],
-                                              src_head[:8]))
+                                              (src_head or "?")[:8]))
     else:
-        actions.append("hub: would clone (%s)" % src_head[:8])
-        behind += 1
+        actions.append("hub: would clone (%s)" % (src_head or "?")[:8])
 
     behind = 0
     for tname, tplat in targets.items():
@@ -476,31 +480,39 @@ def _plan_repo(repo, source, targets, mode):
             actions.append("%s: cannot probe (%s)" % (tname, str(e)[:60]))
             behind += 1
             continue
-        thead = _remote_head(url)
-        if thead is None:
+        trefs = _ls_remote_map(url)
+        thead = trefs.get("HEAD")
+        if not trefs:
             actions.append("%s: would CREATE" % tname)
             behind += 1
             continue
         if thead == src_head:
             actions.append("%s: up to date" % tname)
-            continue
-        # count how many commits the target is missing
-        rc, out, _ = P.run(["git", "ls-remote", url, "refs/heads/*"],
-                           timeout=60)
-        refs = [l.split() for l in out.strip().splitlines() if l.strip()]
-        # count objects the target lacks by asking the source
-        rc2, cnt, _ = P.run(
-            ["git", "ls-remote", src_url, "refs/heads/*"], timeout=60)
-        src_refs = {l.split()[1]: l.split()[0]
-                    for l in cnt.strip().splitlines() if l.strip()}
-        missing = [r for r, sha in refs if src_refs.get(r) != sha]
-        if missing:
-            actions.append("%s: %d ref(s) behind (%s)"
-                           % (tname, len(missing), ", ".join(
-                               m.split("/")[-1] for m in missing[:3])))
-            behind += len(missing)
         else:
-            actions.append("%s: would update" % tname)
+            missing = [r for r, sha in trefs.items()
+                       if src_refs.get(r) != sha
+                       and r.startswith(("refs/heads/", "refs/tags/"))]
+            if missing:
+                actions.append("%s: %d ref(s) behind (%s)"
+                               % (tname, len(missing), ", ".join(
+                                   m.split("/")[-1] for m in missing[:3])))
+                behind += len(missing)
+            else:
+                actions.append("%s: would update" % tname)
+        # refs the target has and the source does not: pruned by --mirror
+        if mode == "full":
+            doomed = [r for r in trefs
+                      if r.startswith(("refs/heads/", "refs/tags/"))
+                      and r not in src_refs]
+            if doomed:
+                behind += len(doomed)
+                shown = ", ".join(sorted(
+                    r.split("/", 2)[-1] for r in doomed)[:4])
+                more = "" if len(doomed) <= 4 else " +%d more" % (
+                    len(doomed) - 4)
+                actions.append(
+                    "%s: WOULD DELETE %d ref(s): %s%s"
+                    % (tname, len(doomed), shown, more))
     return actions, ("update" if behind else "ok")
 
 

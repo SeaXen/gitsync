@@ -155,6 +155,17 @@ DEFAULT_URLS = {
     "generic": "",
 }
 
+# colour themes: the four curses pairs, in order
+# (accent / ok / warning / bad). "mono" is for terminals where colour is
+# noise; the rest are just different accents on the same semantics.
+THEMES = {
+    "default": ["cyan", "green", "yellow", "red"],
+    "mono": ["white", "white", "white", "white"],
+    "ocean": ["blue", "cyan", "yellow", "red"],
+    "forest": ["green", "green", "yellow", "red"],
+    "sunset": ["magenta", "yellow", "green", "red"],
+}
+
 PLATFORM_TYPES = ["github", "gitlab", "forgejo", "gitea", "bitbucket",
                   "generic", "local"]
 

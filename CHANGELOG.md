@@ -4,6 +4,41 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-11-09
+
+Three things: the risky part of a sync is now visible before it happens, the
+last sync option moved into the TUI, and the TUI takes a theme.
+
+### Added
+
+- **A dry run now names every ref a `full`-mode push would delete.** The
+  push in full mode is `git push --mirror`, which prunes refs the target has
+  and the source does not — the one part of a sync that can lose work. The
+  plan now lists them per target:
+
+  ```
+  [1/1] PLAN dockeryaml
+           - backup: up to date
+           - backup: WOULD DELETE 1 ref(s): prune-preview
+  ```
+
+  `mode: safe` never reports one, because it never prunes. The CI smoke test
+  covers both directions with an offline two-folder repo.
+- **`T` in the repo browser** pushes the selected repos to **one site** of
+  your choosing (the last sync option that needed the terminal). If every
+  route is a mesh, the picker says so, because `--to` does not apply.
+- **Colour theme** (`O` → Colour theme): `default`, `mono`, `ocean`,
+  `forest`, `sunset`. `mono` is all-white for terminals where colour is
+  noise. The change applies immediately, no restart, and shows on the
+  Settings tab.
+
+### Changed
+
+- `_plan_repo()` reads each remote's full ref map once instead of issuing
+  extra `ls-remote` calls per branch, so a dry run of 52 repos is not
+  slower than before despite doing more work.
+- 135 unit assertions (was 129).
+
 ## [1.5.2] - 2026-11-09
 
 ### Fixed

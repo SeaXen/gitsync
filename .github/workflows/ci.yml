@@ -277,4 +277,15 @@ jobs:
           _c2 = {'routes': [{'name': 'a', 'source': 'github',
                              'targets': ['g', 'f']}]}
           assert tui._route_rows(_c2) == ['a', 'a/g', 'a/f']
+          # ---- themes: every entry must be a real curses colour, and mono must be
+          #      all-white so a colour-blind terminal still reads the same semantics
+          for _t, _spec in C.THEMES.items():
+              assert len(_spec) == 4, _t
+              for _c in _spec:
+                  assert _c in ('black', 'red', 'green', 'yellow', 'blue',
+                                'magenta', 'cyan', 'white'), (_t, _c)
+          assert C.THEMES['mono'] == ['white'] * 4
+          assert set(C.THEMES) >= {'default', 'mono', 'ocean', 'forest', 'sunset'}
+          assert C.setting({'settings': {'theme': 'ocean'}}, 'theme') == 'ocean'
+          assert C.setting({'settings': {}}, 'theme', 'default') == 'default'
           PY

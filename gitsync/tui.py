@@ -217,6 +217,31 @@ def _app_dir():
 
 # ---------------------------------------------------------------- draw
 
+_COLOR_NAMES = {
+    "black": curses.COLOR_BLACK, "red": curses.COLOR_RED,
+    "green": curses.COLOR_GREEN, "yellow": curses.COLOR_YELLOW,
+    "blue": curses.COLOR_BLUE, "magenta": curses.COLOR_MAGENTA,
+    "cyan": curses.COLOR_CYAN, "white": curses.COLOR_WHITE,
+}
+
+
+def apply_theme(name=None):
+    """(re)load the four colour pairs from the configured theme.
+
+    Called at start-up and again the moment the setting changes, so the
+    whole TUI recolours without a restart.
+    """
+    if name is None:
+        name = C.setting(C.load_config(), "theme", "default")
+    spec = C.THEMES.get(name) or C.THEMES["default"]
+    try:
+        for i, cname in enumerate(spec, 1):
+            curses.init_pair(i, _COLOR_NAMES.get(cname, curses.COLOR_WHITE),
+                             -1)
+    except curses.error:
+        pass
+
+
 def safe_add(win, y, x, text, attr=0):
     h, w = win.getmaxyx()
     if 0 <= y < h and 0 <= x < w:
@@ -328,6 +353,10 @@ def options_screen(stdscr):
          "warn this long before a credential expires",
          lambda: cycle(cfg, "token_warn_days", [7, 14, 30, 60, 90],
                        "token warning")),
+        ("Colour theme: %s" % C.setting(cfg, "theme", "default"),
+         "mono = no colour; the rest change the accent",
+         lambda: (cycle(cfg, "theme", list(C.THEMES), "theme"),
+                  apply_theme())),
     ]
     menu(stdscr, "OPTIONS", items, note="saved to %s" % C.CONFIG_FILE)
 
@@ -915,6 +944,32 @@ def _local_target():
     return None
 
 
+_picked_platform = {}      # what the platform picker last chose
+
+
+def _pick_platform(stdscr, title):
+    """choose one enabled platform; returns its name or None"""
+    cfg = C.load_config()
+    live = [n for n, p in (cfg.get("platforms") or {}).items()
+            if p.get("enabled", True)]
+    if not live:
+        flash("no enabled platforms", 5)
+        return None
+    mesh = any(r.get("direction") == "mesh" for r in C.routes(cfg))
+
+    def pick(n):
+        _picked_platform["name"] = n
+
+    items = [(n, "(mesh: ignored)" if mesh else "", (lambda nn=n: pick(nn)))
+             for n in live]
+    _picked_platform["name"] = None
+    menu(stdscr, title, items,
+         note="%d site(s)%s" % (len(live),
+                                " - a mesh always syncs every peer, so --to "
+                                "does not apply" if mesh else ""))
+    return _picked_platform.get("name")
+
+
 def repos_screen(stdscr):
     """browse the source account's repos, pick some, sync just those"""
     if not state["repo_loaded"]:
@@ -964,8 +1019,8 @@ def repos_screen(stdscr):
                                                        len(items)))[:w - 1],
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
-                     " space=select  a=all  n=none  /=filter  S=sync all "
-                     "targets  L=local only  B=back ")
+                     " space=select  a=all  n=none  /=filter  S=all targets  "
+                     "T=one site  L=local only  B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
         if ch == curses.KEY_MOUSE:
@@ -1012,7 +1067,8 @@ def repos_screen(stdscr):
         elif ch == ord("/"):
             query = prompt_line(stdscr, " filter: ")
             cur = top = 0
-        elif ch in (ord("s"), ord("S"), ord("l"), ord("L")):
+        elif ch in (ord("s"), ord("S"), ord("l"), ord("L"),
+                    ord("t"), ord("T")):
             if not state["repo_sel"]:
                 flash("nothing selected - press space on a repo", 5)
                 continue
@@ -1024,6 +1080,11 @@ def repos_screen(stdscr):
                     flash("no local-disk target in this route", 6)
                     continue
                 cmd += ["--to", local]         # local hub only
+            elif ch in (ord("t"), ord("T")):
+                picked = _pick_platform(stdscr, "PUSH THE SELECTED REPOS TO")
+                if not picked:
+                    continue
+                cmd += ["--to", picked]
             state["repo_scroll"] = cur
             _suspend_run(stdscr, cmd)
             state["repo_loaded"] = False
@@ -2096,6 +2157,7 @@ def draw_settings(stdscr, h, w, dim):
         ("Mesh conflicts     : %s" % st.get("mesh_conflict", "newest"), 0),
         ("Token warning      : %s days" % (st.get("token_warn_days", 30)
                                            or 30), 0),
+        ("Colour theme       : %s" % st.get("theme", "default"), 0),
         ("Scheduler          : %s" % cached_status(), 0),
         ("Config file        : %s" % C.CONFIG_FILE, dim),
         ("Mirror hub         : %s" % C.MIRROR_DIR, dim),
@@ -2422,10 +2484,7 @@ def _run(stdscr):
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_CYAN, -1)
-        curses.init_pair(2, curses.COLOR_GREEN, -1)
-        curses.init_pair(3, curses.COLOR_YELLOW, -1)
-        curses.init_pair(4, curses.COLOR_RED, -1)
+        apply_theme()
     read_log_tail()
     state["records"] = SYNC.last_records(10)
     _cfg = C.load_config()

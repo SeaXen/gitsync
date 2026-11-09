@@ -556,6 +556,41 @@ A pace of 1 s over 54 repos adds about a minute to a run and is logged:
 
 ---
 
+## What a sync would delete (and how to stop it)
+
+`mode: full` (the default) means "make the target an exact mirror": the push
+is `git push --mirror`, so **a branch or tag that exists on the target but
+not on the source is deleted there**. That is what you want most of the time,
+and it is the one operation in gitsync that can lose work, so it is always
+visible first:
+
+```bash
+gitsync sync --dry-run          # or press D in the TUI
+```
+
+```
+[1/1] PLAN dockeryaml
+         - hub up to date
+         - backup: up to date
+         - backup: WOULD DELETE 1 ref(s): prune-preview
+```
+
+`mode: safe` (globally in `O`, or per route in `P` → `O`) pushes heads and
+tags but prunes nothing, so a branch only a target has is kept and you delete
+it by hand where you want it gone.
+
+**Deleting a whole repo is different, and safer:** the repo simply stops
+appearing in the source's list, so nothing is pushed to it again — it is
+*not* deleted anywhere. It becomes an orphan on the other sites, listed by
+Tools → Disk (or `gitsync disk --orphans`), and removing it is a separate,
+explicit step (`--prune-orphans`).
+
+In a **mesh** route, refs are unioned: deleting a branch on one platform
+while another still has it means the mesh re-creates it on the next run. You
+would have to delete it on every peer.
+
+---
+
 ## One command, everything inside
 
 `gitsync` opens the dashboard, and from there nothing needs a terminal:
@@ -565,11 +600,12 @@ A pace of 1 s over 54 repos adds about a minute to a run and is logged:
 | `A` | **accounts**: add, edit, remove, test, enable/disable a site |
 | `P` (Routes tab) | **routes**: pause/resume a target or a route, run one route, dry-run it, edit its filters, per-route workers/mode/mesh-conflict/schedule, add a route (`A`), remove one (`X`) |
 | `C` | schedule (hourly → daily → off) |
-| `O` | options: workers, mirror mode, forks, notify, pacing, mesh policy, token warning |
+| `O` | options: workers, mirror mode, forks, notify, pacing, mesh policy, token warning, colour theme |
 | `N` → `W` | webhook receiver: secret, payload URL, install/stop |
 | `E` | browse repos, pick some, sync just those |
 | `T` | **tools**: disk + orphans, doctor, compare sites, mirror one repo, fix drift (preview), update, uninstall |
-| `D` | dry run — preview a whole run, or one route |
+| `D` | dry run — preview a whole run, or one route. In `full` mode it names every ref the push would delete |
+| `T` (repo browser) | push the selected repos to **one site** |
 | `S` | sync now (or one route, from the pause screen) |
 
 Accounts and routes are the two things that used to force you into a shell;
@@ -959,7 +995,7 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (129 assertions)   PASS
+#   unit checks (135 assertions)   PASS
 # CI: all 4 checks passed
 ```
 

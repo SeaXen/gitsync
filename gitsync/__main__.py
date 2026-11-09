@@ -1158,7 +1158,54 @@ def cmd_ci(args):
             with open(os.path.join(cfgdir, "config.json"), "w") as f:
                 _json.dump(cfg, f)
             e2 = dict(env, GITSYNC_CONFIG_DIR=cfgdir, GITSYNC_DATA_DIR=datadir)
-            for argv in (["sync", "--dry-run"], ["status"], ["routes"],
+            # a ref that exists only on the target must be reported as a
+            # prune by a full-mode dry run (and never by a safe-mode one).
+            # LocalPlatform lists the *.git dirs inside its path, so the
+            # folders each hold one bare repo.
+            def sh2(args, cwd=None):
+                subprocess.run(args, capture_output=True, cwd=cwd,
+                               timeout=60)
+
+            sh2(["git", "init", "--bare", "-q",
+                 os.path.join(src_dir, "y.git")])
+            sh2(["git", "init", "--bare", "-q",
+                 os.path.join(dst_dir, "y.git")])
+            seed = os.path.join(td, "seed")
+            os.makedirs(seed)
+            sh2(["git", "init", "-q", seed])
+            sh2(["git", "-C", seed, "commit", "--allow-empty", "-q",
+                 "-m", "x", "--author", "t <t@t>",
+                 "--date", "2020-01-01T00:00:00"])
+            sh2(["git", "-C", seed, "branch", "-M", "main"])
+            sh2(["git", "-C", seed, "push", "-q",
+                 os.path.join(src_dir, "y.git"), "main"])
+            sh2(["git", "-C", seed, "push", "-q",
+                 os.path.join(dst_dir, "y.git"), "main"])
+            sh2(["git", "-C", seed, "push", "-q",
+                 os.path.join(dst_dir, "y.git"),
+                 "main:refs/heads/only-on-target"])
+            cfg["settings"]["mode"] = "full"
+            with open(os.path.join(cfgdir, "config.json"), "w") as f:
+                _json.dump(cfg, f)
+            p = subprocess.run(["python3", "-m", "gitsync", "sync",
+                                "--dry-run"], capture_output=True, text=True,
+                               env=e2, timeout=120)
+            if p.returncode != 0:
+                raise RuntimeError("gitsync sync --dry-run failed: %s"
+                                   % (p.stderr or p.stdout).strip()[-160:])
+            if "WOULD DELETE" not in (p.stdout or ""):
+                raise RuntimeError("dry run did not report the ref a "
+                                   "full-mode push would delete")
+            cfg["settings"]["mode"] = "safe"
+            with open(os.path.join(cfgdir, "config.json"), "w") as f:
+                _json.dump(cfg, f)
+            p = subprocess.run(["python3", "-m", "gitsync", "sync",
+                                "--dry-run"], capture_output=True, text=True,
+                               env=e2, timeout=120)
+            if "WOULD DELETE" in (p.stdout or ""):
+                raise RuntimeError("safe mode must never report a prune")
+
+            for argv in (["status"], ["routes"],
                          ["stars", "list", "src"]):
                 p = subprocess.run(["python3", "-m", "gitsync"] + argv,
                                    capture_output=True, text=True, env=e2,
@@ -1182,7 +1229,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (129 assertions)", c_units)
+    check("unit checks (135 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1447,6 +1494,18 @@ assert C.remove_platform(_c, 'nope') is not None
 _c2 = {'routes': [{'name': 'a', 'source': 'github',
                    'targets': ['g', 'f']}]}
 assert tui._route_rows(_c2) == ['a', 'a/g', 'a/f']
+
+# ---- themes: every entry must be a real curses colour, and mono must be
+#      all-white so a colour-blind terminal still reads the same semantics
+for _t, _spec in C.THEMES.items():
+    assert len(_spec) == 4, _t
+    for _c in _spec:
+        assert _c in ('black', 'red', 'green', 'yellow', 'blue',
+                      'magenta', 'cyan', 'white'), (_t, _c)
+assert C.THEMES['mono'] == ['white'] * 4
+assert set(C.THEMES) >= {'default', 'mono', 'ocean', 'forest', 'sunset'}
+assert C.setting({'settings': {'theme': 'ocean'}}, 'theme') == 'ocean'
+assert C.setting({'settings': {}}, 'theme', 'default') == 'default'
 
 print('all unit checks passed')
 """
