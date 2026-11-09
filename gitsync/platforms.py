@@ -213,10 +213,11 @@ class GitHubPlatform:
                     vis = r[1] if len(r) > 1 else "PUBLIC"
                     fork = (r[2] if len(r) > 2 else "false") == "true"
                     url = r[3] if len(r) > 3 else ""
-                    repos.append({"name": name,
+                    rid = (url.split("github.com/")[-1].replace(".git", "")
+                           if "github.com/" in url else name)
+                    repos.append({"name": name, "id": rid or name,
                                   "private": vis != "PUBLIC",
-                                  "fork": fork,
-                                  "clone_url": url})
+                                  "fork": fork, "clone_url": url})
                 if len(rows) < 100:
                     break
                 page += 1
@@ -232,6 +233,7 @@ class GitHubPlatform:
                 raise RuntimeError("GitHub API failed: %s" % out)
             for r in out:
                 repos.append({"name": r["name"],
+                              "id": r.get("full_name") or r["name"],
                               "private": bool(r.get("private")),
                               "fork": bool(r.get("fork")),
                               "clone_url": self._clone_url(r["full_name"])})
@@ -380,7 +382,9 @@ class GitLabPlatform:
             if not isinstance(out, list):
                 raise RuntimeError("GitLab API failed: %s" % out)
             for p in out:
-                repos.append({"name": p["name"], "private":
+                repos.append({"name": p["name"],
+                              "id": p.get("path_with_namespace") or
+                              p["name"], "private":
                               p.get("visibility") == "private",
                               "fork": bool(p.get("forked_from_project")),
                               "clone_url": self._url_with_token(
@@ -565,11 +569,14 @@ class ForgejoPlatform:
                 raise RuntimeError("%s API failed: %s"
                                    % (self.ptype, out))
             for r in out:
+                owner = (r.get("owner") or {}).get("login") or ""
                 repos.append({"name": r["name"],
+                              "id": "%s/%s" % (owner, r["name"])
+                              if owner else r["name"],
                               "private": bool(r.get("private")),
                               "fork": bool(r.get("fork")),
                               "clone_url": self._push_url(
-                                  r["owner"]["login"], r["name"])})
+                                  owner, r["name"])})
             if len(out) < 50:
                 break
             page += 1
@@ -680,8 +687,9 @@ class LocalPlatform:
                 rc, out, _ = run(["git", "for-each-ref", "--format=%(refname)"],
                                  cwd=full, timeout=30)
                 if rc == 0 and out.strip():
-                    repos.append({"name": entry[:-4], "private": True,
-                                  "fork": False, "clone_url": full})
+                    repos.append({"name": entry[:-4], "id": entry[:-4],
+                                  "private": True, "fork": False,
+                                  "clone_url": full})
         return repos
 
     def repo_url(self, repo):
@@ -771,6 +779,7 @@ class BitbucketPlatform:
             for r in out["values"]:
                 parent = (r.get("parent") or {}).get("full_name")
                 repos.append({"name": r["name"],
+                              "id": "%s/%s" % (self.owner, r["name"]),
                               "private": bool(r.get("is_private")),
                               "fork": bool(parent),
                               "clone_url": self._git_url(

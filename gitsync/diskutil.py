@@ -50,20 +50,28 @@ def human(n):
 
 
 def mirrors():
-    """[(name, path, bytes, mtime)] for every hub mirror, biggest first"""
+    """[(id, path, bytes, mtime)] for every hub mirror, biggest first.
+
+    Walks both layouts: the new mirrors/{type}/{id}.git and the legacy flat
+    mirrors/{name}.git, so an upgraded hub keeps reporting its mirrors.
+    """
     out = []
     root = C.MIRROR_DIR
     if not os.path.isdir(root):
         return out
-    for entry in sorted(os.listdir(root)):
-        full = os.path.join(root, entry)
-        if not entry.endswith(".git") or not os.path.isdir(full):
-            continue
-        try:
-            mtime = os.path.getmtime(full)
-        except OSError:
-            mtime = 0
-        out.append((entry[:-4], full, dir_size(full), mtime))
+    for dirpath, dirnames, _files in os.walk(root):
+        for entry in sorted(dirnames):
+            if not entry.endswith(".git"):
+                continue
+            full = os.path.join(dirpath, entry)
+            rel = os.path.relpath(full, root)[:-4]      # type/id or name
+            try:
+                mtime = os.path.getmtime(full)
+            except OSError:
+                mtime = 0
+            out.append((rel, full, dir_size(full), mtime))
+        dirnames[:] = [d for d in dirnames
+                       if not d.endswith(".git")]        # do not descend
     out.sort(key=lambda t: t[2], reverse=True)
     return out
 
@@ -107,10 +115,12 @@ def orphans(source_names):
     [(name, path, bytes)] sorted biggest-first — safe to delete, since a
     mirror is only a cache of something that must exist upstream.
     """
-    live = {n.lower() for n in source_names}
+    live = {str(n).lower() for n in source_names}
     out = []
     for name, path, size, _ in mirrors():
-        if name.lower() not in live:
+        # name is "type/id" (new) or "name" (legacy): compare the id part
+        rid = name.split("/", 1)[1] if "/" in name else name
+        if rid.lower() not in live and name.lower() not in live:
             out.append((name, path, size))
     out.sort(key=lambda t: t[2], reverse=True)
     return out

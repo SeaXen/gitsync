@@ -456,6 +456,79 @@ class TestSyncHelpers(unittest.TestCase):
                 C.DATA_DIR = old
 
 
+class TestHubPaths(unittest.TestCase):
+    """P0-5: the hub is keyed by a stable id, and the legacy layout keeps
+    working without being deleted."""
+
+    def test_hub_rel_encodes_the_id(self):
+        self.assertEqual(SY.hub_rel('SeaXen/gitsync'), 'SeaXen__gitsync')
+        self.assertEqual(SY.hub_rel('a b/c'), 'a_b__c')
+
+    def test_new_repo_gets_the_nested_path(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                p = SY.mirror_path({'name': 'docs', 'id': 'group/docs'},
+                                   'gitlab')
+                self.assertEqual(p, os.path.join(td, 'gitlab',
+                                                 'group__docs.git'))
+            finally:
+                C.MIRROR_DIR = old
+
+    def test_two_repos_with_the_same_short_name_do_not_share(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                a = SY.mirror_path({'name': 'docs', 'id': 'a/docs'}, 'gitlab')
+                b = SY.mirror_path({'name': 'docs', 'id': 'b/docs'}, 'gitlab')
+                self.assertNotEqual(a, b)
+            finally:
+                C.MIRROR_DIR = old
+
+    def test_legacy_mirror_is_reused_not_deleted(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                legacy = os.path.join(td, 'gitsync.git')
+                os.makedirs(legacy)
+                p = SY.mirror_path({'name': 'gitsync', 'id': 'SeaXen/gitsync'},
+                                   'github')
+                self.assertEqual(p, legacy)          # reused as-is
+                self.assertTrue(os.path.isdir(legacy))
+            finally:
+                C.MIRROR_DIR = old
+
+    def test_two_repos_claiming_one_legacy_mirror_are_refused(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                legacy = os.path.join(td, 'docs.git')
+                os.makedirs(legacy)
+                p = SY.mirror_path({'name': 'docs', 'id': 'a/docs'}, 'gitlab',
+                                   claimants=[{'name': 'docs'}, {'name': 'docs'}])
+                self.assertIsNone(p)
+            finally:
+                C.MIRROR_DIR = old
+
+    def test_mirrors_walks_the_nested_layout(self):
+        from gitsync import diskutil as D
+        with tempfile.TemporaryDirectory() as td:
+            old = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                os.makedirs(os.path.join(td, 'gitlab', 'group__docs.git'))
+                os.makedirs(os.path.join(td, 'legacy.git'))
+                ids = {m[0] for m in D.mirrors()}
+                self.assertIn('gitlab/group__docs', ids)
+                self.assertIn('legacy', ids)
+            finally:
+                C.MIRROR_DIR = old
+
+
 class TestPushPolicy(unittest.TestCase):
     """P0-7: safe must never force or prune; full prunes only heads/tags."""
 

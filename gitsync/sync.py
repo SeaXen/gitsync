@@ -45,8 +45,43 @@ def log(msg):
             pass
 
 
-def mirror_path(name):
-    return os.path.join(C.MIRROR_DIR, P._fs_safe(name) + ".git")
+def hub_rel(repo_id):
+    """'group/docs' -> 'gitlab/group__docs': the hub path inside MIRROR_DIR.
+
+    Keyed by the repo's stable id, not its short name: two projects called
+    `docs` in different groups used to share one mirror and overwrite each
+    other.
+    """
+    return P._fs_safe(str(repo_id).replace("/", "__"))
+
+
+def mirror_path(repo, ptype, claimants=None):
+    """hub path for one repo, migrating the legacy flat layout read-only.
+
+    New layout:  mirrors/{type}/{id}.git
+    Legacy:      mirrors/{name}.git
+
+    If the new path does not exist and exactly one legacy mirror with this
+    repo's short name does, the legacy one is used as-is - never deleted, so
+    an upgrade keeps the history. If two live repos would claim the same
+    legacy directory the caller must skip both (pass claimants), rather than
+    mix two histories into one mirror.
+    """
+    if isinstance(repo, str):                     # old call shape: a name
+        repo = {"name": repo}
+    rid = repo.get("id") or repo.get("name") or ""
+    name = repo.get("name") or rid
+    new_path = os.path.join(C.MIRROR_DIR, ptype, hub_rel(rid) + ".git")
+    if os.path.isdir(new_path):
+        return new_path
+    legacy = os.path.join(C.MIRROR_DIR, P._fs_safe(name) + ".git")
+    if os.path.isdir(legacy):
+        if claimants and len(claimants) > 1:
+            log("  %s: %d repos share the legacy mirror %s - skipping"
+                % (name, len(claimants), os.path.basename(legacy)))
+            return None
+        return legacy
+    return new_path
 
 
 def mirror_is_valid(path):
@@ -56,11 +91,13 @@ def mirror_is_valid(path):
     return rc == 0 and bool(out.strip())
 
 
-def sync_repo(repo, source, targets, mode):
+def sync_repo(repo, source, targets, mode, claimants=None):
     """one repo: source -> hub -> targets. Returns (status, detail, errors)."""
     name = repo["name"]
     src_url = repo["clone_url"]
-    hub = mirror_path(name)
+    hub = mirror_path(repo, source.ptype, claimants)
+    if hub is None:
+        return "skipped", "legacy mirror name collision", []
     errors = []
 
     # 1. hub mirror
@@ -271,7 +308,7 @@ def _drop_absent(hub, space, keep):
     return dropped
 
 
-def mesh_sync_repo(repo, peers, conflict="newest"):
+def mesh_sync_repo(repo, peers, conflict="newest", claimants=None):
     """all-direction sync: newest commit wins per branch and per tag.
 
     Peers' refs are fetched into a private namespace in the hub, the hub
@@ -287,7 +324,9 @@ def mesh_sync_repo(repo, peers, conflict="newest"):
     with another's — reconcile by hand, then let the next run converge.
     """
     name = repo["name"]
-    hub = mirror_path(name)
+    hub = mirror_path(repo, next(iter(peers.values())).ptype, claimants)
+    if hub is None:
+        return "skipped", "legacy mirror name collision", []
     errors = []
     reachable = {}
     for pname, plat in peers.items():
@@ -507,7 +546,7 @@ def _plan_repo(repo, source, targets, mode):
         return ["cannot reach source %s" % name], "error"
     src_head = src_refs.get("HEAD")
 
-    hub = mirror_path(name)
+    hub = mirror_path(repo, source.ptype)
     actions = []
     if os.path.isdir(hub) and mirror_is_valid(hub):
         hub_head = _remote_head(hub)
@@ -795,6 +834,12 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
         if not dry_run:
             mark_route_run(route)
         repos = _filter_repos(repos, route, only)
+        # legacy-collision guard: two repos whose short names are equal would
+        # both claim mirrors/{name}.git and mix two histories into one mirror
+        claims = {}
+        for r in repos:
+            key = (P._fs_safe(r.get("name") or ""), source.ptype)
+            claims.setdefault(key, []).append(r)
         if not include_forks:
             # best-effort fork filter (platforms that expose it)
             repos = [r for r in repos if not r.get("fork", False)]
@@ -808,6 +853,8 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
 
         def work(repo):
             progress["active"][repo["name"]] = "syncing"
+            key = (P._fs_safe(repo.get("name") or ""), source.ptype)
+            shared = claims.get(key) or []
             try:
                 if dry_run:
                     if mesh:
@@ -815,14 +862,15 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                                                           conflict)
                     else:
                         actions, verdict = _plan_repo(repo, source, targets,
-                                                     mode)
+                                                      mode)
                     status, detail, errors = verdict, "", actions
                 elif mesh:
                     status, detail, errors = mesh_sync_repo(repo, peers,
-                                                           conflict)
+                                                           conflict,
+                                                           shared)
                 else:
                     status, detail, errors = sync_repo(repo, source, targets,
-                                                       mode)
+                                                       mode, shared)
             finally:
                 progress["active"].pop(repo["name"], None)
                 progress["done"] += 1
