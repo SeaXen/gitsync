@@ -28,6 +28,12 @@ def _short_text(err, limit=160):
     return (lines[-1] if lines else "")[:limit]
 
 
+def _url_quote(s):
+    """quote a path segment for a URL (GitLab project paths need %2F)"""
+    import urllib.parse
+    return urllib.parse.quote(str(s), safe="")
+
+
 def _norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 

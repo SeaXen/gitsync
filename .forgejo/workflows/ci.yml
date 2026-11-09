@@ -49,6 +49,7 @@ jobs:
           from gitsync import config as C
           from gitsync import notify as NT
           from gitsync import sync as SY
+          from gitsync import stars as ST
           from gitsync import tui
 
           assert P.ssh_url('https://github.com', 'me', 'repo') == 'git@github.com:me/repo.git'
@@ -204,7 +205,8 @@ jobs:
           # tab bar hit-testing: the same arithmetic draw() uses
           assert tui._tab_at(0, 120) is None
           assert tui._tab_at(28, 120) == 0
-          assert tui._tab_at(57, 120) == 2
+          assert tui._tab_at(40, 120) == 1
+          assert tui._tab_at(62, 120) == 3
           assert tui._tab_at(200, 120) is None
           # modal footer prefers a fresh flash over the static hint
           tui.state['message'] = ('paused: backup',
@@ -237,4 +239,42 @@ jobs:
           assert tui.state['plat_scroll'] == 0
           tui.state['platforms'] = []
           tui.platforms_key(curses.KEY_DOWN)      # must not raise on an empty list
+          # ---- stars: URL matching must not confuse same-name projects ----
+          assert ST._norm_url('https://github.com/SeaXen/gitsync.git') == 'github.com/seaxen/gitsync'
+          assert ST._norm_url('git@github.com:SeaXen/gitsync.git') == 'github.com/seaxen/gitsync'
+          assert ST._norm_url('http://localhost:3002/sagar/gitsync.git') == 'localhost:3002/sagar/gitsync'
+          assert ST._norm_url('') == ''
+          # a name match is only trusted for github -> github
+          assert ST._norm_url('https://gitlab.com/seaxen/gitsync.git') != \
+              ST._norm_url('https://github.com/SeaXen/gitsync.git')
+
+          # ---- platform templates: one source of truth for CLI + TUI ----
+          _p = C.platform_template('gitlab', 'gl2', url='https://gitlab.com',
+                                   token='glpat-x', owner='me')
+          assert _p['type'] == 'gitlab' and _p['enabled'] is True
+          assert _p['url'] == 'https://gitlab.com' and _p['token'] == 'glpat-x'
+          assert _p['owner'] == 'me' and 'auth' not in _p
+          _p2 = C.platform_template('github', 'gh2')
+          assert _p2['auth'] == 'gh' and 'token' not in _p2     # no token -> gh CLI
+          _p3 = C.platform_template('forgejo', 'fj', protocol='ssh', ssh_port='2222')
+          assert _p3['protocol'] == 'ssh' and _p3['ssh_port'] == 2222
+          _p4 = C.platform_template('local', 'bak', path='~/mirrors')
+          assert _p4['type'] == 'local' and _p4['path'].endswith('/mirrors')
+          assert 'url' not in _p4
+          # add / remove round-trip, including the route guard
+          _c = {'platforms': {'github': {'type': 'github', 'enabled': True}},
+                'routes': [{'name': 'r1', 'source': 'github',
+                            'targets': ['gitlab']}]}
+          assert C.add_platform(_c, 'gitlab', {'type': 'gitlab'}) is None
+          assert C.add_platform(_c, 'gitlab', {'type': 'gitlab'}) is not None   # dup
+          assert C.platform_used_by(_c, 'github') == ['r1']
+          assert C.remove_platform(_c, 'github') is not None      # in use -> refused
+          assert C.remove_platform(_c, 'github', force=True) is None
+          assert 'github' not in _c['platforms']
+          assert C.remove_platform(_c, 'nope') is not None
+
+          # ---- the pause screen's flat row order ----
+          _c2 = {'routes': [{'name': 'a', 'source': 'github',
+                             'targets': ['g', 'f']}]}
+          assert tui._route_rows(_c2) == ['a', 'a/g', 'a/f']
           PY

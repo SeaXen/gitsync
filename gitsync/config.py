@@ -144,6 +144,80 @@ def enabled_platforms(cfg):
             if p.get("enabled")}
 
 
+# ---------------------------------------------------------------- platforms
+
+DEFAULT_URLS = {
+    "github": "https://github.com",
+    "gitlab": "https://gitlab.com",
+    "bitbucket": "https://bitbucket.org",
+    "forgejo": "http://localhost:3000",
+    "gitea": "http://localhost:3000",
+    "generic": "",
+}
+
+PLATFORM_TYPES = ["github", "gitlab", "forgejo", "gitea", "bitbucket",
+                  "generic", "local"]
+
+
+def platform_template(ptype, name, url=None, token=None, owner=None,
+                      path=None, protocol=None, ssh_port=None):
+    """a new platform config with the right defaults for its type.
+
+    One source of truth for the CLI (`platforms add`) and the TUI's add/edit
+    forms, so the two can never drift apart.
+    """
+    p = {"type": ptype, "enabled": True}
+    if ptype == "local":
+        p["path"] = os.path.expanduser(path or "~/git-mirrors")
+        return p
+    p["url"] = (url or "").strip() or DEFAULT_URLS.get(ptype,
+                                                       "http://localhost:3000")
+    if token:
+        p["token"] = token
+    if owner:
+        p["owner"] = owner
+    if ptype == "github" and not token:
+        p["auth"] = "gh"              # fall back to the gh CLI
+    if protocol:
+        p["protocol"] = protocol
+    if ssh_port:
+        try:
+            p["ssh_port"] = int(ssh_port)
+        except (TypeError, ValueError):
+            pass
+    return p
+
+
+def add_platform(cfg, name, p):
+    """returns None on success, else an error string"""
+    if not name:
+        return "a platform needs a name"
+    plats = cfg.setdefault("platforms", {})
+    if name in plats:
+        return "platform '%s' already exists (edit it instead)" % name
+    plats[name] = p
+    return None
+
+
+def remove_platform(cfg, name, force=False):
+    """returns None on success, else an error string"""
+    plats = cfg.get("platforms") or {}
+    if name not in plats:
+        return "no such platform: %s" % name
+    used = [r.get("name") for r in routes(cfg)
+            if r.get("source") == name or name in (r.get("targets") or [])]
+    if used and not force:
+        return ("used by route(s): %s" % ", ".join(used))
+    del plats[name]
+    return None
+
+
+def platform_used_by(cfg, name):
+    """route names that reference this platform"""
+    return [r.get("name") for r in routes(cfg)
+            if r.get("source") == name or name in (r.get("targets") or [])]
+
+
 def routes(cfg):
     return cfg.get("routes", [])
 

@@ -26,10 +26,12 @@ from . import platforms as P
 from . import scheduler as S
 from . import diskutil as DK
 from . import sync as SYNC
+from . import stars as ST
 from . import tokencheck as TK
 from . import webhooks as WH
 
-TABS = ["Dashboard", "Platforms", "Routes", "Log", "History", "Settings"]
+TABS = ["Dashboard", "Platforms", "Routes", "Stars", "Log", "History",
+        "Settings"]
 
 state = {
     "platforms": [],       # [(name, type, on, ok, info, count)]
@@ -52,6 +54,8 @@ state = {
     "repo_scroll": 0,
     "repo_loaded": False,
     "repo_src": "",          # which platform the browser listed
+    "star_targets": set(),
+    "star_cur": 0,
 }
 
 
@@ -345,42 +349,341 @@ def cycle(cfg, key, values, label):
     flash("%s -> %s" % (label, nxt))
 
 
+def _form(stdscr, title, fields, note=None):
+    """a small form: [(key, label, value, {'secret':bool,'choices':[..]})]
+
+    Enter edits the highlighted field (or cycles it when it has choices),
+    up/dn or Tab move, S saves, B/Esc cancels. Returns {key: value} or None.
+    """
+    vals = {f[0]: f[2] for f in fields}
+    idx = 0
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0, (" %s " % title).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        if note:
+            safe_add(stdscr, 1, 0, " %s" % note[:w - 2], curses.A_DIM)
+        for i, (key, label, _v, opts) in enumerate(fields):
+            if 3 + i >= h - 2:
+                break
+            attr = curses.A_REVERSE if i == idx else 0
+            shown = ("*" * len(str(vals[key]))) if opts.get("secret") \
+                else str(vals[key])
+            hint = opts.get("hint") or ""
+            safe_add(stdscr, 3 + i, 0,
+                     ("  %-16s %-28s %s" % (label, shown[:28],
+                                            hint))[:w - 1], attr)
+        modal_footer(stdscr, h, w,
+                     " Enter=edit/cycle  up/dn=move  S=save  B=cancel ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return None
+        if ch in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif ch in (curses.KEY_DOWN, ord("j"), 9):
+            idx = min(len(fields) - 1, idx + 1)
+        elif ch in (ord("s"), ord("S")):
+            return vals
+        elif ch in (10, 13, curses.KEY_ENTER):
+            key, label, _v, opts = fields[idx]
+            if opts.get("choices"):
+                cur = vals[key]
+                ch_o = opts["choices"]
+                vals[key] = ch_o[(ch_o.index(cur) + 1) % len(ch_o)] \
+                    if cur in ch_o else ch_o[0]
+                continue
+            new = prompt_line(stdscr, " %s: " % label, str(vals[key]))
+            if new is not None and new != "":
+                vals[key] = new
+            elif new == "" and opts.get("clearable"):
+                vals[key] = ""
+
+
+def _platform_rows(cfg):
+    """[(name, type, enabled, ok, info, has_token, extra)] for the manager"""
+    rows = []
+    tested = {r[0]: (r[3], r[4]) for r in (state.get("platforms") or [])}
+    for name, p in (cfg.get("platforms") or {}).items():
+        ok, info = tested.get(name, (None, ""))
+        extra = p.get("path") or p.get("url") or ""
+        rows.append((name, p.get("type", "?"), bool(p.get("enabled")),
+                     bool(ok) if ok is not None else None, info,
+                     bool(p.get("token")), extra,
+                     p.get("auth") == "gh" and not p.get("token")))
+    return rows
+
+
 def accounts_screen(stdscr):
+    """the account manager: add / edit / remove / test / enable-disable.
+
+    Everything `gitsync platforms ...` does on the command line, so no
+    terminal is needed to connect a new site.
+    """
+    idx = 0
+    top = 0
+    while True:
+        cfg = C.load_config()
+        rows = _platform_rows(cfg)
+        idx = max(0, min(idx, len(rows) - 1)) if rows else 0
+
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0,
+                 (" ACCOUNTS — %d site(s) " % len(rows)).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 0,
+                 " A=add  E=edit  X=remove  T=test  Space=on/off  "
+                 "R=refresh  B=back ".ljust(w - 1)[:w - 1], curses.A_DIM)
+        avail = max(1, h - 5)
+        if idx < top:
+            top = idx
+        elif idx - top >= avail:
+            top = idx - avail + 1
+        for i, row in enumerate(rows[top:top + avail]):
+            (name, ptype, on, ok, info, has_tok, extra, gh_auth) = row
+            attr = curses.A_REVERSE if (top + i) == idx else 0
+            if not on:
+                attr |= curses.A_DIM
+            mark = "[x]" if on else "[ ]"
+            if ok is None:
+                state_txt = "?"
+            elif ok:
+                state_txt = "OK"
+            else:
+                state_txt = "FAIL"
+            tok = "gh-CLI" if gh_auth else ("token" if has_tok else "no token")
+            line = " %s %-14s %-9s %-5s %-8s %s" % (
+                mark, name[:14], ptype, state_txt, tok, extra[:w - 52])
+            safe_add(stdscr, 3 + i, 0, line[:w - 1], attr)
+        if not rows:
+            safe_add(stdscr, 3, 0, " (no platforms yet - press A to add one)",
+                     curses.A_DIM)
+        if len(rows) > avail:
+            safe_add(stdscr, 2, 0, " %d-%d of %d " % (top + 1,
+                                                      min(top + avail,
+                                                          len(rows)),
+                                                      len(rows)),
+                     curses.A_DIM)
+        modal_footer(stdscr, h, w,
+                     " A=add  E=edit  X=remove  T=test  Space=on/off  "
+                     "up/dn=move  B=back ")
+        commit_screen(stdscr)
+
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        elif ch in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            idx = min(len(rows) - 1, idx + 1) if rows else 0
+        elif ch in (curses.KEY_PPAGE,):
+            idx = max(0, idx - avail)
+        elif ch in (curses.KEY_NPAGE,):
+            idx = min(len(rows) - 1, idx + avail) if rows else 0
+        elif ch in (ord("r"), ord("R")):
+            threading.Thread(target=refresh_platforms, daemon=True).start()
+        elif ch in (ord(" "), 10, 13, curses.KEY_ENTER):
+            if not rows:
+                continue
+            _toggle_platform(rows[idx][0])
+        elif ch in (ord("t"), ord("T")) and rows:
+            _test_platform(rows[idx][0])
+        elif ch in (ord("a"), ord("A")):
+            made = _add_platform_screen(stdscr)
+            if made:
+                names = [r[0] for r in _platform_rows(C.load_config())]
+                if made in names:
+                    idx = names.index(made)
+                    top = max(0, idx - avail + 1)
+            else:
+                idx = 0
+                top = 0
+        elif ch in (ord("e"), ord("E")) and rows:
+            _edit_platform_screen(stdscr, rows[idx][0])
+        elif ch in (ord("x"), ord("X")) and rows:
+            _remove_platform_screen(stdscr, rows[idx][0])
+
+
+def _toggle_platform(name):
     cfg = C.load_config()
-    lines = ["CURRENT PLATFORMS", ""]
-    for name, p in cfg.get("platforms", {}).items():
-        lines.append("  %-14s type=%-8s enabled=%s"
-                     % (name, p.get("type"), p.get("enabled")))
-        if p.get("url"):
-            lines.append("      url: %s" % p["url"])
-        if p.get("owner"):
-            lines.append("      owner: %s" % p["owner"])
-        if p.get("path"):
-            lines.append("      path: %s" % p["path"])
-        lines.append("      token: %s" % ("set" if p.get("token")
-                                           else "(empty)"))
-        lines.append("")
-    lines += ["TOKEN SCOPES — what each platform needs", ""]
-    for ptype in ("github", "gitlab", "forgejo", "gitea", "bitbucket",
-                  "generic", "local"):
-        g = PERM.guide(ptype)
-        lines.append("  %-22s minimum: %s" % (g["title"], g["minimum"]))
-        if g["token_url"]:
-            lines.append("      create at: %s" % g["token_url"])
-    lines += [
-        "",
-        "TO ADD / EDIT / REMOVE AN ACCOUNT (from any shell)",
-        "  gitsync platforms add NAME --type gitlab --token glpat-...",
-        "  gitsync platforms edit NAME --token ... --url ... --owner ...",
-        "  gitsync platforms remove NAME",
-        "  gitsync platforms test [NAME]",
-        "",
-        "  Several platforms of the same type are supported (e.g. two",
-        "  Forgejo servers) - each gets its own name, token and route.",
-        "",
-        "  Press B to go back.",
-    ]
-    _scroll_view(stdscr, " ACCOUNTS & PLATFORMS ", lines)
+    p = (cfg.get("platforms") or {}).get(name)
+    if not p:
+        return
+    p["enabled"] = not p.get("enabled", True)
+    C.save_config(cfg)
+    _reload_routes()
+    flash("%s: %s" % (name, "enabled" if p["enabled"] else "disabled"), 4)
+    threading.Thread(target=refresh_platforms, daemon=True).start()
+
+
+def _test_platform(name):
+    cfg = C.load_config()
+    p = (cfg.get("platforms") or {}).get(name)
+    if not p:
+        return
+    try:
+        ok, info = P.make(name, p).test()
+    except Exception as e:
+        ok, info = False, str(e)[:80]
+    flash("%s: %s" % (name, info[:60] if ok else "FAIL " + info[:50]), 6)
+    state["dirty"] = True
+
+
+def _remove_platform_screen(stdscr, name):
+    cfg = C.load_config()
+    used = C.platform_used_by(cfg, name)
+    h, w = stdscr.getmaxyx()
+    while True:
+        stdscr.erase()
+        safe_add(stdscr, 0, 0,
+                 (" REMOVE %s " % name).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(4))
+        if used:
+            safe_add(stdscr, 2, 1,
+                     "used by route(s): %s" % ", ".join(used)[:w - 4],
+                     curses.color_pair(3))
+            safe_add(stdscr, 3, 1,
+                     "removing it leaves those routes incomplete",
+                     curses.A_DIM)
+        else:
+            safe_add(stdscr, 2, 1, "no route uses this platform",
+                     curses.A_DIM)
+        modal_footer(stdscr, h, w,
+                     " Y=remove  N=keep it  (this cannot be undone) ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
+            return
+        if ch in (ord("y"), ord("Y")):
+            err = C.remove_platform(cfg, name, force=True)
+            if err:
+                flash("cannot remove: %s" % err[:50], 6)
+                return
+            C.save_config(cfg)
+            _reload_routes()
+            flash("%s: removed" % name, 5)
+            threading.Thread(target=refresh_platforms, daemon=True).start()
+            return
+
+
+def _add_platform_screen(stdscr):
+    """pick a type, then fill in the form - the same fields the CLI asks for.
+
+    Returns the new platform's name so the caller can keep the cursor on it
+    (resetting to row 0 made the next key press hit the wrong account).
+    """
+    made = []
+
+    def make(tt):
+        made.append(_platform_form(stdscr, tt))
+
+    items = []
+    for t in C.PLATFORM_TYPES:
+        g = PERM.guide(t)
+        items.append((g["title"], g["minimum"][:40],
+                      (lambda tt=t: make(tt))))
+    menu(stdscr, "ADD A SITE - which kind?", items,
+         note="github, gitlab, forgejo, gitea, bitbucket, generic git, "
+              "local folder")
+    return made[0] if made else None
+
+
+def _platform_form(stdscr, ptype):
+    """the add/edit form for one platform"""
+    name = ""
+    editing = False
+    if ptype == "local":
+        fields = [("name", "name", "", {"hint": "e.g. backup"}),
+                  ("path", "folder", "~/git-mirrors", {})]
+    else:
+        fields = [("name", "name", "",
+                   {"hint": "e.g. gitlab, forgejo2"}),
+                  ("url", "url", C.DEFAULT_URLS.get(ptype,
+                                                    "http://localhost:3000"),
+                   {}),
+                  ("token", "token", "",
+                   {"secret": True,
+                    "hint": "blank = gh CLI" if ptype == "github"
+                    else "API token"}),
+                  ("owner", "owner", "",
+                   {"hint": "blank = auto-detect"}),
+                  ("protocol", "protocol", "http",
+                   {"choices": ["http", "ssh"]}),
+                  ("ssh_port", "ssh port", "22",
+                   {"hint": "only used with ssh"})]
+    vals = _form(stdscr, "ADD %s SITE" % ptype.upper(), fields,
+                 note="several of the same kind are fine - each gets its "
+                      "own name and routes")
+    if not vals or not vals.get("name"):
+        flash("cancelled", 3)
+        return None
+    name = vals["name"].strip()
+    if ptype == "local":
+        spec = C.platform_template("local", name, path=vals.get("path"))
+    else:
+        spec = C.platform_template(
+            ptype, name, url=vals.get("url"), token=vals.get("token"),
+            owner=vals.get("owner") or None, protocol=vals.get("protocol"),
+            ssh_port=vals.get("ssh_port"))
+    cfg = C.load_config()
+    err = C.add_platform(cfg, name, spec)
+    if err:
+        flash(err[:70], 6)
+        return None
+    C.save_config(cfg)
+    flash("%s: added - testing..." % name, 6)
+    _reload_routes()
+    threading.Thread(target=refresh_platforms, daemon=True).start()
+    _test_platform(name)
+    return name
+
+
+def _edit_platform_screen(stdscr, name):
+    cfg = C.load_config()
+    p = (cfg.get("platforms") or {}).get(name)
+    if not p:
+        return
+    if p.get("type") == "local":
+        fields = [("path", "folder", p.get("path", ""), {})]
+    else:
+        fields = [("url", "url", p.get("url", ""), {}),
+                  ("token", "token", p.get("token", ""),
+                   {"secret": True, "hint": "blank = gh CLI"
+                    if p.get("type") == "github" else "API token"}),
+                  ("owner", "owner", p.get("owner", ""), {}),
+                  ("protocol", "protocol", p.get("protocol", "http"),
+                   {"choices": ["http", "ssh"]}),
+                  ("ssh_port", "ssh port", str(p.get("ssh_port", 22)),
+                   {"hint": "only used with ssh"})]
+    vals = _form(stdscr, "EDIT %s (%s)" % (name, p.get("type")), fields,
+                 note="leave a field as it is to keep it; token is hidden")
+    if not vals:
+        return
+    if p.get("type") != "local":
+        if vals.get("url"):
+            p["url"] = vals["url"]
+        if vals.get("token"):
+            p["token"] = vals["token"]
+        if vals.get("owner"):
+            p["owner"] = vals["owner"]
+        if vals.get("protocol"):
+            p["protocol"] = vals["protocol"]
+        try:
+            p["ssh_port"] = int(vals.get("ssh_port") or 22)
+        except (TypeError, ValueError):
+            pass
+        if p.get("type") == "github" and not p.get("token"):
+            p["auth"] = "gh"
+    else:
+        if vals.get("path"):
+            p["path"] = os.path.expanduser(vals["path"])
+    C.save_config(cfg)
+    _reload_routes()
+    flash("%s: saved" % name, 4)
+    threading.Thread(target=refresh_platforms, daemon=True).start()
+    _test_platform(name)
 
 
 def _input_line(stdscr, prompt, secret=False):
@@ -926,10 +1229,12 @@ def draw(stdscr):
     elif tab == 2:
         draw_routes(stdscr, h, w, G, R, dim)
     elif tab == 3:
-        draw_log_tab(stdscr, h, w, R, G)
+        draw_stars(stdscr, h, w, G, R, dim)
     elif tab == 4:
-        draw_history_tab(stdscr, h, w)
+        draw_log_tab(stdscr, h, w, R, G)
     elif tab == 5:
+        draw_history_tab(stdscr, h, w)
+    elif tab == 6:
         draw_settings(stdscr, h, w, dim)
     else:
         draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim)
@@ -937,14 +1242,18 @@ def draw(stdscr):
     # tab bar + footer
     safe_add(stdscr, 2, 0, (" " + tab_bar(w) + " ").center(w - 1)[:w - 1],
              curses.A_REVERSE)
-    foot = (" [1-6]tabs  [S]ync  [D]ry-run  [L]og  [C]ron  [O]pt  "
-            "[A]cc  [N]otify  [E]repos  [W]izard  [R]efresh  [Q]uit ")
+    foot = (" [1-7]tabs  [S]ync  [D]ry-run  [L]og  [C]ron  [O]pt  "
+            "[A]cc  [N]otify  [E]repos  [T]ools  [W]izard  [R]efresh  "
+            "[Q]uit ")
     if tab == 1:
-        foot = (" [1-6]tabs  [S]ync  [D]ry-run  up/dn=scroll sites  "
+        foot = (" [1-7]tabs  [S]ync  [D]ry-run  up/dn=scroll sites  "
                 "[A]cc  [R]efresh  [Q]uit ")
     if tab == 2:
-        foot = (" [1-6]tabs  [S]ync  [P]ause/resume  [O]ptions  "
+        foot = (" [1-7]tabs  [S]ync  [P]ause/resume  [O]ptions  "
                 "[R]efresh  [Q]uit ")
+    if tab == 3:
+        foot = (" [1-7]tabs  [S]ource  [C]opy stars  up/dn=scroll  "
+                "[R]e-read  [Q]uit ")
     if state["search_mode"]:
         foot = " filter: %s_   (Enter = apply, Esc = clear) " % state["search"]
     elif state["search"]:
@@ -1111,6 +1420,15 @@ def draw_routes(stdscr, h, w, G, R, dim):
 
 
 
+def _route_rows(cfg):
+    """flat [name] list in the same order the pause screen draws them"""
+    out = []
+    for r in C.routes(cfg):
+        out.append(r.get("name"))
+        out += ["%s/%s" % (r.get("name"), t) for t in r.get("targets", [])]
+    return out
+
+
 def _route_targets_row(r):
     """the pause screen's rows for one route: the route, then its targets"""
     paused = set(r.get("paused_targets") or [])
@@ -1275,8 +1593,10 @@ def _route_options_screen(stdscr, route):
                          "%s (global %s)" % (cur.get("mesh_conflict")
                                              or "inherit", gc),
                          "inherit | newest = overwrite | skip = report only"))
-        rows.append(("Schedule", C.route_schedule(cfg, cur),
-                     "gitsync route-schedule %s hourly|daily|off" % name))
+        sched = C.route_schedule(cfg, cur)
+        own = " (own)" if cur.get("schedule") else " (inherited)"
+        rows.append(("Schedule", sched + own,
+                     "Enter cycles: hourly/6h/12h/daily/weekly/off/inherit"))
         idx = max(0, min(idx, len(rows) - 1))
 
         stdscr.erase()
@@ -1335,6 +1655,19 @@ def _cycle_route_option(cfg, route, label):
         else:
             target["mode"] = nxt
         msg = "mirror mode -> %s" % nxt
+    elif label == "Schedule":
+        order = ["inherit", "hourly", "6h", "12h", "daily", "weekly", "off"]
+        cur_s = target.get("schedule") or "inherit"
+        nxt = order[(order.index(cur_s) + 1) % len(order)] \
+            if cur_s in order else order[0]
+        if nxt == "inherit":
+            target.pop("schedule", None)
+        else:
+            target["schedule"] = nxt
+        C.save_config(cfg)
+        _reload_routes()
+        flash("schedule -> %s" % nxt, 4)
+        return
     elif label == "Mesh conflicts":
         vals = ["inherit", "newest", "skip"]
         cur = target.get("mesh_conflict") or "inherit"
@@ -1346,11 +1679,68 @@ def _cycle_route_option(cfg, route, label):
             target["mesh_conflict"] = nxt
         msg = "mesh conflicts -> %s" % nxt
     else:
-        flash("use: gitsync route-schedule %s hourly|daily|off" % name, 8)
         return
     C.save_config(cfg)
     _reload_routes()
     flash(msg, 4)
+
+
+def _add_route_screen(stdscr):
+    """add a route without leaving the TUI: name, source, targets, direction"""
+    cfg = C.load_config()
+    names = [r[0] for r in _platform_rows(cfg)]
+    live = [n for n, p in (cfg.get("platforms") or {}).items()
+            if p.get("enabled", True)]
+    if len(live) < 2:
+        flash("need at least two enabled sites", 6)
+        return
+    fields = [("name", "name", "", {"hint": "e.g. all, gh-to-gl"}),
+              ("source", "source", live[0],
+               {"choices": live}),
+              ("targets", "targets", ",".join([n for n in live
+                                               if n != live[0]]),
+               {"hint": "comma-separated"}),
+              ("direction", "direction", "one-way",
+               {"choices": ["one-way", "mesh"],
+                "hint": "mesh = every site syncs to every other"})]
+    vals = _form(stdscr, "ADD A ROUTE", fields,
+                 note="one-way: the source wins. mesh: newest commit wins "
+                      "per branch")
+    if not vals or not vals.get("name"):
+        flash("cancelled", 3)
+        return
+    name = vals["name"].strip()
+    src_name = vals.get("source") or live[0]
+    targets = [t.strip() for t in str(vals.get("targets") or "").split(",")
+               if t.strip() and t.strip() != src_name]
+    if not targets:
+        flash("a route needs at least one target", 6)
+        return
+    cfg = C.load_config()
+    if any(r.get("name") == name for r in cfg.get("routes", [])):
+        flash("route '%s' already exists" % name, 6)
+        return
+    route = {"name": name, "source": src_name, "targets": targets}
+    if vals.get("direction") == "mesh":
+        route["direction"] = "mesh"
+    cfg.setdefault("routes", []).append(route)
+    C.save_config(cfg)
+    _reload_routes()
+    flash("route added: %s%s" % (name, " (mesh)" if vals.get("direction")
+                                 == "mesh" else ""), 5)
+    return name
+
+
+def _remove_route_screen(stdscr, name):
+    cfg = C.load_config()
+    routes = [r for r in cfg.get("routes", []) if r.get("name") != name]
+    if len(routes) == len(cfg.get("routes", [])):
+        flash("no such route: %s" % name, 5)
+        return
+    cfg["routes"] = routes
+    C.save_config(cfg)
+    _reload_routes()
+    flash("route removed: %s" % name, 5)
 
 
 def routes_screen(stdscr):
@@ -1404,7 +1794,7 @@ def routes_screen(stdscr):
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
                      " space/Enter=toggle  S=run  D= dry-run  O=options  "
-                     "F=filters  up/dn=move  B=back ")
+                     "F=filters  A=add  X=remove  up/dn=move  B=back ")
         commit_screen(stdscr)
 
         ch = stdscr.getch()
@@ -1436,14 +1826,187 @@ def routes_screen(stdscr):
             _run_route(rows[idx]["route"].get("name"), dry_run=True)
         elif ch in (ord("o"), ord("O")) and rows:
             _route_options_screen(stdscr, rows[idx]["route"])
+        elif ch in (ord("a"), ord("A")):
+            made = _add_route_screen(stdscr)
+            if made:
+                names = _route_rows(C.load_config())
+                if made in names:
+                    idx = names.index(made)
         elif ch in (ord("f"), ord("F")) and rows:
             _edit_route_filters(stdscr, rows[idx]["route"])
+        elif ch in (ord("x"), ord("X")) and rows:
+            _remove_route_screen(stdscr, rows[idx]["route"].get("name"))
         elif ch in (ord(" "), 10, 13, curses.KEY_ENTER):
             if not rows:
                 continue
             msg = _toggle_route_row(rows[idx])
             if msg:
                 flash(msg, 5)
+
+
+STAR_STATE = {"src": "", "rows": [], "at": 0.0, "busy": False,
+              "scroll": 0}
+
+
+def _stars_load(source):
+    """read one account's stars in the background (network)"""
+    if STAR_STATE["busy"]:
+        return
+    STAR_STATE["busy"] = True
+    STAR_STATE["src"] = source
+
+    def worker():
+        try:
+            cfg = C.load_config()
+            p = P.make(source, cfg["platforms"][source])
+            STAR_STATE["rows"] = ST.starred(p)
+            STAR_STATE["at"] = time.time()
+        except Exception as e:
+            STAR_STATE["rows"] = []
+            flash("cannot read stars on %s: %s" % (source, str(e)[:50]), 8)
+        finally:
+            STAR_STATE["busy"] = False
+            state["dirty"] = True
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _stars_copy(targets):
+    """apply the loaded star list to other accounts"""
+    src_name = STAR_STATE["src"]
+    if not src_name or not targets:
+        flash("pick a source and at least one target", 5)
+        return
+    if state["syncing"]:
+        flash("a sync is already running", 5)
+        return
+    state["syncing"] = True
+    lines = ["--- copying stars %s -> %s ---" % (src_name, ",".join(targets))]
+
+    def worker():
+        try:
+            cfg = C.load_config()
+            t = ST.copy_stars(cfg, src_name, targets, log=lines.append)
+            lines.append("--- done: %d starred, %d already, %d not there, "
+                         "%d failed ---" % (t["starred"], t["already"],
+                                            t["missing"], t["failed"]))
+            state["sync_lines"] = lines
+            flash("stars: %d new, %d already, %d not on that site"
+                  % (t["starred"], t["already"], t["missing"]), 10)
+        except Exception as e:
+            lines.append("--- error: %s ---" % e)
+            state["sync_lines"] = lines
+        finally:
+            state["syncing"] = False
+            state["dirty"] = True
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def draw_stars(stdscr, h, w, G, R, dim):
+    cfg = C.load_config()
+    live = [n for n, p in (cfg.get("platforms") or {}).items()
+            if p.get("enabled", True)]
+    if not STAR_STATE["src"]:
+        STAR_STATE["src"] = (C.routes(cfg)[0].get("source")
+                             if C.routes(cfg) else (live[0] if live else ""))
+    src = STAR_STATE["src"]
+    rows = STAR_STATE["rows"]
+    if not STAR_STATE["at"] and src and not STAR_STATE["busy"]:
+        _stars_load(src)
+
+    body = []
+    body.append(("read stars from : %s%s" % (src or "(none)",
+                                             "  [%d]" % len(rows)
+                 if STAR_STATE["at"] else ""), curses.A_BOLD))
+    if STAR_STATE["busy"]:
+        body.append(("  reading...", dim))
+    elif STAR_STATE["at"]:
+        age = int(time.time() - STAR_STATE["at"])
+        body.append(("  %d starred repo(s), read %ds ago" % (len(rows), age),
+                     dim))
+    body.append(("", 0))
+    if rows:
+        avail = max(1, h - 12)
+        top = STAR_STATE["scroll"]
+        top = max(0, min(top, max(0, len(rows) - 1)))
+        STAR_STATE["scroll"] = top
+        for name, _u in rows[top:top + avail]:
+            body.append(("  %s" % name[:w - 8], 0))
+        if len(rows) > avail:
+            body.append(("  ... %d-%d of %d (up/dn to scroll)"
+                         % (top + 1, min(top + avail, len(rows)), len(rows)),
+                         dim))
+    elif STAR_STATE["at"]:
+        body.append(("  (no stars, or this site does not expose them)", dim))
+    _panel_rows(stdscr, h, w, 4, body, "STARS")
+
+    hint = (" S = choose source   C = copy these stars to other sites   "
+            "up/dn = scroll   R = re-read ")
+    if state["syncing"]:
+        hint = " copying stars... see the log below "
+    safe_add(stdscr, h - 2, 2, hint[:w - 4], dim)
+
+
+def stars_screen(stdscr):
+    """source picker + target picker for the star copy"""
+    cfg = C.load_config()
+    live = [n for n, p in (cfg.get("platforms") or {}).items()
+            if p.get("enabled", True)]
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0,
+                 (" STARS — copy %s's list " % (STAR_STATE["src"] or "?")
+                  ).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 0,
+                 " only repos that already exist on the target are starred - "
+                 .ljust(w - 1)[:w - 1], curses.A_DIM)
+        safe_add(stdscr, 2, 0,
+                 " nothing is created and no name is guessed "
+                 .ljust(w - 1)[:w - 1], curses.A_DIM)
+        row = 4
+        safe_add(stdscr, row, 1, "copy to:", curses.A_BOLD)
+        row += 1
+        for i, n in enumerate(live):
+            if row + i >= h - 2:
+                break
+            mark = "[x]" if n in state.get("star_targets", set()) else "[ ]"
+            attr = curses.A_REVERSE if i == state.get("star_cur", 0) else 0
+            safe_add(stdscr, row + i, 1,
+                     (" %s %-16s %s" % (mark, n, "(source)"
+                                        if n == STAR_STATE["src"] else ""))[:w - 2],
+                     attr)
+        modal_footer(stdscr, h, w,
+                     " space=toggle  Enter=copy now  S=change source  "
+                     "B=back ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        elif ch in (curses.KEY_UP, ord("k")):
+            state["star_cur"] = max(0, state.get("star_cur", 0) - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            state["star_cur"] = min(max(0, len(live) - 1),
+                                    state.get("star_cur", 0) + 1)
+        elif ch == ord(" "):
+            if live:
+                n = live[state.get("star_cur", 0)]
+                if n == STAR_STATE["src"]:
+                    flash("that is the source", 4)
+                    continue
+                t = state.setdefault("star_targets", set())
+                t.discard(n) if n in t else t.add(n)
+        elif ch in (ord("s"), ord("S")):
+            items = [(n, "read stars from here",
+                      (lambda nn=n: _stars_load(nn))) for n in live]
+            menu(stdscr, "READ STARS FROM", items)
+        elif ch in (10, 13, curses.KEY_ENTER):
+            targets = sorted(state.get("star_targets") or set())
+            if not targets:
+                flash("pick at least one target (space)", 5)
+                continue
+            _stars_copy(targets)
+            return
 
 
 def draw_log_tab(stdscr, h, w, R, G):
@@ -1903,15 +2466,20 @@ def _run(stdscr):
 
         if ch in (ord("q"), ord("Q")):
             return
-        elif ord("1") <= ch <= ord("6"):
+        elif ord("1") <= ch <= ord(str(len(TABS))):
             state["tab"] = ch - ord("1")
             state["scroll"] = 0
+            STAR_STATE["scroll"] = 0
+            state["plat_scroll"] = 0
         elif ch in (ord("s"), ord("S")):
             run_sync()
         elif ch in (ord("d"), ord("D")):
             run_sync(dry_run=True)
         elif ch in (ord("l"), ord("L")):
             log_view(stdscr)
+        elif state["tab"] == 3 and ch in (ord("c"), ord("C"), ord("s"),
+                                          ord("S")):
+            stars_screen(stdscr)
         elif ch in (ord("h"), ord("H")):
             history_screen(stdscr)
         elif ch in (ord("c"), ord("C")):
@@ -1931,10 +2499,30 @@ def _run(stdscr):
                                           ord("k"), ord("j"), ord("g"),
                                           ord("G")):
             platforms_key(ch)
+        elif state["tab"] == 3 and ch in (curses.KEY_UP, curses.KEY_DOWN,
+                                          curses.KEY_PPAGE, curses.KEY_NPAGE,
+                                          curses.KEY_HOME, curses.KEY_END):
+            n = len(STAR_STATE["rows"])
+            if ch == curses.KEY_UP:
+                STAR_STATE["scroll"] = max(0, STAR_STATE["scroll"] - 1)
+            elif ch == curses.KEY_DOWN:
+                STAR_STATE["scroll"] = min(max(0, n - 1),
+                                           STAR_STATE["scroll"] + 1)
+            elif ch == curses.KEY_PPAGE:
+                STAR_STATE["scroll"] = max(0, STAR_STATE["scroll"] - 8)
+            elif ch == curses.KEY_NPAGE:
+                STAR_STATE["scroll"] = min(max(0, n - 1),
+                                           STAR_STATE["scroll"] + 8)
+            elif ch == curses.KEY_END:
+                STAR_STATE["scroll"] = max(0, n - 1)
+            else:
+                STAR_STATE["scroll"] = 0
         elif ch in (ord("r"), ord("R"), ord("p"), ord("P")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("n"), ord("N")):
             notifications_screen(stdscr)
+        elif ch in (ord("t"), ord("T")):
+            _tools_screen(stdscr)
         elif ch in (ord("e"), ord("E")):
             repos_screen(stdscr)
         elif ch == ord("/"):
@@ -1948,6 +2536,57 @@ def _run(stdscr):
                 threading.Thread(target=refresh_platforms, daemon=True).start()
             if time.time() - _health["at"] > HEALTH_TTL:
                 threading.Thread(target=refresh_health, daemon=True).start()
+
+
+def _run_capture(cmd, timeout=300):
+    """run a CLI command and return its output lines"""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           env=dict(os.environ, PYTHONPATH=_app_dir()))
+        return (r.stdout + r.stderr).splitlines()
+    except Exception as e:
+        return ["failed: %s" % e]
+
+
+def _tools_screen(stdscr):
+    """everything that still needed a terminal, in one menu.
+
+    Read-only checks (disk, doctor, compare) render inside the TUI; the
+    ones that change something (mirror, update, uninstall) drop to the
+    shell and come back.
+    """
+    def show(title, cmd):
+        lines = _run_capture(cmd)
+        _scroll_view(stdscr, " %s " % title, lines or ["(no output)"])
+
+    def ask_repo():
+        name = prompt_line(stdscr, " repo name: ")
+        if not name:
+            return
+        _suspend_run(stdscr, ["python3", "-m", "gitsync", "mirror", name])
+
+    items = [
+        ("Disk usage + orphans", "hub size, what can be reclaimed",
+         lambda: show("DISK", ["python3", "-m", "gitsync", "disk",
+                               "--orphans"])),
+        ("Doctor", "health check: tokens, routes, storage",
+         lambda: show("DOCTOR", ["python3", "-m", "gitsync", "doctor"])),
+        ("Compare sites", "which repos differ across a route",
+         lambda: show("COMPARE", ["python3", "-m", "gitsync", "compare"])),
+        ("Mirror one repo", "sync a single repo now", ask_repo),
+        ("Fix drift (preview)", "re-sync repos whose sites disagree",
+         lambda: show("FIX DRIFT", ["python3", "-m", "gitsync", "fix",
+                                    "--dry-run"])),
+        ("Update gitsync", "pull the newest release and reinstall",
+         lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
+                                       "update"])),
+        ("Uninstall", "remove the scheduler and the command",
+         lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
+                                       "uninstall", "--yes"])),
+    ]
+    menu(stdscr, "TOOLS", items,
+         note="the same things gitsync disk|doctor|compare|mirror|fix|"
+              "update|uninstall do")
 
 
 def launch_wizard(stdscr):

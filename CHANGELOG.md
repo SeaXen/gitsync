@@ -4,6 +4,53 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.0] - 2026-11-09
+
+The TUI is now the whole app: no command needs the terminal any more, and
+stars can be copied between accounts.
+
+### Added
+
+- **Add / edit / remove / test / enable-disable an account in the TUI**
+  (`A`). Pick the type, fill the form (name, URL, token, owner, protocol,
+  ssh port - token masked), and it is tested on save. Removing warns when a
+  route still uses the platform. This replaces the old read-only screen
+  that told you to run `gitsync platforms ...` in a shell.
+- **Add / remove a route in the TUI** (Routes → `P` → `A` / `X`), with a
+  source picker, a target list and a one-way/mesh switch. Per-route
+  schedules now cycle in place instead of printing a command.
+- **Stars tab**: read one account's starred repos, scroll the list, and copy
+  them to other accounts (`C`). GitHub, GitLab and Forgejo/Gitea are
+  supported. Only repos that already exist on the target are starred -
+  nothing is created - and matching is by exact `owner/repo` (GitHub →
+  GitHub) or by the repo's remote URL, never by name alone:
+  `SeaXen/hermes-telemetry` and `nujovich/hermes-telemetry` are different
+  projects.
+- **Tools menu** (`T`): disk usage + orphans, doctor, compare, mirror one
+  repo, fix drift (preview), update, uninstall. Read-only checks render
+  inside the TUI; the rest drop to the shell and come back.
+- CLI: `gitsync stars list [PLATFORM] [--json]` and
+  `gitsync stars copy SOURCE t1,t2 [--dry-run] [--repos a,b]`.
+- `gitsync platforms add --protocol ssh --ssh-port N`.
+
+### Fixed
+
+- **`stars._norm_url()` mangled `host:port`.** It replaced every colon with
+  a slash, so `http://localhost:3002/sagar/gitsync.git` became
+  `localhost/3002/...`. Only the scp-style `host:owner/repo` colon is now
+  converted; a port is kept, which is what distinguishes two servers on one
+  machine. Found by the new unit assertions.
+- **The account manager's cursor reset after adding a platform**, so the
+  next key press hit the first row (it disabled `github` instead of the new
+  site). The cursor now stays on what was just added.
+- **`_form()` accepted an empty text field** as "keep the old value" without
+  saying so; a field can now be cleared explicitly where that is allowed.
+
+### Changed
+
+- 7 tabs (Stars added between Routes and Log); every footer is tab-aware.
+- 129 unit assertions (was 108).
+
 ## [1.4.2] - 2026-11-09
 
 ### Fixed

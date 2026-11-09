@@ -92,6 +92,8 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **6 providers** | GitHub, GitLab, Forgejo, Gitea, Bitbucket, local folders — any as source or target |
 | **Any direction** | `github → gitlab`, `gitlab → forgejo`, `folder → github`, `bitbucket → everything`… |
 | **Site count at a glance** | the Platforms panel reads `PLATFORMS (4 sites, 4 connected)`, counting only reachable ones |
+| **Everything in the TUI** | add / edit / remove accounts, add / remove routes, stars, disk, doctor, compare, mirror, update — no terminal needed |
+| **Copy your stars** | read one account's starred repos and star the same ones on your other accounts |
 | **Two-way (mesh)** | one route where every peer is source and target: edit on GitLab, it lands on GitHub, Forgejo and the local hub |
 | **Pause anything** | pause one target or a whole route from the TUI (`P`) or CLI — the timer keeps running the rest |
 | **Conflict-safe mesh** | a mesh can be told to *report* a disagreement instead of overwriting it (`mesh_conflict: skip`) |
@@ -168,6 +170,8 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync routes remove NAME` | remove a route |
 | `gitsync sync --to backup` | push to **one target only** (not for mesh routes) |
 | `gitsync webhooks --install` | run the receiver as a service (URL shown in the TUI) |
+| `gitsync stars list github` | list an account's starred repos (`--json` for scripting) |
+| `gitsync stars copy github gitlab,forgejo` | star those repos on the other accounts |
 | `gitsync compare` | **drift check** — compare HEADs across platforms |
 | `gitsync status` | platforms, routes, scheduler, last run |
 | `gitsync platforms` | list accounts + test every connection |
@@ -516,6 +520,7 @@ next sync if the repo reappears).
 | `W` (notifications) | webhook receiver: secret, URL, install/stop |
 | `G` / `End` / `Home` | jump to the bottom / top of the log viewer |
 | mouse | click a tab, or a row in the repo browser / pause screen |
+| `T` | tools menu (disk, doctor, compare, mirror, update, uninstall) |
 | `1`–`6` | switch tabs: Dashboard / Platforms / Routes / Log / History / Settings |
 | `/` | search-filter the log or history |
 | `Q` | quit (Esc = back inside menus) |
@@ -548,6 +553,52 @@ A pace of 1 s over 54 repos adds about a minute to a run and is logged:
 ```
   pacing: 1.0s between repos
 ```
+
+---
+
+## One command, everything inside
+
+`gitsync` opens the dashboard, and from there nothing needs a terminal:
+
+| Key | What it does |
+|---|---|
+| `A` | **accounts**: add, edit, remove, test, enable/disable a site |
+| `P` (Routes tab) | **routes**: pause/resume a target or a route, run one route, dry-run it, edit its filters, per-route workers/mode/mesh-conflict/schedule, add a route (`A`), remove one (`X`) |
+| `C` | schedule (hourly → daily → off) |
+| `O` | options: workers, mirror mode, forks, notify, pacing, mesh policy, token warning |
+| `N` → `W` | webhook receiver: secret, payload URL, install/stop |
+| `E` | browse repos, pick some, sync just those |
+| `T` | **tools**: disk + orphans, doctor, compare sites, mirror one repo, fix drift (preview), update, uninstall |
+| `D` | dry run — preview a whole run, or one route |
+| `S` | sync now (or one route, from the pause screen) |
+
+Accounts and routes are the two things that used to force you into a shell;
+both are forms inside the TUI now, with the same validation the CLI uses.
+
+---
+
+## Copying your stars
+
+Stars live inside one account, so there is no built-in way to say "star
+everything I starred on GitHub here too". `gitsync` does it:
+
+```bash
+gitsync stars list github                     # what you have starred
+gitsync stars copy github gitlab,forgejo      # star them on the others
+gitsync stars copy github gitlab --dry-run    # preview first
+```
+
+Or in the TUI: **Stars tab** → `C`, tick the targets, Enter.
+
+Two rules keep it safe:
+
+- **Only repos that already exist on the target are starred.** Nothing is
+  created, so 197 GitHub stars of other people's projects will mostly report
+  "not on that site" — that is the honest answer, not a failure.
+- **Matching is never by name alone.** GitHub → GitHub matches the exact
+  `owner/repo`; anything else matches the repo's remote URL. A name match
+  would have starred `nujovich/hermes-telemetry` when you meant
+  `SeaXen/hermes-telemetry`.
 
 ---
 
@@ -908,7 +959,7 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (108 assertions)   PASS
+#   unit checks (129 assertions)   PASS
 # CI: all 4 checks passed
 ```
 

@@ -13,6 +13,7 @@
 
 import argparse
 import glob
+import json
 import os
 import subprocess
 import sys
@@ -25,7 +26,8 @@ from . import platforms as P
 from . import scheduler as S
 from . import notify as NT
 from datetime import datetime
-from . import sync as SYNC
+from . import sync as SY
+from . import stars as ST
 from . import tokencheck as TK
 from . import webhooks as WH
 
@@ -206,24 +208,17 @@ def cmd_platforms(args):
         if name in plats:
             print("platform '%s' already exists (edit it instead)" % name)
             return 2
-        p = {"type": args.type, "enabled": True}
-        if args.type == "local":
-            if not args.path:
-                print("local platforms need --path")
-                return 2
-            p["path"] = os.path.expanduser(args.path)
-        else:
-            p["url"] = args.url or {
-                "github": "https://github.com",
-                "gitlab": "https://gitlab.com"}.get(args.type,
-                                                   "http://localhost:3000")
-            if args.token:
-                p["token"] = args.token
-            if args.owner:
-                p["owner"] = args.owner
-            if args.type == "github" and not args.token:
-                p["auth"] = "gh"          # fall back to the gh CLI
-        plats[name] = p
+        if args.type == "local" and not args.path:
+            print("local platforms need --path")
+            return 2
+        p = C.platform_template(args.type, name, url=args.url,
+                                token=args.token, owner=args.owner,
+                                path=args.path, protocol=args.protocol,
+                                ssh_port=args.ssh_port)
+        err = C.add_platform(cfg, name, p)
+        if err:
+            print(err)
+            return 2
         C.save_config(cfg)
         print("added platform: %s (%s)" % (name, args.type))
         return _test_one(name, p)
@@ -232,15 +227,14 @@ def cmd_platforms(args):
         if args.name not in plats:
             print("no such platform: %s" % args.name)
             return 2
-        used = [r["name"] for r in C.routes(cfg)
-                if r.get("source") == args.name
-                or args.name in r.get("targets", [])]
-        if used and not args.force:
-            print("platform '%s' is used by route(s): %s"
-                  % (args.name, ", ".join(used)))
-            print("re-run with --force to remove anyway")
+        err = C.remove_platform(cfg, args.name, force=args.force)
+        if err:
+            if err.startswith("used by route"):
+                print("platform '%s' is %s" % (args.name, err))
+                print("re-run with --force to remove anyway")
+            else:
+                print(err)
             return 2
-        del plats[args.name]
         C.save_config(cfg)
         print("removed platform: %s" % args.name)
         return 0
@@ -868,6 +862,56 @@ def cmd_webhooks(args):
     return WH.serve(port=args.port, bind=args.bind, allow=args.allow)
 
 
+def cmd_stars(args):
+    """list or copy starred repos between accounts"""
+    cfg = C.load_config()
+    action = args.action or "list"
+    plats = cfg.get("platforms") or {}
+    if action == "list":
+        name = args.source
+        if not name:
+            routes = C.routes(cfg)
+            name = (routes[0].get("source") if routes
+                    else (sorted(plats)[0] if plats else None))
+        if not name:
+            print("no platform configured - run: gitsync setup")
+            return 2
+        p = P.make(name, plats[name])
+        try:
+            rows = ST.starred(p)
+        except Exception as e:
+            print("cannot read stars on %s: %s" % (name, e))
+            return 1
+        if args.json:
+            print(json.dumps([{"name": n, "url": u} for n, u in rows],
+                             indent=2))
+            return 0
+        print("starred on %s: %d" % (name, len(rows)))
+        for n, _u in rows:
+            print("  %s" % n)
+        return 0
+
+    # copy
+    if not args.source or not args.targets:
+        print("usage: gitsync stars copy SOURCE t1,t2 [--dry-run]")
+        return 2
+    if args.source not in plats:
+        print("no such platform: %s" % args.source)
+        return 2
+    targets = [t.strip() for t in args.targets.split(",") if t.strip()]
+    unknown = [t for t in targets if t not in plats]
+    if unknown:
+        print("no such platform(s): %s" % ", ".join(unknown))
+        return 2
+    only = [r.strip() for r in (args.repos or "").split(",") if r.strip()]
+    t = ST.copy_stars(cfg, args.source, targets, dry_run=args.dry_run,
+                      only=only or None, log=lambda m: print(m))
+    print("\n%s: %d starred, %d already, %d not on that site, %d failed"
+          % (args.source, t["starred"], t["already"], t["missing"],
+             t["failed"]))
+    return 0 if t["failed"] == 0 else 1
+
+
 def cmd_tokens(args):
     """check every platform's credential for expiry / revocation"""
     cfg = C.load_config()
@@ -1104,7 +1148,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (108 assertions)", c_units)
+    check("unit checks (129 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1127,6 +1171,7 @@ from gitsync import platforms as P
 from gitsync import config as C
 from gitsync import notify as NT
 from gitsync import sync as SY
+from gitsync import stars as ST
 from gitsync import tui
 
 assert P.ssh_url('https://github.com', 'me', 'repo') == 'git@github.com:me/repo.git'
@@ -1294,7 +1339,8 @@ assert tui._merged_refs([]) == 0
 # tab bar hit-testing: the same arithmetic draw() uses
 assert tui._tab_at(0, 120) is None
 assert tui._tab_at(28, 120) == 0
-assert tui._tab_at(57, 120) == 2
+assert tui._tab_at(40, 120) == 1
+assert tui._tab_at(62, 120) == 3
 assert tui._tab_at(200, 120) is None
 # modal footer prefers a fresh flash over the static hint
 tui.state['message'] = ('paused: backup',
@@ -1329,6 +1375,44 @@ tui.platforms_key(curses.KEY_PPAGE)
 assert tui.state['plat_scroll'] == 0
 tui.state['platforms'] = []
 tui.platforms_key(curses.KEY_DOWN)      # must not raise on an empty list
+
+# ---- stars: URL matching must not confuse same-name projects ----
+assert ST._norm_url('https://github.com/SeaXen/gitsync.git') == 'github.com/seaxen/gitsync'
+assert ST._norm_url('git@github.com:SeaXen/gitsync.git') == 'github.com/seaxen/gitsync'
+assert ST._norm_url('http://localhost:3002/sagar/gitsync.git') == 'localhost:3002/sagar/gitsync'
+assert ST._norm_url('') == ''
+# a name match is only trusted for github -> github
+assert ST._norm_url('https://gitlab.com/seaxen/gitsync.git') != ST._norm_url('https://github.com/SeaXen/gitsync.git')
+
+# ---- platform templates: one source of truth for CLI + TUI ----
+_p = C.platform_template('gitlab', 'gl2', url='https://gitlab.com',
+                         token='glpat-x', owner='me')
+assert _p['type'] == 'gitlab' and _p['enabled'] is True
+assert _p['url'] == 'https://gitlab.com' and _p['token'] == 'glpat-x'
+assert _p['owner'] == 'me' and 'auth' not in _p
+_p2 = C.platform_template('github', 'gh2')
+assert _p2['auth'] == 'gh' and 'token' not in _p2     # no token -> gh CLI
+_p3 = C.platform_template('forgejo', 'fj', protocol='ssh', ssh_port='2222')
+assert _p3['protocol'] == 'ssh' and _p3['ssh_port'] == 2222
+_p4 = C.platform_template('local', 'bak', path='~/mirrors')
+assert _p4['type'] == 'local' and _p4['path'].endswith('/mirrors')
+assert 'url' not in _p4
+# add / remove round-trip, including the route guard
+_c = {'platforms': {'github': {'type': 'github', 'enabled': True}},
+      'routes': [{'name': 'r1', 'source': 'github',
+                  'targets': ['gitlab']}]}
+assert C.add_platform(_c, 'gitlab', {'type': 'gitlab'}) is None
+assert C.add_platform(_c, 'gitlab', {'type': 'gitlab'}) is not None   # dup
+assert C.platform_used_by(_c, 'github') == ['r1']
+assert C.remove_platform(_c, 'github') is not None      # in use -> refused
+assert C.remove_platform(_c, 'github', force=True) is None
+assert 'github' not in _c['platforms']
+assert C.remove_platform(_c, 'nope') is not None
+
+# ---- the pause screen's flat row order ----
+_c2 = {'routes': [{'name': 'a', 'source': 'github',
+                   'targets': ['g', 'f']}]}
+assert tui._route_rows(_c2) == ['a', 'a/g', 'a/f']
 
 print('all unit checks passed')
 """
@@ -1504,6 +1588,10 @@ def main(argv=None):
     sp.add_argument("--token", help="API token")
     sp.add_argument("--owner", help="username / workspace / namespace")
     sp.add_argument("--path", help="local folder (type=local)")
+    sp.add_argument("--protocol", choices=["http", "ssh"],
+                    help="clone protocol (ssh needs an ssh key on the host)")
+    sp.add_argument("--ssh-port", type=int, dest="ssh_port",
+                    help="ssh port when protocol=ssh")
     sp.add_argument("--enable", action="store_true")
     sp.add_argument("--disable", action="store_true")
     sp.add_argument("--force", action="store_true")
@@ -1594,6 +1682,17 @@ def main(argv=None):
     sp.add_argument("--show", action="store_true",
                     help="print the current shared secret")
     sp.set_defaults(func=cmd_webhooks)
+
+    sp = sub.add_parser("stars", help="list / copy starred repos between accounts")
+    sp.add_argument("action", nargs="?", choices=["list", "copy"],
+                    default="list")
+    sp.add_argument("source", nargs="?", help="platform to read stars from")
+    sp.add_argument("targets", nargs="?",
+                    help="copy: comma-separated platforms to star on")
+    sp.add_argument("--repos", help="only these owner/repo names")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--json", action="store_true", help="list as JSON")
+    sp.set_defaults(func=cmd_stars)
 
     sp = sub.add_parser("tokens", help="check credentials for expiry")
     sp.set_defaults(func=cmd_tokens)
