@@ -4,6 +4,23 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.2] - 2026-11-09
+
+### Fixed
+
+- **`gitsync sync` crashed with `NameError: name 'SYNC' is not defined`.**
+  Shipped in 1.5.0: the module is imported as `sync as SY` while every call
+  site says `SYNC`, so `cmd_sync` died before doing any work. That is the
+  command the systemd timer runs, so a 1.5.0/1.5.1 install silently stopped
+  syncing (`gitsync.service` shows `failed`, status 1). `mirror` still
+  worked, which is why it was not obvious. The import is renamed to match
+  the call sites.
+- **CI could not have caught it**: the smoke test only ran `--help`. It now
+  also runs a real offline sync (two local folders, one route) plus
+  `status`, `routes` and `stars list`, so a broken `cmd_sync` fails the
+  build. Verified by reintroducing the bug in a scratch copy and watching
+  the new check fail.
+
 ## [1.5.1] - 2026-11-09
 
 ### Fixed

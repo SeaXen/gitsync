@@ -26,7 +26,7 @@ from . import platforms as P
 from . import scheduler as S
 from . import notify as NT
 from datetime import datetime
-from . import sync as SY
+from . import sync as SYNC
 from . import stars as ST
 from . import tokencheck as TK
 from . import webhooks as WH
@@ -649,7 +649,7 @@ def cmd_mirror(args):
         conflict = route.get("mesh_conflict") or \
             C.setting(cfg, "mesh_conflict", "newest")
         peers = {n: P.make(n, C.platform(cfg, n))
-                 for n in SY.route_peers(cfg, route)}
+                 for n in SYNC.route_peers(cfg, route)}
         if args.to:
             keep = {route.get("source"), args.to}
             peers = {n: p for n, p in peers.items() if n in keep}
@@ -672,9 +672,10 @@ def cmd_mirror(args):
             failed += 1
             continue
         if mesh:
-            status, detail, errors = SY.mesh_sync_repo(repo, peers, conflict)
+            status, detail, errors = SYNC.mesh_sync_repo(repo, peers,
+                                                           conflict)
         else:
-            status, detail, errors = SY.sync_repo(
+            status, detail, errors = SYNC.sync_repo(
                 repo, source, targets,
                 route.get("mode") or C.setting(cfg, "mode", "full"))
         print("%s: %s %s" % (name, status, detail))
@@ -1125,15 +1126,48 @@ def cmd_ci(args):
         env = dict(os.environ, PYTHONPATH=app_dir)
         for argv in (["--version"], ["--help"], ["scopes"],
                      ["platforms", "--help"], ["routes", "--help"],
-                     ["doctor", "--help"]):
-            rc, out, err = subprocess.run(
-                ["python3", "-m", "gitsync"] + argv, capture_output=True,
-                text=True, env=env, timeout=60).returncode, "", ""
-            if rc != 0:
-                raise RuntimeError("gitsync %s failed" % " ".join(argv))
-        rc, out, _ = subprocess.run(
-            ["python3", "-m", "gitsync", "scopes"], capture_output=True,
-            text=True, env=env, timeout=60).returncode if False else (0, "", ""), None, None
+                     ["stars", "--help"], ["doctor", "--help"]):
+            p = subprocess.run(["python3", "-m", "gitsync"] + argv,
+                               capture_output=True, text=True, env=env,
+                               timeout=60)
+            if p.returncode != 0:
+                raise RuntimeError("gitsync %s failed: %s"
+                                   % (" ".join(argv),
+                                      (p.stderr or p.stdout).strip()[-120:]))
+        # a real (offline) sync: two local folders and a route between them.
+        # `gitsync sync` is the command the timer runs, and a broken name in
+        # cmd_sync once shipped because only --help was exercised here.
+        import json as _json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            cfgdir = os.path.join(td, "cfg")
+            datadir = os.path.join(td, "data")
+            src_dir = os.path.join(td, "src")
+            dst_dir = os.path.join(td, "dst")
+            for d in (cfgdir, datadir, src_dir, dst_dir):
+                os.makedirs(d)
+            cfg = {"version": 1,
+                   "platforms": {
+                       "src": {"type": "local", "enabled": True,
+                               "path": src_dir},
+                       "dst": {"type": "local", "enabled": True,
+                               "path": dst_dir}},
+                   "routes": [{"name": "r", "source": "src",
+                               "targets": ["dst"]}],
+                   "settings": {}}
+            with open(os.path.join(cfgdir, "config.json"), "w") as f:
+                _json.dump(cfg, f)
+            e2 = dict(env, GITSYNC_CONFIG_DIR=cfgdir, GITSYNC_DATA_DIR=datadir)
+            for argv in (["sync", "--dry-run"], ["status"], ["routes"],
+                         ["stars", "list", "src"]):
+                p = subprocess.run(["python3", "-m", "gitsync"] + argv,
+                                   capture_output=True, text=True, env=e2,
+                                   timeout=120)
+                if p.returncode != 0:
+                    raise RuntimeError(
+                        "gitsync %s failed: %s" % (" ".join(argv),
+                                                    (p.stderr or
+                                                     p.stdout).strip()[-160:]))
 
     def c_units():
         env = dict(os.environ, PYTHONPATH=app_dir)
