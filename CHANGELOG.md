@@ -4,6 +4,21 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.1] - 2026-11-09
+
+### Added
+
+- **The TUI now says how many sites you have.** The Platforms panel title
+  reads `PLATFORMS (4 sites, 4 connected)`, counting only platforms that are
+  enabled *and* reachable, so a disabled or failing site shows up as
+  `(5 sites, 3 connected)` instead of looking healthy. The compact/mobile
+  layout leads with the same number (`3/5 sites: github:OK ...`).
+  `gitsync status` and the piped `gitsync tui` snapshot print the count too.
+
+### Changed
+
+- 103 unit assertions (was 99).
+
 ## [1.4.0] - 2026-11-09
 
 A review pass over the TUI plus the guardrails a mesh needs now that it can

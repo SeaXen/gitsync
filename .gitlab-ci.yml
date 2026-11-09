@@ -208,4 +208,14 @@ syntax-and-tests:
                        __import__("time").time() + 5)
       assert tui.state["message"][0] == "paused: backup"
       tui.state["message"] = ("x" * 0, 0)
+      # platform/site count in the panel title (TUI) - the count used to be absent
+      tui.state["platforms"] = [("github", "github", True, True, "ok", "54"),
+                                ("backup", "local", True, True, "ok", "53")]
+      assert tui.platforms_title() == "PLATFORMS (2 sites, 2 connected)"
+      tui.state["platforms"].append(("fj", "forgejo", True, False, "bad", "?"))
+      assert tui.platforms_title() == "PLATFORMS (3 sites, 2 connected)"
+      tui.state["platforms"].append(("off", "gitlab", False, True, "ok", "?"))
+      assert tui.platforms_title() == "PLATFORMS (4 sites, 2 connected)"
+      tui.state["platforms"] = []
+      assert tui.platforms_title().startswith("PLATFORMS (0 sites")
       PY

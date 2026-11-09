@@ -91,6 +91,7 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 |---|---|
 | **6 providers** | GitHub, GitLab, Forgejo, Gitea, Bitbucket, local folders — any as source or target |
 | **Any direction** | `github → gitlab`, `gitlab → forgejo`, `folder → github`, `bitbucket → everything`… |
+| **Site count at a glance** | the Platforms panel reads `PLATFORMS (4 sites, 4 connected)`, counting only reachable ones |
 | **Two-way (mesh)** | one route where every peer is source and target: edit on GitLab, it lands on GitHub, Forgejo and the local hub |
 | **Pause anything** | pause one target or a whole route from the TUI (`P`) or CLI — the timer keeps running the rest |
 | **Conflict-safe mesh** | a mesh can be told to *report* a disagreement instead of overwriting it (`mesh_conflict: skip`) |
@@ -907,7 +908,7 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (99 assertions)   PASS
+#   unit checks (103 assertions)   PASS
 # CI: all 4 checks passed
 ```
 

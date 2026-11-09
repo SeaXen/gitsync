@@ -985,6 +985,15 @@ def _panel_rows(stdscr, h, w, top, rows, title, colors=None):
                  + "+", curses.A_DIM)
 
 
+def platforms_title():
+    """'PLATFORMS (4 sites, 4 connected)' - the count the panel used to omit"""
+    rows = state["platforms"]
+    if not rows:
+        return "PLATFORMS (0 sites - loading...)"
+    live = sum(1 for r in rows if r[2] and r[3])      # enabled and reachable
+    return "PLATFORMS (%d sites, %d connected)" % (len(rows), live)
+
+
 def draw_platforms(stdscr, h, w, G, R, dim):
     rows = []
     for name, ptype, on, ok, info, count in state["platforms"]:
@@ -994,7 +1003,7 @@ def draw_platforms(stdscr, h, w, G, R, dim):
                         "OK" if ok else "FAIL", count, info), attr))
     if not rows:
         rows.append(("platforms: loading...", dim))
-    _panel_rows(stdscr, h, w, 4, rows, "PLATFORMS (A = manage accounts)")
+    _panel_rows(stdscr, h, w, 4, rows, platforms_title())
     safe_add(stdscr, h - 2, 2,
              "add/edit/remove: gitsync platforms add|edit|remove NAME",
              dim)
@@ -1587,9 +1596,12 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         row += 2
         plats = state["platforms"]
         if plats:
-            txt = " ".join("%s:%s%s" % (n[:10], "OK" if ok else "FAIL",
-                                        "" if on else "(off)")
-                           for n, _t, on, ok, _i, _c in plats)
+            live = sum(1 for r in plats if r[2] and r[3])
+            txt = "%d/%d sites: %s" % (
+                live, len(plats),
+                " ".join("%s:%s%s" % (n[:10], "OK" if ok else "FAIL",
+                                      "" if on else "(off)")
+                         for n, _t, on, ok, _i, _c in plats))
             while txt and row < h - 3:
                 safe_add(stdscr, row, 0, txt[:w - 1],
                          G if "FAIL" not in txt else R)
@@ -1623,7 +1635,8 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
                              "OK" if ok else "FAIL", count, info), attr))
     if not plat_rows:
         plat_rows.append(("platforms: loading...", dim))
-    _panel_rows(stdscr, h, w, top, plat_rows, "PLATFORMS (A = manage accounts)")
+    _panel_rows(stdscr, h, w, top, plat_rows,
+                platforms_title() + "  (A = manage accounts)")
     top2 = top + min(len(plat_rows) + 2, h - top - 6)
 
     if not state["routes"]:
@@ -1712,7 +1725,9 @@ def snapshot():
     print("config : %s" % C.CONFIG_FILE)
     print("mirrors: %s" % C.MIRROR_DIR)
     print()
-    for name, p in cfg.get("platforms", {}).items():
+    plats = list(cfg.get("platforms", {}).items())
+    print("platforms: %d site(s)" % len(plats))
+    for name, p in plats:
         try:
             ok, info = P.make(name, p).test()
         except Exception as e:

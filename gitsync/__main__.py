@@ -97,8 +97,10 @@ def cmd_status(args):
     print("config : %s" % C.CONFIG_FILE)
     print("mirrors: %s" % C.MIRROR_DIR)
     print()
-    print("platforms:")
-    for name, ptype, en, ok, info in _platforms_table(cfg):
+    table = _platforms_table(cfg)
+    live = sum(1 for r in table if r[2] == "on" and r[3] == "OK")
+    print("platforms: %d site(s), %d connected" % (len(table), live))
+    for name, ptype, en, ok, info in table:
         print("  %-14s %-9s %-4s %-5s %s" % (name, ptype, en, ok, info))
     print()
     print("routes:")
@@ -1102,7 +1104,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (99 assertions)", c_units)
+    check("unit checks (103 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1298,6 +1300,17 @@ tui.state['message'] = ('paused: backup',
                        __import__('time').time() + 5)
 assert tui.state['message'][0] == 'paused: backup'
 tui.state['message'] = ('x' * 0, 0)
+
+# platform/site count in the panel title (TUI) - the count used to be absent
+tui.state['platforms'] = [('github', 'github', True, True, 'ok', '54'),
+                          ('backup', 'local', True, True, 'ok', '53')]
+assert tui.platforms_title() == 'PLATFORMS (2 sites, 2 connected)'
+tui.state['platforms'].append(('fj', 'forgejo', True, False, 'bad', '?'))
+assert tui.platforms_title() == 'PLATFORMS (3 sites, 2 connected)'
+tui.state['platforms'].append(('off', 'gitlab', False, True, 'ok', '?'))
+assert tui.platforms_title() == 'PLATFORMS (4 sites, 2 connected)'
+tui.state['platforms'] = []
+assert tui.platforms_title().startswith('PLATFORMS (0 sites')
 
 print('all unit checks passed')
 """
