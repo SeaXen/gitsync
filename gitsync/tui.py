@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 from datetime import datetime
 
@@ -53,6 +54,7 @@ state = {
     "repo_sel": set(),      # selected repo names
     "repo_scroll": 0,
     "repo_loaded": False,
+    "repo_loading": False,
     "repo_src": "",          # which platform the browser listed
     "star_targets": set(),
     "star_cur": 0,
@@ -87,25 +89,36 @@ def refresh_platforms():
         _refreshing.release()
 
 
+def _probe(name, p):
+    """test one platform and count its repos (run in a worker thread)"""
+    try:
+        plat = P.make(name, p)
+        ok, info = plat.test()
+        count = "?"
+        if ok and p.get("enabled"):
+            try:
+                count = str(len(plat.list_repos()))
+            except Exception:
+                count = "?"
+    except Exception as e:
+        ok, info, count = False, str(e)[:80], "?"
+    return (name, p.get("type", "?"), bool(p.get("enabled")),
+            bool(ok), info, count)
+
+
 def _refresh_platforms_inner():
     state["counts_age"] = time.time()   # advance first: hung calls can't re-arm
     cfg = C.load_config()
-    rows = []
-    for name, p in cfg.get("platforms", {}).items():
-        try:
-            plat = P.make(name, p)
-            ok, info = plat.test()
-            count = "?"
-            if ok and p.get("enabled"):
-                try:
-                    count = str(len(plat.list_repos()))
-                except Exception:
-                    count = "?"
-        except Exception as e:
-            ok, info, count = False, str(e)[:80], "?"
-        rows.append((name, p.get("type", "?"), bool(p.get("enabled")),
-                     bool(ok), info, count))
-    state["platforms"] = rows
+    # probing is network-bound and used to be sequential: four sites took
+    # ~8s, which is the "loading..." you see at start-up and on R. Running
+    # them together cuts it to the slowest single site.
+    plats = list((cfg.get("platforms") or {}).items())
+    rows = [None] * len(plats)
+    with ThreadPoolExecutor(max_workers=max(1, len(plats))) as ex:
+        futs = {ex.submit(_probe, n, p): i for i, (n, p) in enumerate(plats)}
+        for f in as_completed(futs):
+            rows[futs[f]] = f.result()
+    state["platforms"] = [r for r in rows if r]
     state["routes"] = [(r.get("name"), r.get("source"),
                         list(r.get("targets", [])),
                         r.get("include") or [], r.get("exclude") or [],
@@ -463,8 +476,9 @@ def accounts_screen(stdscr):
                  (" ACCOUNTS — %d site(s) " % len(rows)).center(w - 1)[:w - 1],
                  curses.A_BOLD | curses.color_pair(1))
         safe_add(stdscr, 1, 0,
-                 " A=add  E=edit  X=remove  T=test  ?=scopes  Space=on/off  "
-                 "R=refresh  B=back ".ljust(w - 1)[:w - 1], curses.A_DIM)
+                 " A=add  E=edit  X=remove  T=test  V=view repos  ?=scopes  "
+                 "Space=on/off  R=refresh  B=back ".ljust(w - 1)[:w - 1],
+                 curses.A_DIM)
         avail = max(1, h - 5)
         if idx < top:
             top = idx
@@ -496,8 +510,8 @@ def accounts_screen(stdscr):
                                                       len(rows)),
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
-                     " A=add  E=edit  X=remove  T=test  ?=scopes  "
-                     "Space=on/off  up/dn=move  B=back ")
+                     " A=add  E=edit  X=remove  T=test  V=view repos  "
+                     "?=scopes  Space=on/off  up/dn=move  B=back ")
         commit_screen(stdscr)
 
         ch = stdscr.getch()
@@ -515,6 +529,9 @@ def accounts_screen(stdscr):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("?"),):
             _scopes_screen(stdscr)
+        elif ch in (ord("v"), ord("V")) and rows:
+            # browse this site's repos without leaving the manager
+            repos_screen(stdscr, source=rows[idx][0])
         elif ch in (ord(" "), 10, 13, curses.KEY_ENTER):
             if not rows:
                 continue
@@ -570,12 +587,17 @@ def _test_platform(name):
     p = (cfg.get("platforms") or {}).get(name)
     if not p:
         return
-    try:
-        ok, info = P.make(name, p).test()
-    except Exception as e:
-        ok, info = False, str(e)[:80]
-    flash("%s: %s" % (name, info[:60] if ok else "FAIL " + info[:50]), 6)
+    flash("%s: testing ..." % name, 6)
     state["dirty"] = True
+
+    def work():
+        try:
+            ok, info = P.make(name, p).test()
+        except Exception as e:
+            ok, info = False, str(e)[:80]
+        flash("%s: %s" % (name, info[:60] if ok else "FAIL " + info[:50]), 8)
+        state["dirty"] = True
+    threading.Thread(target=work, daemon=True).start()
 
 
 def _remove_platform_screen(stdscr, name):
@@ -908,39 +930,64 @@ def _suspend_run(stdscr, cmd):
         state["dirty"] = True
 
 
-def load_repos():
-    """fetch the source platform's repo list (cached per R / per sync)"""
+def load_repos(source=None, background=True):
+    """fetch a platform's repo list (cached per R / per sync)
+
+    background=True keeps the TUI responsive: listing 52 GitHub repos takes
+    ~1.5s and used to freeze the screen with no feedback at all.
+    """
     cfg = C.load_config()
-    routes = C.routes(cfg)
-    if not routes:
-        flash("no routes configured", 6)
-        return
-    src = routes[0]["source"]
-    state["repo_src"] = src
-    try:
-        repos = P.make(src, C.platform(cfg, src)).list_repos()
-    except Exception as e:
-        flash("cannot list repos on %s: %s" % (src, e), 8)
-        repos = []
-    state["repo_list"] = sorted(
-        [(r["name"], bool(r.get("private")), bool(r.get("fork")))
-         for r in repos], key=lambda t: t[0].lower())
-    state["repo_loaded"] = True
-    state["repo_scroll"] = 0
-    state["dirty"] = True
+    if source is None:
+        routes = C.routes(cfg)
+        if not routes:
+            flash("no routes configured", 6)
+            return
+        source = routes[0]["source"]
+    state["repo_src"] = source
+
+    def work():
+        state["repo_loading"] = True
+        state["dirty"] = True
+        try:
+            repos = P.make(source, C.platform(cfg, source)).list_repos()
+            err = None
+        except Exception as e:
+            repos, err = [], str(e)[:80]
+        state["repo_list"] = sorted(
+            [(r["name"], bool(r.get("private")), bool(r.get("fork")))
+             for r in repos], key=lambda t: t[0].lower())
+        state["repo_loaded"] = True
+        state["repo_loading"] = False
+        if err:
+            flash("cannot list repos on %s: %s" % (source, err), 8)
+        state["dirty"] = True
+
+    if background:
+        if state.get("repo_loading"):
+            return
+        threading.Thread(target=work, daemon=True).start()
+    else:
+        work()
 
 
-def _local_target():
-    """name of the route's local-disk target (where 'L' clones to)"""
+def _local_target(src=None):
+    """name of a route's local-disk target (where 'L' clones to).
+
+    Prefers the route whose source is the platform being browsed, so
+    viewing GitLab's repos and pressing L uses GitLab's route.
+    """
     cfg = C.load_config()
     routes = C.routes(cfg)
     if not routes:
         return None
     plats = cfg.get("platforms") or {}
-    for t in routes[0].get("targets", []):
-        p = plats.get(t) or {}
-        if p.get("type") == "local" and p.get("enabled", True):
-            return t
+    order = [r for r in routes if src is None or r.get("source") == src]
+    order += [r for r in routes if r not in order]
+    for r in order:
+        for t in r.get("targets", []):
+            p = plats.get(t) or {}
+            if p.get("type") == "local" and p.get("enabled", True):
+                return t
     return None
 
 
@@ -970,9 +1017,18 @@ def _pick_platform(stdscr, title):
     return _picked_platform.get("name")
 
 
-def repos_screen(stdscr):
-    """browse the source account's repos, pick some, sync just those"""
-    if not state["repo_loaded"]:
+def repos_screen(stdscr, source=None):
+    """browse a platform's repos, pick some, sync just those.
+
+    source=None uses the first route's source (the E key); the accounts
+    manager passes the platform you highlighted.
+    """
+    if source:
+        state["repo_sel"] = set()
+        state["repo_loaded"] = False
+        state["repo_scroll"] = 0
+        load_repos(source=source)
+    elif not state["repo_loaded"]:
         load_repos()
     query = ""
     cur = state["repo_scroll"]
@@ -984,6 +1040,15 @@ def repos_screen(stdscr):
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         n_sel = len(state["repo_sel"])
+        if state.get("repo_loading"):
+            safe_add(stdscr, 4, 2, " listing repos on %s ..."
+                     % (state.get("repo_src") or "?"), curses.A_DIM)
+            modal_footer(stdscr, h, w, " reading the repo list ... ")
+            commit_screen(stdscr)
+            ch = stdscr.getch()
+            if ch in (ord("b"), ord("B"), 27):
+                return
+            continue
         safe_add(stdscr, 0, 0,
                  (" REPOS on %s - %d repos, %d selected "
                   % (state.get("repo_src") or "?", len(state["repo_list"]),
@@ -1075,7 +1140,7 @@ def repos_screen(stdscr):
             cmd = ["python3", "-m", "gitsync", "sync", "--repos",
                    ",".join(sorted(state["repo_sel"]))]
             if ch in (ord("l"), ord("L")):
-                local = _local_target()
+                local = _local_target(state.get("repo_src"))
                 if not local:
                     flash("no local-disk target in this route", 6)
                     continue
@@ -1772,7 +1837,8 @@ def _cycle_route_option(cfg, route, label):
 
 
 def _add_route_screen(stdscr):
-    """add a route without leaving the TUI: name, source, targets, direction"""
+    """add a route without leaving the TUI: name, source, targets, direction
+    and its per-route settings, all in one form"""
     cfg = C.load_config()
     names = [r[0] for r in _platform_rows(cfg)]
     live = [n for n, p in (cfg.get("platforms") or {}).items()
@@ -1781,17 +1847,29 @@ def _add_route_screen(stdscr):
         flash("need at least two enabled sites", 6)
         return
     fields = [("name", "name", "", {"hint": "e.g. all, gh-to-gl"}),
-              ("source", "source", live[0],
-               {"choices": live}),
+              ("source", "source", live[0], {"choices": live}),
               ("targets", "targets", ",".join([n for n in live
                                                if n != live[0]]),
                {"hint": "comma-separated"}),
               ("direction", "direction", "one-way",
                {"choices": ["one-way", "mesh"],
-                "hint": "mesh = every site syncs to every other"})]
+                "hint": "mesh = every site syncs to every other"}),
+              ("workers", "workers", "inherit",
+               {"choices": ["inherit", "1", "2", "4", "8"],
+                "hint": "parallel jobs for this route"}),
+              ("mode", "mirror mode", "inherit",
+               {"choices": ["inherit", "full", "safe"],
+                "hint": "full prunes deleted refs"}),
+              ("mesh_conflict", "conflicts", "inherit",
+               {"choices": ["inherit", "newest", "skip"],
+                "hint": "mesh only: skip = never overwrite"}),
+              ("schedule", "schedule", "inherit",
+               {"choices": ["inherit", "hourly", "6h", "12h", "daily",
+                            "weekly", "off"],
+                "hint": "this route's own frequency"})]
     vals = _form(stdscr, "ADD A ROUTE", fields,
                  note="one-way: the source wins. mesh: newest commit wins "
-                      "per branch")
+                      "per branch. 'inherit' = use the global setting.")
     if not vals or not vals.get("name"):
         flash("cancelled", 3)
         return
@@ -1809,11 +1887,21 @@ def _add_route_screen(stdscr):
     route = {"name": name, "source": src_name, "targets": targets}
     if vals.get("direction") == "mesh":
         route["direction"] = "mesh"
+    # per-route settings; "inherit" means "leave it to the global value"
+    for key in ("workers", "mode", "mesh_conflict", "schedule"):
+        v = vals.get(key)
+        if v and v != "inherit":
+            route[key] = int(v) if key == "workers" else v
     cfg.setdefault("routes", []).append(route)
     C.save_config(cfg)
     _reload_routes()
-    flash("route added: %s%s" % (name, " (mesh)" if vals.get("direction")
-                                 == "mesh" else ""), 5)
+    extra = ", ".join("%s=%s" % (k, route[k]) for k in
+                      ("workers", "mode", "mesh_conflict", "schedule")
+                      if k in route)
+    flash("route added: %s%s%s" % (name,
+                                   " (mesh)" if route.get("direction")
+                                   == "mesh" else "",
+                                   " [%s]" % extra if extra else ""), 6)
     return name
 
 
@@ -2623,13 +2711,55 @@ def _run(stdscr):
 
 
 def _run_capture(cmd, timeout=300):
-    """run a CLI command and return its output lines"""
+    """run a CLI command and return its output lines (blocking - only for
+    commands that finish in well under a second)"""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                            env=dict(os.environ, PYTHONPATH=_app_dir()))
         return (r.stdout + r.stderr).splitlines()
     except Exception as e:
         return ["failed: %s" % e]
+
+
+def _run_bg(title, cmd):
+    """run a command in the background and stream its output to the log panel.
+
+    `gitsync compare` takes minutes and `disk` takes ~12s; running them on
+    the main thread froze the whole TUI for that long, which is what "the
+    TUI feels slow" was. The dashboard keeps responding and the output
+    appears live, exactly like a sync does.
+    """
+    if state["syncing"]:
+        flash("something is already running", 5)
+        return
+    state["syncing"] = True
+    state["sync_lines"] = ["--- %s started %s ---"
+                           % (title, datetime.now().strftime("%H:%M:%S"))]
+    state["tab"] = 0                     # the log panel is on the dashboard
+    state["dirty"] = True
+
+    def worker():
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True,
+                                 env=dict(os.environ, PYTHONPATH=_app_dir()))
+            for line in p.stdout:
+                state["sync_lines"].append(line.rstrip())
+                state["dirty"] = True
+            p.wait()
+            state["sync_lines"].append(
+                "--- %s finished (rc=%d) %s ---"
+                % (title, p.returncode,
+                   datetime.now().strftime("%H:%M:%S")))
+        except Exception as e:
+            state["sync_lines"].append("--- error: %s ---" % e)
+        finally:
+            state["syncing"] = False
+            # keep the tool's output on screen instead of snapping back to
+            # the log tail the moment it finishes
+            state["log_tail"] = list(state["sync_lines"])
+            state["dirty"] = True
+    threading.Thread(target=worker, daemon=True).start()
 
 
 def _confirm_run(stdscr, title, cmd, warning):
@@ -2652,6 +2782,27 @@ def _confirm_run(stdscr, title, cmd, warning):
             return
 
 
+def _confirm_bg(stdscr, title, cmd, warning):
+    """ask before running something that changes every repo, then run it in
+    the background so the TUI keeps responding"""
+    h, w = stdscr.getmaxyx()
+    while True:
+        stdscr.erase()
+        safe_add(stdscr, 0, 0, (" %s " % title).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(4))
+        safe_add(stdscr, 2, 1, warning[:w - 4], curses.A_DIM)
+        safe_add(stdscr, 3, 1, "Dry-run first if you are unsure.",
+                 curses.A_DIM)
+        modal_footer(stdscr, h, w, " Y = run it   N = cancel ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
+            return
+        if ch in (ord("y"), ord("Y")):
+            _run_bg(title, cmd)
+            return
+
+
 def _tools_screen(stdscr):
     """everything that still needed a terminal, in one menu.
 
@@ -2659,33 +2810,33 @@ def _tools_screen(stdscr):
     ones that change something (mirror, update, uninstall) drop to the
     shell and come back.
     """
-    def show(title, cmd):
-        lines = _run_capture(cmd)
-        _scroll_view(stdscr, " %s " % title, lines or ["(no output)"])
+    def bg(title, cmd):
+        _run_bg(title, cmd)
 
     def ask_repo():
         name = prompt_line(stdscr, " repo name: ")
         if not name:
             return
-        _suspend_run(stdscr, ["python3", "-m", "gitsync", "mirror", name])
+        _run_bg("MIRROR %s" % name,
+                ["python3", "-m", "gitsync", "mirror", name])
 
     items = [
         ("Disk usage + orphans", "hub size, what can be reclaimed",
-         lambda: show("DISK", ["python3", "-m", "gitsync", "disk",
-                               "--orphans"])),
+         lambda: bg("DISK", ["python3", "-m", "gitsync", "disk",
+                             "--orphans"])),
         ("Doctor", "health check: tokens, routes, storage",
-         lambda: show("DOCTOR", ["python3", "-m", "gitsync", "doctor"])),
+         lambda: bg("DOCTOR", ["python3", "-m", "gitsync", "doctor"])),
         ("Compare sites", "which repos differ across a route",
-         lambda: show("COMPARE", ["python3", "-m", "gitsync", "compare"])),
+         lambda: bg("COMPARE", ["python3", "-m", "gitsync", "compare"])),
         ("Mirror one repo", "sync a single repo now", ask_repo),
         ("Fix drift (preview)", "see which repos disagree, change nothing",
-         lambda: show("FIX DRIFT", ["python3", "-m", "gitsync", "fix",
-                                    "--dry-run"])),
+         lambda: bg("FIX DRIFT", ["python3", "-m", "gitsync", "fix",
+                                  "--dry-run"])),
         ("Fix drift (run it)", "re-sync every repo whose sites disagree",
-         lambda: _confirm_run(stdscr, "FIX DRIFT",
-                              ["python3", "-m", "gitsync", "fix"],
-                              "This re-pushes every mismatched repo to all "
-                              "of its targets.")),
+         lambda: _confirm_bg(stdscr, "FIX DRIFT",
+                             ["python3", "-m", "gitsync", "fix"],
+                             "This re-pushes every mismatched repo to all "
+                             "of its targets.")),
         ("Update gitsync", "pull the newest release and reinstall",
          lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
                                        "update"])),
@@ -2694,8 +2845,8 @@ def _tools_screen(stdscr):
                                        "uninstall", "--yes"])),
     ]
     menu(stdscr, "TOOLS", items,
-         note="the same things gitsync disk|doctor|compare|mirror|fix|"
-              "update|uninstall do")
+         note="output streams on the dashboard log while the TUI stays "
+              "responsive")
 
 
 def launch_wizard(stdscr):

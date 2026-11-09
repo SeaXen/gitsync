@@ -4,6 +4,40 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.1] - 2026-11-09
+
+The TUI felt slow. It was not the drawing (0.4-2.8 ms a frame) - it was
+blocking calls on the main thread.
+
+### Fixed
+
+- **Tools no longer freeze the TUI.** `compare` walks every repo on every
+  site and took **3.5 minutes**, `disk` ~12s, `doctor` ~3s - all on the main
+  thread, so the dashboard was dead for that long. Disk, doctor, compare,
+  mirror and fix now run in the background and stream their output into the
+  dashboard's log panel, and the output stays on screen when they finish.
+  Verified: switching tabs mid-run works.
+- **Start-up and `R` are ~45% faster.** The platform probe was sequential
+  (4 sites, ~7.8s, most of it the `gh` CLI at ~0.7s a call). It now probes
+  every site in parallel: 4.5s, bounded by the slowest single site.
+- **Listing repos no longer blocks.** `E` (and `V` below) froze the screen
+  for ~1.5s with no feedback; it now shows "listing repos on github ..."
+  and fills in.
+- **Testing a platform no longer blocks** the accounts screen.
+- **`V` in the accounts manager loaded the wrong platform's repos** - the
+  repo screen re-listed from the first route's source. It now takes the
+  platform you highlighted.
+
+### Added
+
+- **`V` in the accounts manager browses that site's repos** - so selecting a
+  platform does show its repos, with the same select/sync keys as `E`.
+  `L` (local only) now follows the route whose source is the platform you
+  are browsing.
+- **Adding a route includes its settings**: workers, mirror mode, mesh
+  conflict policy and schedule are all in the same form, each defaulting to
+  "inherit" (use the global value).
+
 ## [1.6.0] - 2026-11-09
 
 Three things: the risky part of a sync is now visible before it happens, the

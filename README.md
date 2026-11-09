@@ -597,13 +597,13 @@ would have to delete it on every peer.
 
 | Key | What it does |
 |---|---|
-| `A` | **accounts**: add, edit, remove, test, enable/disable a site |
-| `P` (Routes tab) | **routes**: pause/resume a target or a route, run one route, dry-run it, edit its filters, per-route workers/mode/mesh-conflict/schedule, add a route (`A`), remove one (`X`) |
+| `A` | **accounts**: add, edit, remove, test, enable/disable a site, **browse its repos** (`V`), token scopes (`?`) |
+| `P` (Routes tab) | **routes**: pause/resume a target or a route, run one route, dry-run it, edit its filters, per-route workers/mode/mesh-conflict/schedule, add a route **with its settings** (`A`), remove one (`X`) |
 | `C` | schedule (hourly → daily → off) |
 | `O` | options: workers, mirror mode, forks, notify, pacing, mesh policy, token warning, colour theme |
 | `N` → `W` | webhook receiver: secret, payload URL, install/stop |
 | `E` | browse repos, pick some, sync just those |
-| `T` | **tools**: disk + orphans, doctor, compare sites, mirror one repo, fix drift (preview), update, uninstall |
+| `T` | **tools**: disk + orphans, doctor, compare sites, mirror one repo, fix drift (preview + run), update, uninstall. These run in the background and stream into the dashboard log, so the TUI never freezes (`compare` takes minutes). |
 | `D` | dry run — preview a whole run, or one route. In `full` mode it names every ref the push would delete |
 | `T` (repo browser) | push the selected repos to **one site** |
 | `S` | sync now (or one route, from the pause screen) |
