@@ -86,6 +86,113 @@ class TestPlatformUrls(unittest.TestCase):
         self.assertEqual(p._push_url('me', 'repo'),
                          'ssh://git@localhost:2222/me/repo.git')
 
+    def test_forgejo_https_url_encodes_token(self):
+        # P0-3: private git operations send no token without this
+        p = P.make('fj', {'type': 'forgejo', 'url': 'http://localhost:3002',
+                          'owner': 'sagar', 'token': 'a/b'})
+        self.assertEqual(p._push_url('sagar', 'repo'),
+                         'https://git:a%2Fb@localhost:3002/sagar/repo.git')
+        p2 = P.make('fj2', {'type': 'forgejo', 'url': 'https://codeberg.org',
+                            'owner': 'me', 'token': 'tok'})
+        self.assertEqual(p2._push_url('me', 'repo'),
+                         'https://git:tok@codeberg.org/me/repo.git')
+        # no token -> plain URL, ssh -> never embedded
+        p3 = P.make('fj3', {'type': 'forgejo', 'url': 'http://h:3002',
+                            'owner': 'me'})
+        self.assertEqual(p3._push_url('me', 'repo'),
+                         'https://h:3002/me/repo.git')
+
+    def test_github_api_base(self):
+        # P0-14: GitHub Enterprise was broken (hardcoded api.github.com)
+        self.assertEqual(
+            P.make('gh', {'type': 'github',
+                          'url': 'https://github.com'})._api_base(),
+            'https://api.github.com')
+        self.assertEqual(
+            P.make('ghe', {'type': 'github',
+                           'url': 'https://git.example.com'})._api_base(),
+            'https://git.example.com/api/v3')
+
+    def test_github_pagination_does_not_stop_at_500(self):
+        # P0-14: `gh repo list --limit 500` silently dropped the rest
+        p = P.make('gh', {'type': 'github', 'auth': 'gh',
+                          'url': 'https://github.com'})
+        pages = [[("r%d" % i, "PUBLIC", "false",
+                   "https://github.com/o/r%d" % i) for i in range(100)],
+                 [("r100", "PUBLIC", "false",
+                   "https://github.com/o/r100")]]
+        seen = []
+
+        def fake_gh(args):
+            seen.append(args)
+            body = "\n".join("\t".join(r) for r in pages[len(seen) - 1])
+            return 0, body, ""
+
+        p._gh = fake_gh
+        repos = p.list_repos()
+        self.assertEqual(len(repos), 101)
+        self.assertEqual(len(seen), 2)              # it asked for page 2
+        self.assertIn("page=2", seen[1][1])
+
+    def test_bitbucket_no_unpack_crash(self):
+        # P0-2: _api returns (status, body) but the methods unpacked three
+        p = P.make('bb', {'type': 'bitbucket', 'owner': 'me', 'token': 't'})
+        p._api = lambda path, method="GET", payload=None: (
+            200, {"username": "a", "values": []})
+        self.assertEqual(p.user(), 'a')             # must not raise
+        ok, info = p.test()
+        self.assertTrue(ok)
+
+    def test_bitbucket_repo_url_has_workspace_and_token(self):
+        # P0-2: was {api-host}/{name}.git - API host, no workspace, no token
+        p = P.make('bb', {'type': 'bitbucket', 'owner': 'me', 'token': 'a/b'})
+        self.assertEqual(p.repo_url({'name': 'My Repo'}),
+                         'https://x-bitbucket-api-token-auth:a%2Fb'
+                         '@bitbucket.org/me/my-repo.git')
+        ssh = P.make('bb2', {'type': 'bitbucket', 'owner': 'me',
+                             'protocol': 'ssh'})
+        self.assertEqual(ssh.repo_url({'name': 'x'}),
+                         'git@bitbucket.org:me/x.git')
+
+
+class TestHttpErrorHeaders(unittest.TestCase):
+    """P0-12: an HTTP error must still honour want_headers=True."""
+
+    def test_error_returns_headers_when_asked(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(401)
+                self.send_header("X-Test-Thing", "yes")
+                self.end_headers()
+                self.wfile.write(b'{"message":"Bad credentials"}')
+
+            def log_message(self, *a):
+                pass
+
+        srv = HTTPServer(("127.0.0.1", 0), H)
+        t = threading.Thread(target=srv.handle_request)
+        t.start()
+        url = "http://127.0.0.1:%d/user" % srv.server_port
+        try:
+            rc, body, hdrs = P._http("GET", url, want_headers=True)
+        finally:
+            t.join(10)
+            srv.server_close()
+        self.assertEqual(rc, 401)
+        self.assertEqual(hdrs.get("x-test-thing"), "yes")
+
+    def test_token_info_reports_rejected(self):
+        p = P.make('gh', {'type': 'github', 'token': 'bad',
+                          'url': 'https://github.com'})
+        p._api = lambda path, method="GET", payload=None: (
+            401, {"message": "Bad credentials"}, {})
+        info = p.token_info()
+        self.assertTrue(info["has_token"])
+        self.assertEqual(info.get("error"), "token rejected")
+
 
 # ------------------------------------------------------------------ config
 

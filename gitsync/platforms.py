@@ -104,6 +104,7 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
                 body = json.loads(body)
             except ValueError:
                 pass
+            hdrs = {k.lower(): v for k, v in (e.headers or {}).items()}
             if e.code in (429, 500, 502, 503, 504) and attempt < 2:
                 wait = 2 ** attempt
                 try:
@@ -114,7 +115,10 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
                     pass
                 time.sleep(wait)
                 continue
-            return e.code, body
+            # an error must still honour want_headers: callers such as
+            # GitHubPlatform.token_info unpack three values to report
+            # "token rejected" instead of crashing on a 401
+            return (e.code, body, hdrs) if want_headers else (e.code, body)
         except Exception as e:
             return None, str(e)[:200]
     return None, "request failed after retries"
@@ -137,8 +141,19 @@ class GitHubPlatform:
     def _gh(self, args):
         return run(["gh"] + args, timeout=API_TIMEOUT)
 
+    def _api_base(self):
+        """api.github.com for github.com, {url}/api/v3 for Enterprise.
+
+        GHE was broken before: the API host was hardcoded, so a self-hosted
+        instance could never be listed.
+        """
+        host = self.url.replace("https://", "").replace("http://", "")
+        if host == "github.com":
+            return "https://api.github.com"
+        return "https://%s/api/v3" % host
+
     def _api(self, path, method="GET", payload=None):
-        return _http(method, "https://api.github.com" + path,
+        return _http(method, self._api_base() + path,
                      token=self.token, payload=payload)
 
     def user(self):
@@ -174,23 +189,45 @@ class GitHubPlatform:
                                       full_name)
 
     def list_repos(self):
+        """every repo this account can see, paginated to the end.
+
+        `gh repo list --limit 500` used to cap the listing, and the REST path
+        asked for `affiliation=owner` only, so organization repos were never
+        mirrored even with the read:org scope. `github.affiliation` in the
+        config now controls that (default owner, as before).
+        """
         repos = []
         if self.auth == "gh" and not self.token:
-            rc, out, err = self._gh(["repo", "list", "--limit", "500",
-                                     "--json", "name,visibility,isFork,url"])
-            if rc != 0:
-                raise RuntimeError("gh repo list failed: " + err[:200])
-            for r in json.loads(out):
-                repos.append({"name": r["name"], "private":
-                              r.get("visibility") != "PUBLIC",
-                              "fork": bool(r.get("isFork")),
-                              "clone_url": r["url"]})
+            page = 1
+            while True:
+                rc, out, err = self._gh(
+                    ["api", "user/repos?per_page=100&page=%d" % page,
+                     "--jq", ".[] | [.name, .visibility, .fork, .html_url] "
+                             "| @tsv"])
+                if rc != 0:
+                    raise RuntimeError("gh api user/repos failed: "
+                                       + err[:200])
+                rows = [l.split("\t") for l in out.splitlines() if l.strip()]
+                for r in rows:
+                    name = r[0]
+                    vis = r[1] if len(r) > 1 else "PUBLIC"
+                    fork = (r[2] if len(r) > 2 else "false") == "true"
+                    url = r[3] if len(r) > 3 else ""
+                    repos.append({"name": name,
+                                  "private": vis != "PUBLIC",
+                                  "fork": fork,
+                                  "clone_url": url})
+                if len(rows) < 100:
+                    break
+                page += 1
+                if page > 30:            # 3000 repos is already absurd
+                    break
             return repos
-        # REST: owned repos, paginated
+        affiliation = self.cfg.get("affiliation") or "owner"
         page = 1
         while True:
             rc, out = self._api("/user/repos?per_page=100&page=%d"
-                                   "&affiliation=owner" % page)
+                                "&affiliation=%s" % (page, affiliation))
             if not isinstance(out, list):
                 raise RuntimeError("GitHub API failed: %s" % out)
             for r in out:
@@ -201,6 +238,8 @@ class GitHubPlatform:
             if len(out) < 100:
                 break
             page += 1
+            if page > 30:
+                break
         return repos
 
     def repo_url(self, repo):
@@ -217,8 +256,10 @@ class GitHubPlatform:
         if not self.token:
             return {"has_token": False,
                     "note": "gh CLI auth — expiry not exposed"}
-        rc, out, hdrs = _http("GET", "https://api.github.com/user",
+        rc, out, hdrs = _http("GET", self._api_base() + "/user",
                               token=self.token, want_headers=True)
+        if rc in (401, 403):
+            return {"has_token": True, "error": "token rejected"}
         if not isinstance(out, dict) or not out.get("login"):
             return {"has_token": True, "error": "token rejected"}
         return {"has_token": True,
@@ -465,6 +506,7 @@ class ForgejoPlatform:
         self.token = (cfg.get("token") or
                       os.environ.get("FORGEJO_TOKEN",
                                      os.environ.get("GITEA_TOKEN", "")))
+        self._login_cache = None
 
     def _api(self, path, method="GET", payload=None):
         return _http(method, self.url + "/api/v1" + path,
@@ -485,6 +527,13 @@ class ForgejoPlatform:
                        % (out.get("message") if isinstance(out, dict)
                           else out))
 
+    def _login(self):
+        """the account login, cached: git URLs need a user, and calling
+        /user once per repo made a 50-repo sync do 50 extra round-trips."""
+        if self._login_cache is None:
+            self._login_cache = self.user() or ""
+        return self._login_cache
+
     def _push_url(self, owner, name):
         if self.cfg.get("protocol") == "ssh":
             host = self.url.replace("https://", "").replace("http://", "")
@@ -494,7 +543,18 @@ class ForgejoPlatform:
             # from the config, defaulting to standard 22
             port = self.cfg.get("ssh_port") or 22
             return ssh_url(host, owner, name, port)
-        return "%s/%s/%s.git" % (self.url, owner, name)
+        # HTTPS must carry credentials, or a private clone/push fails: stdin
+        # is /dev/null during a sync, so git cannot prompt. The token is
+        # percent-encoded so one containing @ or / cannot break the URL.
+        user = self.cfg.get("user") or self._login() or "git"
+        if self.token:
+            return "https://%s:%s@%s/%s/%s.git" % (
+                user, urllib.parse.quote(self.token, safe=""),
+                self.url.replace("https://", "").replace("http://", ""),
+                owner, name)
+        return "https://%s/%s/%s.git" % (
+            self.url.replace("https://", "").replace("http://", ""),
+            owner, name)
 
     def list_repos(self):
         repos, page = [], 1
@@ -516,7 +576,7 @@ class ForgejoPlatform:
 
     def repo_url(self, repo):
         """expected URL without creating anything (read-only probing)"""
-        owner = self.owner or (self.user() or "")
+        owner = self.owner or self._login()
         return self._push_url(owner, repo["name"])
 
     def prepare_push(self, repo, push_url):
@@ -670,8 +730,24 @@ class BitbucketPlatform:
         return _http(method, self.url + "/2.0" + path, token=self.token,
                      payload=payload, auth_style="bearer")
 
+    def _git_url(self, owner, slug):
+        """authenticated HTTPS URL, or the plain one when no token is set.
+
+        Was `{api-host}/{name}.git` — the API host, no workspace and no
+        credentials, so every private clone/push failed.
+        """
+        host = "bitbucket.org"
+        if self.cfg.get("protocol") == "ssh":
+            return ssh_url(host, owner, slug)
+        if self.token:
+            user = self.cfg.get("user") or "x-bitbucket-api-token-auth"
+            return "https://%s:%s@%s/%s/%s.git" % (
+                user, urllib.parse.quote(self.token, safe=""), host,
+                owner, slug)
+        return "https://%s/%s/%s.git" % (host, owner, slug)
+
     def user(self):
-        rc, out, _ = self._api("/user")
+        rc, out = self._api("/user")
         if isinstance(out, dict) and out.get("username"):
             return out["username"]
         return None
@@ -679,41 +755,35 @@ class BitbucketPlatform:
     def test(self):
         if not self.owner:
             return False, "workspace (owner) is required for Bitbucket"
-        rc, out, _ = self._api("/repositories/%s?pagelen=1" % self.owner)
+        rc, out = self._api("/repositories/%s?pagelen=1" % self.owner)
         if isinstance(out, dict) and "values" in out:
             return True, "token OK — workspace %s" % self.owner
         return False, "API failed: %s" % (out.get("message")
                                           if isinstance(out, dict) else out)
 
-    def _clone_url(self, clone_links):
-        if self.cfg.get("protocol") == "ssh":
-            for c in clone_links or []:
-                if c.get("name") == "ssh":
-                    return c["href"]
-        for c in clone_links or []:
-            if c.get("name") == "https":
-                return c["href"]
-        return None
-
     def list_repos(self):
         repos, path = [], "/repositories/%s?pagelen=100" % self.owner
         while path:
-            rc, out, _ = self._api(path)
+            rc, out = self._api(path)
             if not isinstance(out, dict) or "values" not in out:
                 raise RuntimeError("Bitbucket API failed: %s" % out)
             for r in out["values"]:
+                parent = (r.get("parent") or {}).get("full_name")
                 repos.append({"name": r["name"],
                               "private": bool(r.get("is_private")),
-                              "fork": False,
-                              "clone_url": self._clone_url(
-                                  r.get("links", {}).get("clone"))})
+                              "fork": bool(parent),
+                              "clone_url": self._git_url(
+                                  self.owner, r.get("slug") or
+                                  r["name"].lower().replace(" ", "-")
+                                  .replace("_", "-"))})
             nxt = out.get("next")
             path = nxt.replace(self.url + "/2.0", "") if nxt else None
         return repos
 
     def repo_url(self, repo):
         """expected URL without creating anything (read-only probing)"""
-        return "%s/%s.git" % (self.url, repo["name"])
+        slug = repo["name"].lower().replace(" ", "-").replace("_", "-")
+        return self._git_url(self.owner, slug)
 
     def prepare_push(self, repo, push_url):
         return []
@@ -726,18 +796,14 @@ class BitbucketPlatform:
     def ensure_repo(self, repo):
         name = repo["name"]
         slug = name.lower().replace(" ", "-").replace("_", "-")
-        rc, out, _ = self._api("/repositories/%s/%s" % (self.owner, slug))
-        if isinstance(out, dict) and out.get("links"):
-            url = self._clone_url(out["links"].get("clone"))
-            if url:
-                return url
-        rc, out, _ = self._api("/repositories/%s/%s" % (self.owner, slug),
-                               "POST", {"scm": "git",
-                                        "is_private": bool(repo.get("private"))})
-        if isinstance(out, dict) and out.get("links"):
-            url = self._clone_url(out["links"].get("clone"))
-            if url:
-                return url
+        rc, out = self._api("/repositories/%s/%s" % (self.owner, slug))
+        if isinstance(out, dict) and out.get("uuid"):
+            return self._git_url(self.owner, slug)
+        rc, out = self._api("/repositories/%s/%s" % (self.owner, slug),
+                            "POST", {"scm": "git",
+                                     "is_private": bool(repo.get("private"))})
+        if isinstance(out, dict) and out.get("uuid"):
+            return self._git_url(self.owner, slug)
         raise RuntimeError("Bitbucket create failed: %s"
                            % (out.get("message") if isinstance(out, dict)
                               else out))
