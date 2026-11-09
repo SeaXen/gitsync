@@ -162,4 +162,21 @@ jobs:
                       'owner': 'me', 'token': 'tok'})
           assert _gp.repo_url({'name': '_weird name'}) == 'https://oauth2:tok@gitlab.com/me/weird-name.git'
 
+          
+          # mesh: newest commit wins; ties keep the earlier peer
+          assert SY._newest([(10, 'a'), (20, 'b'), (20, 'c')]) == (20, 'b')
+          assert SY._newest([(7, 'only')]) == (7, 'only')
+          # paused targets are skipped, and a mesh treats the source as a peer
+          _cfg = {'platforms': {'a': {'type': 'github', 'enabled': True},
+                                'b': {'type': 'gitlab', 'enabled': True},
+                                'c': {'type': 'local', 'enabled': True}}}
+          _r = {'name': 'r', 'source': 'a', 'targets': ['b', 'c'],
+                'paused_targets': ['c']}
+          assert set(SY.active_targets(_cfg, _r)) == {'b'}
+          assert set(SY.route_peers(_cfg, _r)) == {'a', 'b'}
+          _cfg['platforms']['b']['enabled'] = False
+          assert SY.active_targets(_cfg, _r) == {}
+          assert set(SY.route_peers(_cfg, _r)) == {'a'}
+          # CLI error text: last meaningful line only
+          assert P._short_text('line one\n\nthe real reason') == 'the real reason'
           PY

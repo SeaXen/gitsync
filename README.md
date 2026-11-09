@@ -91,6 +91,8 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 |---|---|
 | **6 providers** | GitHub, GitLab, Forgejo, Gitea, Bitbucket, local folders — any as source or target |
 | **Any direction** | `github → gitlab`, `gitlab → forgejo`, `folder → github`, `bitbucket → everything`… |
+| **Two-way (mesh)** | one route where every peer is source and target: edit on GitLab, it lands on GitHub, Forgejo and the local hub |
+| **Pause anything** | pause one target or a whole route from the TUI (`P`) or CLI — the timer keeps running the rest |
 | **Same-site too** | `github → github`, `gitlab → gitlab` — several accounts per site, side by side |
 | **One-click install** | download + install + wizard + scheduler + first sync in one command |
 | **Token guidance** | the wizard shows exactly which scopes each platform needs before asking |
@@ -156,7 +158,10 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync mirror tradex --to backup` | one repo, **one target only** |
 | `gitsync mirror tradex --from gitlab` | pull from a **specific platform** |
 | `gitsync routes` | list routes |
-| `gitsync routes add NAME SRC t1,t2` | add a route — **any direction** |
+| `gitsync routes add NAME SRC t1,t2` | add a one-way route — **any direction** |
+| `gitsync routes add all github,gitlab,forgejo` | **two-way (mesh)** route over every peer |
+| `gitsync routes pause NAME [TARGET]` | pause a whole route, or just one target |
+| `gitsync routes resume NAME [TARGET]` | resume it (targets catch up on the next run) |
 | `gitsync routes remove NAME` | remove a route |
 | `gitsync compare` | **drift check** — compare HEADs across platforms |
 | `gitsync status` | platforms, routes, scheduler, last run |
@@ -219,6 +224,68 @@ gitsync mirror tradex --from gitlab            # use another platform as source
 route's `include`/`exclude` globs — so a repo excluded by the route stays
 excluded. Names that don't exist on the source are reported, not silently
 skipped.
+
+---
+
+## Two-way sync (mesh)
+
+A normal route has one source and many targets: change something on a target
+and it is overwritten on the next run. A **mesh** route has no single source —
+every peer is equal. Each run fetches every peer, keeps the **newest commit per
+branch** (and per tag), and pushes the result back to everyone:
+
+```bash
+gitsync routes add all github,gitlab,forgejo,backup
+# or, explicitly:
+gitsync routes add all --mesh github,gitlab,forgejo,backup
+```
+
+```
+[1/1] OK   my-project -> github,gitlab,forgejo,backup (1 refs merged)
+```
+
+So editing a file on GitLab is enough — GitHub, Forgejo and the local hub pick
+it up on the next run, and a commit made on GitHub flows the other way.
+
+How conflicts are resolved:
+
+- **Newest commit wins** per branch. Ties keep the peer listed first in the
+  config (the source), so the result is deterministic.
+- **Branches and tags are unioned**, never deleted on a peer unless *no* peer
+  still has them. A deleted branch therefore does not come back, and a
+  half-finished deletion does not wipe anyone.
+- The mesh always force-pushes branches and tags (never `--mirror`), so
+  platform-only refs such as GitHub's `refs/pull/*` are left alone.
+
+If two people edit the same branch on two platforms at the same time, the
+newer commit is kept and the older one is overwritten — a mesh is not a merge
+engine. For safety, pause a peer (below) while you reconcile by hand.
+
+---
+
+## Pause a route or a target
+
+Sometimes a target should stop receiving updates without touching the timer:
+a disk is full, a Forgejo instance is down for maintenance, or you want the
+local hub to stay frozen at a known-good state.
+
+```bash
+gitsync routes pause github-to-all backup     # just that target
+gitsync routes pause github-to-all            # the whole route
+gitsync routes resume github-to-all backup    # it catches up on the next run
+```
+
+In the TUI: **Routes tab → `P`**, move with ↑/↓, toggle with Space. Paused
+entries are marked `PAUSED` on the Routes tab and on the dashboard, and every
+run (manual or timer) skips them with a log line:
+
+```
+  paused target(s): backup
+```
+
+Pausing is stored in `config.json` (`"paused_targets": ["backup"]`,
+`"enabled": false` for a whole route), so it survives restarts, updates and
+the TUI being closed.
 
 ---
 
@@ -415,7 +482,9 @@ next sync if the repo reappears).
 | `A` | accounts & platforms (tokens, scopes, how to add more) |
 | `E` | **repo browser** — see the account's repos, pick some, sync just those |
 | `W` | re-run the setup wizard |
-| `R` / `P` | refresh platform connections |
+| `R` | refresh platform connections |
+| `P` (Routes tab) | **pause / resume** a route or one of its targets |
+| `P` (other tabs) | refresh platform connections |
 | `1`–`6` | switch tabs: Dashboard / Platforms / Routes / Log / History / Settings |
 | `/` | search-filter the log or history |
 | `Q` | quit (Esc = back inside menus) |
@@ -758,8 +827,11 @@ No — code only (branches, tags, commits). Issues/PRs come over with GitLab's
 one-time GitHub importer but don't update afterwards.
 
 **Can I use it bidirectionally?**
-Use two routes (`a→b` and `b→a`), but pick one source of truth per repo —
-a mirror overwrites the target with the source's state.
+Yes — use a **mesh** route: `gitsync routes add all github,gitlab,forgejo`.
+Every peer is both source and target, and the newest commit wins per branch,
+so a change made on any platform reaches all the others. See
+[Two-way sync](#two-way-sync-mesh). One-way routes still exist for the
+simpler case where one platform owns the truth.
 
 **Is it safe for private repos?**
 Yes — private repos are created as private on targets, and the config file
@@ -779,7 +851,7 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (76 assertions)   PASS
+#   unit checks (83 assertions)   PASS
 # CI: all 4 checks passed
 ```
 

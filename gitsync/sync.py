@@ -79,53 +79,295 @@ def sync_repo(repo, source, targets, mode):
     # 2. push to each target
     pushed = []
     for tname, tplat in targets.items():
-        try:
-            push_url = tplat.ensure_repo(repo)
-            if tplat.ptype == "forgejo" or tplat.ptype == "gitea":
-                # GitHub's refs/pull/* namespace collides with Forgejo's own
-                # PR storage and its pre-receive hook rejects the whole push
-                cmd = ["git", "push", "--force", push_url,
-                       "+refs/heads/*:refs/heads/*",
-                       "+refs/tags/*:refs/tags/*"]
-            elif mode == "full":
-                cmd = ["git", "push", "--mirror", push_url]
-            else:
-                cmd = ["git", "push", "--force", push_url,
-                       "+refs/heads/*:refs/heads/*",
-                       "+refs/tags/*:refs/tags/*"]
-            rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
-            if rc != 0 and _protection_error(err):
-                # a protected branch refuses force-push. Ask the adapter to
-                # relax it, then retry the same push exactly once. Doing this
-                # lazily keeps the happy path free of extra API calls, which
-                # matters: GitLab rate-limits aggressively.
-                try:
-                    for note in tplat.prepare_push(repo, push_url) or []:
-                        log("    %s" % note)
-                    rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
-                except Exception as e:
-                    log("    %s: prepare_push failed: %s"
-                        % (tname, str(e)[:100]))
-            if rc != 0:
-                errors.append("%s: %s" % (tname, _short_error(err)))
-            else:
-                pushed.append(tname)
-                if tplat.ptype == "local":
-                    # git init --bare defaults HEAD to master; point it at the
-                    # branch we actually pushed so clones are not empty
-                    rc2, head_ref, _ = P.run(["git", "symbolic-ref", "HEAD"],
-                                             cwd=hub, timeout=30)
-                    if rc2 == 0 and head_ref.strip():
-                        P.run(["git", "-C", push_url, "symbolic-ref",
-                               "HEAD", head_ref.strip()], timeout=30)
-        except Exception as e:
-            errors.append("%s: %s" % (tname, str(e)[:120]))
+        err = _push_target(tname, tplat, repo, hub, mode)
+        if err:
+            errors.append(err)
+        else:
+            pushed.append(tname)
 
     if errors and not pushed:
         return "push-failed", "; ".join(errors), errors
     if errors:
         return "partial", "; ".join(errors), errors
     return "ok", ",".join(pushed), []
+
+
+PUSH_REFS = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
+
+
+def _push_target(tname, tplat, repo, hub, mode):
+    """push the hub to one target. Returns None on success, else an error."""
+    try:
+        push_url = tplat.ensure_repo(repo)
+        if tplat.ptype in ("forgejo", "gitea"):
+            # GitHub's refs/pull/* namespace collides with Forgejo's own
+            # PR storage and its pre-receive hook rejects the whole push
+            cmd = ["git", "push", "--force", push_url] + PUSH_REFS
+        elif mode == "full":
+            cmd = ["git", "push", "--mirror", push_url]
+        else:
+            cmd = ["git", "push", "--force", push_url] + PUSH_REFS
+        rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
+        if rc != 0 and _protection_error(err):
+            # a protected branch refuses force-push. Ask the adapter to
+            # relax it, then retry the same push exactly once. Doing this
+            # lazily keeps the happy path free of extra API calls, which
+            # matters: GitLab rate-limits aggressively.
+            try:
+                for note in tplat.prepare_push(repo, push_url) or []:
+                    log("    %s" % note)
+                rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
+            except Exception as e:
+                log("    %s: prepare_push failed: %s"
+                    % (tname, str(e)[:100]))
+        if rc != 0:
+            return "%s: %s" % (tname, _short_error(err))
+        if tplat.ptype == "local":
+            # git init --bare defaults HEAD to master; point it at the
+            # branch we actually pushed so clones are not empty
+            rc2, head_ref, _ = P.run(["git", "symbolic-ref", "HEAD"],
+                                     cwd=hub, timeout=30)
+            if rc2 == 0 and head_ref.strip():
+                rc3, exists, _ = P.run(["git", "-C", push_url, "rev-parse",
+                                        "--verify", "--quiet",
+                                        head_ref.strip()], timeout=30)
+                if rc3 == 0 and exists.strip():
+                    P.run(["git", "-C", push_url, "symbolic-ref",
+                           "HEAD", head_ref.strip()], timeout=30)
+        return None
+    except Exception as e:
+        return "%s: %s" % (tname, str(e)[:120])
+
+
+# ---------------------------------------------------------------- mesh sync
+#
+# A one-way route trusts one source. A mesh route trusts all of its peers:
+# every repo is fetched from each of them, the newest commit wins per branch
+# and per tag, and the result is pushed back to everyone. That is what makes
+# "change it on GitLab, see it on GitHub" work without a fixed source.
+
+MESH_NS = "refs/gitsync-mesh"
+
+
+def _ls_remote_map(url, timeout=90):
+    """{refname: sha} for one remote, or None when it cannot be reached"""
+    rc, out, _ = P.run(["git", "ls-remote", url], timeout=timeout)
+    if rc != 0:
+        return None
+    refs = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            refs[parts[1]] = parts[0]
+    return refs
+
+
+def _newest(cands):
+    """the entry with the newest date; ties keep the first (source order)"""
+    best = cands[0]
+    for c in cands[1:]:
+        if c[0] > best[0]:
+            best = c
+    return best
+
+
+def _peer_refs(hub, peer):
+    """({branch: (date, sha)}, {tag: (date, sha)}) fetched from one peer"""
+    heads, tags = {}, {}
+    prefix = "%s/%s/" % (MESH_NS, peer)
+    rc, out, _ = P.run(
+        ["git", "for-each-ref",
+         "--format=%(refname)%09%(objectname)%09%(committerdate:unix)"
+         "%09%(creatordate:unix)", prefix], cwd=hub, timeout=120)
+    if rc != 0:
+        return heads, tags
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        ref, sha, cdate, adate = parts[0], parts[1], parts[2], parts[3]
+        try:
+            date = int(cdate or adate or 0)
+        except ValueError:
+            date = 0
+        if ref.startswith(prefix + "heads/"):
+            heads[ref[len(prefix) + 6:]] = (date, sha)
+        elif ref.startswith(prefix + "tags/"):
+            tags[ref[len(prefix) + 5:]] = (date, sha)
+    return heads, tags
+
+
+def _set_ref(hub, ref, sha):
+    """point ref at sha; returns True when that changed something"""
+    rc, cur, _ = P.run(["git", "rev-parse", "--verify", "--quiet", ref],
+                       cwd=hub, timeout=60)
+    if rc == 0 and cur.strip() == sha:
+        return False
+    P.run(["git", "update-ref", ref, sha], cwd=hub, timeout=60)
+    return True
+
+
+def _drop_absent(hub, space, keep):
+    """delete refs/<space>/* that no peer has any more"""
+    dropped = 0
+    rc, out, _ = P.run(["git", "for-each-ref", "--format=%(refname)",
+                        "refs/%s" % space], cwd=hub, timeout=60)
+    if rc != 0:
+        return 0
+    for ref in out.split():
+        short = ref.split("/", 2)[2]
+        if short in keep:
+            continue
+        P.run(["git", "update-ref", "-d", ref], cwd=hub, timeout=60)
+        dropped += 1
+    return dropped
+
+
+def mesh_sync_repo(repo, peers):
+    """all-direction sync: newest commit wins per branch and per tag.
+
+    Peers' refs are fetched into a private namespace in the hub, the hub
+    takes the newest version of every branch/tag, and the result is pushed
+    to every peer. Nothing is deleted on a peer unless no peer has the ref
+    any more (union semantics), so a mesh never resurrects a branch that was
+    intentionally deleted everywhere.
+    """
+    name = repo["name"]
+    hub = mirror_path(name)
+    errors = []
+    reachable = {}
+    for pname, plat in peers.items():
+        try:
+            url = plat.repo_url(repo)
+        except Exception as e:
+            errors.append("%s: %s" % (pname, str(e)[:100]))
+            continue
+        refs = _ls_remote_map(url)
+        if refs is None:
+            continue                      # repo not created there yet
+        reachable[pname] = (url, refs)
+
+    if not reachable:
+        return "push-failed", "; ".join(errors) or "no peer reachable", errors
+
+    # fast path: every peer already holds exactly the same refs
+    if len(reachable) == len(peers):
+        first = next(iter(reachable.values()))[1]
+        if all(refs == first for _, refs in reachable.values()):
+            return "ok", "in sync on %d peers" % len(reachable), []
+
+    if os.path.isdir(hub) and not mirror_is_valid(hub):
+        P.run(["rm", "-rf", hub])
+    if not os.path.isdir(hub):
+        rc, _, err = P.run(["git", "init", "--bare", hub])
+        if rc != 0:
+            return "clone-failed", err.strip()[:200], []
+
+    # 1. fetch every reachable peer into the private namespace
+    for pname, (url, _refs) in reachable.items():
+        rc, _, err = P.run(
+            ["git", "fetch", "--prune", "--force", "--no-tags", url,
+             "+refs/heads/*:%s/%s/heads/*" % (MESH_NS, pname),
+             "+refs/tags/*:%s/%s/tags/*" % (MESH_NS, pname)],
+            cwd=hub, timeout=P.GIT_TIMEOUT)
+        if rc != 0:
+            errors.append("%s: fetch failed: %s" % (pname,
+                                                    _short_error(err)))
+
+    # 2. newest commit wins, per branch and per tag
+    cand_heads, cand_tags = {}, {}
+    for pname in reachable:
+        ph, pt = _peer_refs(hub, pname)
+        for b, cand in ph.items():
+            cand_heads.setdefault(b, []).append(cand)
+        for t, cand in pt.items():
+            cand_tags.setdefault(t, []).append(cand)
+
+    chosen_heads = {b: _newest(c) for b, c in cand_heads.items()}
+    chosen_tags = {t: _newest(c) for t, c in cand_tags.items()}
+
+    updated = 0
+    for b, (_d, sha) in chosen_heads.items():
+        if _set_ref(hub, "refs/heads/" + b, sha):
+            updated += 1
+    for t, (_d, sha) in chosen_tags.items():
+        if _set_ref(hub, "refs/tags/" + t, sha):
+            updated += 1
+    _drop_absent(hub, "heads", chosen_heads)
+    _drop_absent(hub, "tags", chosen_tags)
+
+    # 3. keep the hub's HEAD on a branch that actually exists
+    rc, cur, _ = P.run(["git", "symbolic-ref", "HEAD"], cwd=hub, timeout=30)
+    target = cur.strip()[len("refs/heads/"):] if rc == 0 else ""
+    if target not in chosen_heads and chosen_heads:
+        for cand in ("main", "master"):
+            if cand in chosen_heads:
+                P.run(["git", "symbolic-ref", "HEAD", "refs/heads/" + cand],
+                      cwd=hub, timeout=30)
+                break
+
+    # 4. push the merged hub back to every peer
+    pushed = []
+    for pname, plat in peers.items():
+        err = _push_target(pname, plat, repo, hub, "safe")
+        if err:
+            errors.append(err)
+        else:
+            pushed.append(pname)
+
+    if errors and not pushed:
+        return "push-failed", "; ".join(errors), errors
+    if errors:
+        return "partial", "; ".join(errors), errors
+    return "ok", "%s (%d refs merged)" % (",".join(pushed), updated), []
+
+
+def mesh_plan_repo(repo, peers):
+    """read-only plan for a mesh route: do the peers agree?"""
+    heads = {}
+    for pname, plat in peers.items():
+        try:
+            url = plat.repo_url(repo)
+        except Exception as e:
+            return ["%s: %s" % (pname, str(e)[:80])], "error"
+        refs = _ls_remote_map(url)
+        if refs is None:
+            continue
+        heads[pname] = refs.get("HEAD") or next(iter(sorted(refs.values())),
+                                                "none")
+    if not heads:
+        return ["no peer has this repo"], "error"
+    distinct = set(heads.values())
+    if len(distinct) == 1 and len(heads) == len(peers):
+        return ["all %d peers agree (%s)" % (len(heads),
+                                             next(iter(distinct))[:8])], "ok"
+    detail = ", ".join("%s %s" % (p, h[:8]) for p, h in heads.items())
+    return ["would merge: %s" % detail], "update"
+
+
+def active_targets(cfg, route):
+    """{target_name: platform_cfg} for this route, paused ones excluded"""
+    paused = set(route.get("paused_targets") or [])
+    out = {}
+    for t in route.get("targets", []):
+        if t in paused:
+            continue
+        tp = C.platform(cfg, t)
+        if tp and tp.get("enabled"):
+            out[t] = tp
+    return out
+
+
+def route_peers(cfg, route):
+    """mesh peers: the source plus every target that is not paused"""
+    names = [route.get("source")]
+    names += [t for t in active_targets(cfg, route)]
+    out = {}
+    for n in names:
+        p = C.platform(cfg, n)
+        if p and p.get("enabled"):
+            out[n] = p
+    return out
 
 
 def _filter_repos(repos, route, only=None):
@@ -342,38 +584,62 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
               "dry_run": dry_run, "skipped": 0}
 
     for route in selected:
+        rname = route.get("name")
+        if route.get("enabled") is False:
+            log("route '%s': paused — skipped" % rname)
+            totals["skipped"] = totals.get("skipped", 0) + 1
+            continue
         if scheduled:
             due, why = route_due(route, cfg)
             if not due:
-                log("route '%s': skipped — %s" % (route.get("name"), why))
+                log("route '%s': skipped — %s" % (rname, why))
                 totals["skipped"] = totals.get("skipped", 0) + 1
                 continue
-        mark_route_run(route)
         sname = route.get("source")
         sp = C.platform(cfg, sname)
         if not sp or not sp.get("enabled"):
             log("route '%s': source '%s' not enabled — skipped"
-                % (route.get("name"), sname))
+                % (rname, sname))
             continue
         source = P.make(sname, sp)
-        targets = {}
-        for t in route.get("targets", []):
-            tp = C.platform(cfg, t)
-            if tp and tp.get("enabled"):
-                targets[t] = P.make(t, tp)
-        if not targets:
-            log("route '%s': no enabled targets — skipped" % route.get("name"))
-            continue
 
-        log("=== route '%s': %s -> %s (workers=%d, mode=%s%s) ==="
-            % (route.get("name"), sname, ", ".join(targets), workers, mode,
-               ", DRY RUN" if dry_run else ""))
-        progress["route"] = route.get("name")
+        mesh = route.get("direction") == "mesh"
+        peers = {}
+        if mesh:
+            peers = {n: P.make(n, p)
+                     for n, p in route_peers(cfg, route).items()}
+        targets = {}
+        if mesh:
+            if len(peers) < 2:
+                log("route '%s': mesh needs at least two live peers — skipped"
+                    % rname)
+                continue
+        else:
+            for t, tp in active_targets(cfg, route).items():
+                targets[t] = P.make(t, tp)
+            paused = [t for t in (route.get("paused_targets") or [])
+                      if t in (route.get("targets") or [])]
+            if paused:
+                log("  paused target(s): %s" % ", ".join(paused))
+            if not targets:
+                log("route '%s': no enabled targets — skipped" % rname)
+                continue
+
+        mark_route_run(route)
+        if mesh:
+            log("=== route '%s': mesh %s (workers=%d%s) ==="
+                % (rname, ", ".join(peers), workers,
+                   ", DRY RUN" if dry_run else ""))
+        else:
+            log("=== route '%s': %s -> %s (workers=%d, mode=%s%s) ==="
+                % (rname, sname, ", ".join(targets), workers, mode,
+                   ", DRY RUN" if dry_run else ""))
+        progress["route"] = rname
         try:
             repos = source.list_repos()
         except Exception as e:
             log("  cannot list repos on %s: %s" % (sname, e))
-            totals["failures"].append({"route": route.get("name"),
+            totals["failures"].append({"route": rname,
                                        "repo": "-", "error": str(e)[:200]})
             continue
         repos = _filter_repos(repos, route, only)
@@ -381,7 +647,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             # best-effort fork filter (platforms that expose it)
             repos = [r for r in repos if not r.get("fork", False)]
         totals["repos"] += len(repos)
-        log("  %s: %d repos" % (sname, len(repos)))
+        log("  %s: %d repos" % ("mesh" if mesh else sname, len(repos)))
 
         done = {"n": 0}
         dlock = threading.Lock()
@@ -392,8 +658,14 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             progress["active"][repo["name"]] = "syncing"
             try:
                 if dry_run:
-                    actions, verdict = _plan_repo(repo, source, targets, mode)
+                    if mesh:
+                        actions, verdict = mesh_plan_repo(repo, peers)
+                    else:
+                        actions, verdict = _plan_repo(repo, source, targets,
+                                                     mode)
                     status, detail, errors = verdict, "", actions
+                elif mesh:
+                    status, detail, errors = mesh_sync_repo(repo, peers)
                 else:
                     status, detail, errors = sync_repo(repo, source, targets,
                                                        mode)

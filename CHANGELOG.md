@@ -4,6 +4,55 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-11-09
+
+Two features: sync in **both directions**, and pause any part of a route.
+
+### Added
+
+- **Two-way sync (mesh routes).** A route can now carry
+  `"direction": "mesh"`: every peer is both a source and a target. Each run
+  fetches every peer into a private namespace in the hub, keeps the **newest
+  commit per branch** (and per tag), then pushes the result back to everyone.
+  So a commit made on GitLab reaches GitHub, Forgejo and the local hub, and a
+  commit made on GitHub flows the other way.
+
+  ```bash
+  gitsync routes add all github,gitlab,forgejo,backup
+  ```
+
+  Branches and tags are unioned: a ref is only removed from a peer when *no*
+  peer still has it, so a deleted branch does not come back and a half-done
+  deletion does not wipe anyone. The mesh force-pushes heads and tags only
+  (never `--mirror`), leaving platform-specific refs such as GitHub's
+  `refs/pull/*` alone. A fast path skips all fetching when every peer already
+  holds identical refs, which keeps an idle run cheap. `sync --dry-run`
+  reports whether the peers agree without touching anything.
+
+- **Pause a route or a single target.** `gitsync routes pause NAME [TARGET]`
+  stops a whole route (`"enabled": false`) or one target
+  (`"paused_targets": [...]`); `routes resume` reverses it and the target
+  catches up on the next run. In the TUI: **Routes tab → `P`**, ↑/↓ to move,
+  Space to toggle — it saves immediately. Paused entries are marked `PAUSED`
+  in `routes`, `status`, `doctor`, the Routes tab and the dashboard, and every
+  run logs `paused target(s): ...` before skipping them.
+
+### Fixed
+
+- **Creating a GitHub repository never worked.** `GitHubPlatform._api()` was
+  GET-only, so the `POST /user/repos` call raised *"takes 2 positional
+  arguments but 4 were given"* and a repo that existed only on another
+  platform could not be mirrored up. `_api()` now takes a method and payload,
+  and when the credential is the `gh` CLI it creates the repo with
+  `gh repo create` (tolerating "already exists"), which is also the only path
+  that works without a token in the config.
+
+### Changed
+
+- 83 unit assertions (was 76).
+- README: new *Two-way sync (mesh)* and *Pause a route or a target* sections,
+  plus Features/Commands/TUI-key/FAQ updates.
+
 ## [1.2.2] - 2026-11-09
 
 ### Fixed

@@ -103,7 +103,10 @@ def _refresh_platforms_inner():
     state["platforms"] = rows
     state["routes"] = [(r.get("name"), r.get("source"),
                         list(r.get("targets", [])),
-                        r.get("include") or [], r.get("exclude") or [])
+                        r.get("include") or [], r.get("exclude") or [],
+                        r.get("direction") or "one-way",
+                        list(r.get("paused_targets") or []),
+                        r.get("enabled") is not False)
                        for r in C.routes(cfg)]
     state["route_sched"] = {r.get("name"): r.get("schedule")
                             for r in C.routes(cfg)}
@@ -753,6 +756,9 @@ def draw(stdscr):
              curses.A_REVERSE)
     foot = (" [1-6]tabs  [S]ync  [L]og  [C]ron  [O]pt  [A]cc  [N]otify  "
             "[E]repos  [W]izard  [R]efresh  [Q]uit ")
+    if tab == 2:
+        foot = (" [1-6]tabs  [S]ync  [P]ause/resume target  [C]ron  "
+                "[O]pt  [R]efresh  [Q]uit ")
     if state["search_mode"]:
         foot = " filter: %s_   (Enter = apply, Esc = clear) " % state["search"]
     elif state["search"]:
@@ -814,24 +820,141 @@ def draw_platforms(stdscr, h, w, G, R, dim):
 def draw_routes(stdscr, h, w, G, R, dim):
     rows = []
     cfg = C.load_config()
-    for name, source, targets, inc, exc in state["routes"]:
-        sched = C.route_schedule(cfg, {"name": name, "schedule":
-                                       state["route_sched"].get(name)})
-        nxt = SYNC.next_due_text({"name": name,
-                                  "schedule": state["route_sched"].get(name)}, cfg)
-        rows.append(("%s:  %s  ->  %s   [%s, next: %s]"
-                     % (name, source, ", ".join(targets), sched, nxt),
-                     curses.A_BOLD))
+    for (name, source, targets, inc, exc, direction, paused,
+         route_on) in state["routes"]:
+        sched = C.route_schedule(cfg, {
+            "name": name, "schedule": state["route_sched"].get(name)})
+        nxt = SYNC.next_due_text({
+            "name": name, "schedule": state["route_sched"].get(name)}, cfg)
+        mesh = direction == "mesh"
+        parts = []
+        for t in targets:
+            mark = ""
+            if t in paused:
+                mark = " (paused)"
+            parts.append(t + mark)
+        arrow = (", ".join(["*" + source] + parts) if mesh
+                 else "%s -> %s" % (source, ", ".join(parts) or "(none)"))
+        meta = "mesh" if mesh else "one-way"
+        when = "PAUSED" if not route_on else "next: " + nxt
+        attr = dim if not route_on else curses.A_BOLD
+        rows.append(("%s:  %s   [%s, %s, %s]" % (name, arrow, meta, sched,
+                                                 when), attr))
         if inc or exc:
             rows.append(("    filters: include=%s exclude=%s"
                          % (inc or "-", exc or "-"), dim))
     if not rows:
         rows.append(("(no routes — add one: gitsync routes add main github "
                      "gitlab,forgejo)", dim))
-    _panel_rows(stdscr, h, w, 4, rows, "ROUTES (sync direction)")
+    _panel_rows(stdscr, h, w, 4, rows, "ROUTES (direction + pause)")
     safe_add(stdscr, h - 2, 2,
-             "add: gitsync routes add NAME SRC t1,t2 [--include 'Sea*'] "
-             "[--schedule daily]", dim)
+             "P = pause/resume a route or target   |   "
+             "add: gitsync routes add all github,gitlab,forgejo", dim)
+
+
+
+def routes_screen(stdscr):
+    """pause/resume a whole route or one of its targets, live.
+
+    Space/Enter toggles the highlighted row and saves immediately, so a
+    target can be paused without editing config.json or stopping the timer.
+    """
+    idx = 0
+    while True:
+        cfg = C.load_config()
+        rows = []
+        for r in C.routes(cfg):
+            paused = set(r.get("paused_targets") or [])
+            on = r.get("enabled") is not False
+            mesh = r.get("direction") == "mesh"
+            rows.append({
+                "label": "%s%s" % (r.get("name"),
+                                   "  [mesh]" if mesh else ""),
+                "sub": "%s -> %s" % (
+                    r.get("source"),
+                    ", ".join(r.get("targets", [])) or "(none)"),
+                "on": on, "kind": "route", "route": r, "target": None})
+            for t in r.get("targets", []):
+                rows.append({
+                    "label": "    %s" % t,
+                    "sub": "target of %s" % r.get("name"),
+                    "on": (on and t not in paused),
+                    "kind": "target", "route": r, "target": t})
+        idx = max(0, min(idx, len(rows) - 1)) if rows else 0
+
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0,
+                 " ROUTES — pause / resume ".center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 0,
+                 " paused items are skipped by every run, including the timer "
+                 .ljust(w - 1)[:w - 1], curses.A_DIM)
+        shown = rows[:max(1, h - 4)]
+        for i, row in enumerate(shown):
+            attr = curses.A_REVERSE if i == idx else 0
+            if not row["on"] and i != idx:
+                attr |= curses.A_DIM
+            box = "[x]" if row["on"] else "[ ]"
+            line = " %s %-24s %-34s %s" % (
+                box, row["label"][:24], row["sub"][:34],
+                "" if row["on"] else "PAUSED")
+            safe_add(stdscr, 3 + i, 0, line[:w - 1], attr)
+        if not rows:
+            safe_add(stdscr, 3, 0, " (no routes configured)", curses.A_DIM)
+        safe_add(stdscr, h - 1, 0,
+                 " space/Enter=toggle  up/dn=move  B=back "
+                 .center(w - 1)[:w - 1], curses.A_REVERSE)
+        commit_screen(stdscr)
+
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        elif ch in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            idx = min(len(rows) - 1, idx + 1) if rows else 0
+        elif ch in (ord(" "), 10, 13, curses.KEY_ENTER):
+            if not rows:
+                continue
+            row = rows[idx]
+            cfg = C.load_config()
+            name = row["route"].get("name")
+            target = row["route"]
+            for r in cfg.get("routes", []):
+                if r.get("name") == name:
+                    target = r
+                    break
+            else:
+                continue
+            if row["kind"] == "route":
+                target["enabled"] = not (target.get("enabled") is not False)
+                if target["enabled"]:
+                    target.pop("paused_targets", None)
+                flash("%s: %s" % (name, "resumed" if target["enabled"]
+                                  else "paused (whole route)"))
+            else:
+                paused = [t for t in (target.get("paused_targets") or [])]
+                if row["target"] in paused:
+                    paused.remove(row["target"])
+                    flash("%s / %s: resumed" % (name, row["target"]))
+                else:
+                    paused.append(row["target"])
+                    flash("%s / %s: paused" % (name, row["target"]))
+                if paused:
+                    target["paused_targets"] = sorted(paused)
+                else:
+                    target.pop("paused_targets", None)
+            C.save_config(cfg)
+            state["routes"] = [(r.get("name"), r.get("source"),
+                                list(r.get("targets", [])),
+                                r.get("include") or [],
+                                r.get("exclude") or [],
+                                r.get("direction") or "one-way",
+                                list(r.get("paused_targets") or []),
+                                r.get("enabled") is not False)
+                               for r in C.routes(cfg)]
+            state["dirty"] = True
 
 
 def draw_log_tab(stdscr, h, w, R, G):
@@ -1007,8 +1130,16 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
     _panel_rows(stdscr, h, w, top, plat_rows, "PLATFORMS (A = manage accounts)")
     top2 = top + min(len(plat_rows) + 2, h - top - 6)
 
-    routes_txt = "  |  ".join("%s: %s -> %s" % (n, s, ", ".join(t))
-                              for n, s, t, _i, _e in state["routes"]) or "(none)"
+    bits = []
+    for (n, s, t, _i, _e, direction, paused, route_on) in state["routes"]:
+        if direction == "mesh":
+            bits.append("%s: mesh %s" % (n, ", ".join([s] + t)))
+        else:
+            shown = [x + ("*" if x in paused else "") for x in t]
+            bits.append("%s: %s -> %s" % (n, s, ", ".join(shown) or "(none)"))
+        if not route_on:
+            bits[-1] += " [PAUSED]"
+    routes_txt = "  |  ".join(bits) or "(none)"
     st = state["settings"]
     route_rows = [
         (routes_txt[:w - 8], curses.A_BOLD),
@@ -1126,7 +1257,10 @@ def _run(stdscr):
     _cfg = C.load_config()
     state["routes"] = [(r.get("name"), r.get("source"),
                         list(r.get("targets", [])),
-                        r.get("include") or [], r.get("exclude") or [])
+                        r.get("include") or [], r.get("exclude") or [],
+                        r.get("direction") or "one-way",
+                        list(r.get("paused_targets") or []),
+                        r.get("enabled") is not False)
                        for r in C.routes(_cfg)]
     state["route_sched"] = {r.get("name"): r.get("schedule")
                             for r in C.routes(_cfg)}
@@ -1185,6 +1319,9 @@ def _run(stdscr):
             accounts_screen(stdscr)
         elif ch in (ord("w"), ord("W")):
             launch_wizard(stdscr)
+        elif state["tab"] == 2 and ch in (ord("p"), ord("P"), 10, 13,
+                                          curses.KEY_ENTER):
+            routes_screen(stdscr)
         elif ch in (ord("r"), ord("R"), ord("p"), ord("P")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("n"), ord("N")):

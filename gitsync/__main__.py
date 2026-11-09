@@ -92,8 +92,18 @@ def cmd_status(args):
     print()
     print("routes:")
     for r in C.routes(cfg):
-        print("  %-10s %s -> %s" % (r.get("name"), r.get("source"),
-                                    ", ".join(r.get("targets", []))))
+        tag = ""
+        if r.get("direction") == "mesh":
+            tag += " [mesh]"
+        if r.get("enabled") is False:
+            tag += " [PAUSED]"
+        paused = set(r.get("paused_targets") or [])
+        targets = [t + ("*" if t in paused else "")
+                   for t in r.get("targets", [])]
+        print("  %-10s%s %s -> %s" % (r.get("name"), tag, r.get("source"),
+                                      ", ".join(targets)))
+        if paused:
+            print("             paused: %s" % ", ".join(sorted(paused)))
     print()
     print("settings: workers=%s mode=%s schedule=%s forks=%s"
           % (C.setting(cfg, "workers"), C.setting(cfg, "mode"),
@@ -296,17 +306,34 @@ def cmd_routes(args):
     action = args.action or "list"
 
     if action == "add":
-        if len(args.rest) < 3:
+        # a two-argument form with a comma list is a mesh: a one-way route
+        # without targets would do nothing, so it can only mean peers
+        mesh = bool(getattr(args, "mesh", False)) or (
+            len(args.rest) == 2 and "," in args.rest[1])
+        if mesh and len(args.rest) == 2:
+            # mesh form: NAME peer1,peer2,peer3
+            peers = [t.strip() for t in args.rest[1].split(",") if t.strip()]
+            if len(peers) < 2:
+                print("mesh needs at least two peers: "
+                      "gitsync routes add all --mesh github,gitlab,forgejo")
+                return 2
+            name, source, targets = args.rest[0], peers[0], peers[1:]
+        elif len(args.rest) >= 3:
+            name, source = args.rest[0], args.rest[1]
+            targets = [t.strip() for t in args.rest[2].split(",") if t.strip()]
+        else:
             print("usage: gitsync routes add NAME SOURCE t1,t2")
+            print("       gitsync routes add NAME --mesh p1,p2,p3")
             print("   e.g. gitsync routes add gl-to-fj gitlab forgejo")
-            print("        gitsync routes add local-to-gh backup github")
+            print("        gitsync routes add all --mesh "
+                  "github,gitlab,forgejo,backup")
             return 2
-        name, source = args.rest[0], args.rest[1]
-        targets = [t.strip() for t in args.rest[2].split(",") if t.strip()]
         if any(r.get("name") == name for r in cfg.get("routes", [])):
             print("route '%s' already exists" % name)
             return 2
         route = {"name": name, "source": source, "targets": targets}
+        if mesh:
+            route["direction"] = "mesh"
         if args.schedule:
             if args.schedule not in C.SCHEDULES:
                 print("unknown schedule '%s' (choose from: %s)"
@@ -321,7 +348,58 @@ def cmd_routes(args):
                                 if p.strip()]
         cfg.setdefault("routes", []).append(route)
         C.save_config(cfg)
-        print("route added: %s (%s -> %s)" % (name, source, ", ".join(targets)))
+        if mesh:
+            print("mesh route added: %s (%s)"
+                  % (name, ", ".join([source] + targets)))
+            print("  every peer is both source and target; the newest commit "
+                  "wins per branch")
+        else:
+            print("route added: %s (%s -> %s)"
+                  % (name, source, ", ".join(targets)))
+        return 0
+
+    if action in ("pause", "resume"):
+        if not args.rest:
+            print("usage: gitsync routes %s NAME [TARGET[,TARGET]]" % action)
+            print("   no target = the whole route")
+            return 2
+        name = args.rest[0]
+        want = []
+        for chunk in args.rest[1:]:
+            want += [t.strip() for t in chunk.split(",") if t.strip()]
+        route = next((r for r in cfg.get("routes", [])
+                      if r.get("name") == name), None)
+        if not route:
+            print("no such route: %s" % name)
+            return 2
+        if not want:
+            route["enabled"] = (action == "resume")
+            if action == "resume":
+                route.pop("paused_targets", None)
+            C.save_config(cfg)
+            print("%s: %s" % (name, "resumed (whole route)"
+                              if action == "resume" else "paused (whole route)"))
+            return 0
+        known = set(route.get("targets") or [])
+        unknown = [t for t in want if t not in known]
+        if unknown:
+            print("%s has no target(s): %s" % (name, ", ".join(unknown)))
+            print("  targets: %s" % (", ".join(sorted(known)) or "(none)"))
+            return 2
+        cur = [t for t in (route.get("paused_targets") or []) if t in known]
+        if action == "pause":
+            cur = sorted(set(cur) | set(want))
+        else:
+            cur = [t for t in cur if t not in want]
+        if cur:
+            route["paused_targets"] = cur
+        else:
+            route.pop("paused_targets", None)
+        C.save_config(cfg)
+        print("%s: %s %s" % (name, "paused" if action == "pause" else "resumed",
+                             ", ".join(sorted(want))))
+        if cur:
+            print("  still paused: %s" % ", ".join(sorted(cur)))
         return 0
 
     if action == "remove":
@@ -343,10 +421,22 @@ def cmd_routes(args):
     for r in C.routes(cfg):
         key = C.route_schedule(cfg, r)
         own = "" if r.get("schedule") else " (inherited)"
+        paused_t = set(r.get("paused_targets") or [])
+        live = [t + ("*" if t in paused_t else "")
+                for t in r.get("targets", [])]
+        head = r.get("name")
+        if r.get("direction") == "mesh":
+            head += " [mesh]"
+        if r.get("enabled") is False:
+            head += " [PAUSED]"
         print("%-18s %-19s %s -> %-26s next: %s"
-              % (r.get("name"), key + own, r.get("source"),
-                 ", ".join(r.get("targets", [])),
-                 SYNC.next_due_text(r, cfg)))
+              % (head, key + own, r.get("source"), ", ".join(live),
+                 "paused" if r.get("enabled") is False
+                 else SYNC.next_due_text(r, cfg)))
+        if paused_t:
+            print("    paused targets: %s  (resume: gitsync routes resume "
+                  "%s %s)" % (", ".join(sorted(paused_t)), r.get("name"),
+                              ",".join(sorted(paused_t))))
     if not C.routes(cfg):
         print("(no routes - add one: gitsync routes add main github gitlab)")
     else:
@@ -354,6 +444,8 @@ def cmd_routes(args):
               % (C.finest_schedule(cfg) or "off"))
         print("per-route: gitsync route-schedule NAME hourly|6h|12h|daily|"
               "weekly|off|inherit")
+        print("pause: gitsync routes pause NAME [TARGET...]   "
+              "resume: gitsync routes resume NAME [TARGET...]")
     return 0
 
 
@@ -799,16 +891,23 @@ def cmd_doctor(args):
         problems.append("no routes")
         print("  (none)")
     for r in C.routes(cfg):
+        paused_t = set(r.get("paused_targets") or [])
         srcp = C.platform(cfg, r.get("source"))
         src_ok = bool(srcp) and srcp.get("enabled")
         tgts = [t for t in r.get("targets", [])
                 if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")]
-        good = bool(src_ok) and bool(tgts)
-        if not good:
-            problems.append("route %s incomplete" % r.get("name"))
+        live = [t for t in tgts if t not in paused_t]
+        if r.get("enabled") is False:
+            state = "PAUSED"
+        elif r.get("direction") == "mesh":
+            state = "mesh (%d peers)" % len(live)
+        else:
+            state = "ok" if (src_ok and live) else "INCOMPLETE"
+            if not (src_ok and live):
+                problems.append("route %s incomplete" % r.get("name"))
+        shown = ", ".join(t + ("*" if t in paused_t else "") for t in tgts)
         print("  %-16s %s -> %s  %s"
-              % (r.get("name"), r.get("source"), ", ".join(tgts) or "(none)",
-                 "ok" if good else "INCOMPLETE"))
+              % (r.get("name"), r.get("source"), shown or "(none)", state))
     print("\nstorage:")
     try:
         n_mirrors = len([d for d in os.listdir(C.MIRROR_DIR)
@@ -968,7 +1067,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (76 assertions)", c_units)
+    check("unit checks (83 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1115,6 +1214,23 @@ _gp = P.GitLabPlatform('gl', {'url': 'https://gitlab.com',
                       'owner': 'me', 'token': 'tok'})
 assert _gp.repo_url({'name': '_weird name'}) == 'https://oauth2:tok@gitlab.com/me/weird-name.git'
 
+
+# mesh: newest commit wins; ties keep the earlier peer
+assert SY._newest([(10, 'a'), (20, 'b'), (20, 'c')]) == (20, 'b')
+assert SY._newest([(7, 'only')]) == (7, 'only')
+# paused targets are skipped, and a mesh treats the source as a peer
+_cfg = {'platforms': {'a': {'type': 'github', 'enabled': True},
+                      'b': {'type': 'gitlab', 'enabled': True},
+                      'c': {'type': 'local', 'enabled': True}}}
+_r = {'name': 'r', 'source': 'a', 'targets': ['b', 'c'],
+      'paused_targets': ['c']}
+assert set(SY.active_targets(_cfg, _r)) == {'b'}
+assert set(SY.route_peers(_cfg, _r)) == {'a', 'b'}
+_cfg['platforms']['b']['enabled'] = False
+assert SY.active_targets(_cfg, _r) == {}
+assert set(SY.route_peers(_cfg, _r)) == {'a'}
+# CLI error text: last meaningful line only
+assert P._short_text('line one\\n\\nthe real reason') == 'the real reason'
 
 print('all unit checks passed')
 """
@@ -1300,11 +1416,15 @@ def main(argv=None):
 
     sp = sub.add_parser("routes", help="list / add / remove sync routes")
     sp.add_argument("action", nargs="?",
-                    choices=["list", "add", "remove"], default="list")
+                    choices=["list", "add", "remove", "pause", "resume"],
+                    default="list")
     sp.add_argument("rest", nargs="*",
-                    help="add: NAME SOURCE t1,t2 | remove: NAME")
+                    help="add: NAME SOURCE t1,t2 | remove: NAME | "
+                         "pause/resume: NAME [TARGET...]")
     sp.add_argument("--include", help="comma-separated globs to include")
     sp.add_argument("--exclude", help="comma-separated globs to skip")
+    sp.add_argument("--mesh", action="store_true",
+                    help="all-direction route: NAME --mesh p1,p2,p3")
     sp.add_argument("--schedule", choices=sorted(C.SCHEDULES),
                     help="this route's own sync frequency")
     sp.set_defaults(func=cmd_routes)

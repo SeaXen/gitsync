@@ -22,6 +22,12 @@ import urllib.request
 TIMEOUT = 60
 
 
+def _short_text(err, limit=160):
+    """last meaningful line of a CLI error"""
+    lines = [l.strip() for l in (err or "").strip().splitlines() if l.strip()]
+    return (lines[-1] if lines else "")[:limit]
+
+
 def _norm(s):
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
@@ -125,8 +131,9 @@ class GitHubPlatform:
     def _gh(self, args):
         return run(["gh"] + args, timeout=API_TIMEOUT)
 
-    def _api(self, path):
-        return _http("GET", "https://api.github.com" + path, token=self.token)
+    def _api(self, path, method="GET", payload=None):
+        return _http(method, "https://api.github.com" + path,
+                     token=self.token, payload=payload)
 
     def user(self):
         if self.auth == "gh" and not self.token:
@@ -220,7 +227,18 @@ class GitHubPlatform:
         rc, out = self._api("/repos/%s/%s" % (owner, name))
         if isinstance(out, dict) and out.get("full_name"):
             return self._clone_url(out["full_name"])
-        if rc == 404 or (isinstance(out, dict) and out.get("message") == "Not Found"):
+        if self.auth == "gh" and not self.token:
+            # the gh CLI owns the credential, so let it do the creation
+            rc2, _o, err2 = self._gh(
+                ["repo", "create", "%s/%s" % (owner, name),
+                 "--private" if repo.get("private") else "--public",
+                 "--description", "mirrored by gitsync"])
+            if rc2 != 0 and "already exists" not in (err2 or "").lower():
+                raise RuntimeError("GitHub create failed: "
+                                   + _short_text(err2))
+            return self._clone_url("%s/%s" % (owner, name))
+        if rc == 404 or (isinstance(out, dict)
+                         and out.get("message") == "Not Found"):
             rc2, out2 = self._api("/user/repos", "POST",
                                   {"name": name,
                                    "private": repo.get("private", False),
