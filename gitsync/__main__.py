@@ -1104,7 +1104,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (103 assertions)", c_units)
+    check("unit checks (108 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1122,6 +1122,7 @@ def cmd_ci(args):
 
 
 UNIT_CHECKS = """
+import curses
 from gitsync import platforms as P
 from gitsync import config as C
 from gitsync import notify as NT
@@ -1311,6 +1312,23 @@ tui.state['platforms'].append(('off', 'gitlab', False, True, 'ok', '?'))
 assert tui.platforms_title() == 'PLATFORMS (4 sites, 2 connected)'
 tui.state['platforms'] = []
 assert tui.platforms_title().startswith('PLATFORMS (0 sites')
+
+# the Platforms tab scrolls: 9 sites on a short screen must not hide any
+tui.state['platforms'] = [('s%d' % i, 'forgejo', True, True, 'ok', '1')
+                          for i in range(9)]
+tui.state['plat_scroll'] = 0
+tui.platforms_key(curses.KEY_DOWN)
+assert tui.state['plat_scroll'] == 1
+tui.platforms_key(curses.KEY_END)
+assert tui.state['plat_scroll'] == 8
+tui.platforms_key(curses.KEY_HOME)
+assert tui.state['plat_scroll'] == 0
+tui.platforms_key(curses.KEY_NPAGE)
+assert tui.state['plat_scroll'] == 8
+tui.platforms_key(curses.KEY_PPAGE)
+assert tui.state['plat_scroll'] == 0
+tui.state['platforms'] = []
+tui.platforms_key(curses.KEY_DOWN)      # must not raise on an empty list
 
 print('all unit checks passed')
 """

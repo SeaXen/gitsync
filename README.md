@@ -908,7 +908,7 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (103 assertions)   PASS
+#   unit checks (108 assertions)   PASS
 # CI: all 4 checks passed
 ```
 

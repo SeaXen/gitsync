@@ -939,6 +939,9 @@ def draw(stdscr):
              curses.A_REVERSE)
     foot = (" [1-6]tabs  [S]ync  [D]ry-run  [L]og  [C]ron  [O]pt  "
             "[A]cc  [N]otify  [E]repos  [W]izard  [R]efresh  [Q]uit ")
+    if tab == 1:
+        foot = (" [1-6]tabs  [S]ync  [D]ry-run  up/dn=scroll sites  "
+                "[A]cc  [R]efresh  [Q]uit ")
     if tab == 2:
         foot = (" [1-6]tabs  [S]ync  [P]ause/resume  [O]ptions  "
                 "[R]efresh  [Q]uit ")
@@ -995,6 +998,8 @@ def platforms_title():
 
 
 def draw_platforms(stdscr, h, w, G, R, dim):
+    """the Platforms tab. Scrolls, because there is no cap on how many
+    sites a config can hold and a short terminal cannot show them all."""
     rows = []
     for name, ptype, on, ok, info, count in state["platforms"]:
         attr = (G if ok else R) if on else dim
@@ -1003,10 +1008,41 @@ def draw_platforms(stdscr, h, w, G, R, dim):
                         "OK" if ok else "FAIL", count, info), attr))
     if not rows:
         rows.append(("platforms: loading...", dim))
-    _panel_rows(stdscr, h, w, 4, rows, platforms_title())
+    avail = max(1, h - 4 - 2 - 1)          # panel body rows available
+    top = state.get("plat_scroll", 0)
+    top = max(0, min(top, max(0, len(rows) - 1)))
+    if top + avail < len(rows) and top > 0:
+        pass
+    state["plat_scroll"] = top
+    _panel_rows(stdscr, h, w, 4, rows[top:top + avail], platforms_title())
+    if len(rows) > avail:
+        safe_add(stdscr, 3, 0, " %d-%d of %d sites " % (
+            top + 1, min(top + avail, len(rows)), len(rows)), curses.A_DIM)
     safe_add(stdscr, h - 2, 2,
-             "add/edit/remove: gitsync platforms add|edit|remove NAME",
-             dim)
+             "up/dn=scroll  |  add/edit/remove: gitsync platforms "
+             "add|edit|remove NAME", dim)
+
+
+def platforms_key(ch):
+    """arrow / page / jump keys for the Platforms tab"""
+    n = len(state["platforms"])
+    if not n:
+        return
+    top = state.get("plat_scroll", 0)
+    if ch in (curses.KEY_UP, ord("k")):
+        top = max(0, top - 1)
+    elif ch in (curses.KEY_DOWN, ord("j")):
+        top = min(max(0, n - 1), top + 1)
+    elif ch == curses.KEY_PPAGE:
+        top = max(0, top - 8)
+    elif ch == curses.KEY_NPAGE:
+        top = min(max(0, n - 1), top + 8)
+    elif ch in (curses.KEY_END, ord("g"), ord("G")):
+        top = max(0, n - 1)
+    elif ch == curses.KEY_HOME:
+        top = 0
+    state["plat_scroll"] = top
+    state["dirty"] = True
 
 
 def _route_last(name):
@@ -1628,13 +1664,18 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
     # wiped by the clock's stdscr flush, so the dashboard rendered empty.
     top = 4
     plat_rows = []
-    for name, ptype, on, ok, info, count in state["platforms"][:6]:
+    shown_plats = state["platforms"][:6]
+    for name, ptype, on, ok, info, count in shown_plats:
         attr = (G if ok else R) if on else dim
         plat_rows.append(("%-14s %-9s %-4s %-5s repos=%-5s %s"
                           % (name, ptype, "ON" if on else "off",
                              "OK" if ok else "FAIL", count, info), attr))
     if not plat_rows:
         plat_rows.append(("platforms: loading...", dim))
+    hidden_plats = len(state["platforms"]) - len(shown_plats)
+    if hidden_plats > 0:
+        plat_rows.append(("... +%d more site(s) - see the Platforms tab"
+                          % hidden_plats, dim))
     _panel_rows(stdscr, h, w, top, plat_rows,
                 platforms_title() + "  (A = manage accounts)")
     top2 = top + min(len(plat_rows) + 2, h - top - 6)
@@ -1884,6 +1925,12 @@ def _run(stdscr):
         elif state["tab"] == 2 and ch in (ord("p"), ord("P"), 10, 13,
                                           curses.KEY_ENTER):
             routes_screen(stdscr)
+        elif state["tab"] == 1 and ch in (curses.KEY_UP, curses.KEY_DOWN,
+                                          curses.KEY_PPAGE, curses.KEY_NPAGE,
+                                          curses.KEY_HOME, curses.KEY_END,
+                                          ord("k"), ord("j"), ord("g"),
+                                          ord("G")):
+            platforms_key(ch)
         elif ch in (ord("r"), ord("R"), ord("p"), ord("P")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("n"), ord("N")):

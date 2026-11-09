@@ -4,6 +4,22 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.2] - 2026-11-09
+
+### Fixed
+
+- **The Platforms tab could not scroll, and the dashboard hid sites.** There
+  is no cap on how many platforms a config can hold, but the panel only drew
+  what fit: on a 14-row terminal with 9 sites, the last two were invisible
+  and the arrow keys did nothing. The tab now scrolls (up/dn, PgUp/PgDn,
+  Home/End) with a `N-M of T sites` counter, and the dashboard appends
+  `... +N more site(s) - see the Platforms tab` instead of silently
+  truncating.
+
+### Changed
+
+- 108 unit assertions (was 103).
+
 ## [1.4.1] - 2026-11-09
 
 ### Added

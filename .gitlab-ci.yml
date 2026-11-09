@@ -27,6 +27,7 @@ syntax-and-tests:
     # 4. pure-logic unit checks
     - |
       PYTHONPATH=$CI_PROJECT_DIR python3 - <<'PY'
+      import curses
       from gitsync import platforms as P
       from gitsync import config as C
       from gitsync import notify as NT
@@ -218,4 +219,20 @@ syntax-and-tests:
       assert tui.platforms_title() == "PLATFORMS (4 sites, 2 connected)"
       tui.state["platforms"] = []
       assert tui.platforms_title().startswith("PLATFORMS (0 sites")
+      # the Platforms tab scrolls: 9 sites on a short screen must not hide any
+      tui.state["platforms"] = [("s%d" % i, "forgejo", True, True, "ok", "1")
+                                for i in range(9)]
+      tui.state["plat_scroll"] = 0
+      tui.platforms_key(curses.KEY_DOWN)
+      assert tui.state["plat_scroll"] == 1
+      tui.platforms_key(curses.KEY_END)
+      assert tui.state["plat_scroll"] == 8
+      tui.platforms_key(curses.KEY_HOME)
+      assert tui.state["plat_scroll"] == 0
+      tui.platforms_key(curses.KEY_NPAGE)
+      assert tui.state["plat_scroll"] == 8
+      tui.platforms_key(curses.KEY_PPAGE)
+      assert tui.state["plat_scroll"] == 0
+      tui.state["platforms"] = []
+      tui.platforms_key(curses.KEY_DOWN)      # must not raise on an empty list
       PY
