@@ -100,7 +100,7 @@ def cmd_status(args):
     print("mirrors: %s" % C.MIRROR_DIR)
     print()
     table = _platforms_table(cfg)
-    live = sum(1 for r in table if r[2] == "on" and r[3] == "OK")
+    live = sum(1 for r in table if r[2].strip() == "ON" and r[3].strip() == "OK")
     print("platforms: %d site(s), %d connected" % (len(table), live))
     for name, ptype, en, ok, info in table:
         print("  %-14s %-9s %-4s %-5s %s" % (name, ptype, en, ok, info))
@@ -1229,7 +1229,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (135 assertions)", c_units)
+    check("unit checks (136 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1248,6 +1248,7 @@ def cmd_ci(args):
 
 UNIT_CHECKS = """
 import curses
+import gitsync.__main__ as M
 from gitsync import platforms as P
 from gitsync import config as C
 from gitsync import notify as NT
@@ -1506,6 +1507,10 @@ assert C.THEMES['mono'] == ['white'] * 4
 assert set(C.THEMES) >= {'default', 'mono', 'ocean', 'forest', 'sunset'}
 assert C.setting({'settings': {'theme': 'ocean'}}, 'theme') == 'ocean'
 assert C.setting({'settings': {}}, 'theme', 'default') == 'default'
+
+# the status line's site count: "ON " and "OK " carry a trailing space
+_t = M._platforms_table({"platforms": {"a": {"type": "github", "enabled": True}}})
+assert _t[0][2] == "ON " and _t[0][3] in ("OK ", "FAIL"), _t
 
 print('all unit checks passed')
 """

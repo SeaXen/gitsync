@@ -45,6 +45,7 @@ jobs:
           export PYTHONPATH=$PWD
           python3 - <<'PY'
           import curses
+          import gitsync.__main__ as M
           from gitsync import platforms as P
           from gitsync import config as C
           from gitsync import notify as NT
@@ -288,4 +289,7 @@ jobs:
           assert set(C.THEMES) >= {'default', 'mono', 'ocean', 'forest', 'sunset'}
           assert C.setting({'settings': {'theme': 'ocean'}}, 'theme') == 'ocean'
           assert C.setting({'settings': {}}, 'theme', 'default') == 'default'
+          # the status line's site count: "ON " and "OK " carry a trailing space
+          _t = M._platforms_table({"platforms": {"a": {"type": "github", "enabled": True}}})
+          assert _t[0][2] == "ON " and _t[0][3] in ("OK ", "FAIL"), _t
           PY
