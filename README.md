@@ -645,7 +645,7 @@ The wizard prints this before asking for anything — here it is for reference:
 | Platform | Create token at | Required scopes | Notes |
 |---|---|---|---|
 | **GitHub** | [github.com/settings/tokens](https://github.com/settings/tokens) | `repo` (+`workflow`, `read:org` as needed) | or use the `gh` CLI (no token) |
-| **GitLab** | [gitlab.com/-/user_settings/personal_access_tokens](https://gitlab.com/-/user_settings/personal_access_tokens) | `api` | or use the `glab` CLI; self-hosted: `<host>/-/user_settings/...` |
+| **GitLab** | [gitlab.com/-/user_settings/personal_access_tokens](https://gitlab.com/-/user_settings/personal_access_tokens) | `api` | self-hosted: `<host>/-/user_settings/...` |
 | **Forgejo** | `<url>/user/settings/applications` | `write:repository` **+** `write:user` | `write:user` is required because repo creation goes through `/user/repos` |
 | **Gitea** | `<url>/user/settings/applications` | `write:repository` + `write:user` | same model as Forgejo (1.22+) |
 | **Bitbucket** | [id.atlassian.com/manage-profile/security/api-tokens](https://id.atlassian.com/manage-profile/security/api-tokens) | Atlassian API token, Bitbucket repo read+write | sent as Bearer; needs your workspace name |
@@ -930,7 +930,7 @@ gitsync uninstall     # removes scheduler + symlink (config & mirrors kept)
 
 - Python **3.8+** (standard library only)
 - **git** 2.20+
-- optional: `gh` / `glab` CLIs (gitsync can use them instead of tokens)
+- optional: the `gh` CLI for GitHub (gitsync can use it instead of a token)
 
 ## Troubleshooting
 

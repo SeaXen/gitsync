@@ -30,8 +30,7 @@ GUIDES = {
                                  "narrower token for git-over-HTTP"),
         ],
         "minimum": "api",
-        "alt_auth": "If the glab CLI is installed and logged in "
-                    "(glab auth login), gitsync can use it instead of a token.",
+        "alt_auth": "",
         "env": "GITLAB_TOKEN",
     },
     "forgejo": {

@@ -20,7 +20,7 @@ credentials**. Understanding where they live matters:
 | Platform tokens (GitHub/GitLab/Forgejo/Gitea/Bitbucket) | `~/.config/gitsync/config.json` | `0600` |
 | Discord webhook / Telegram bot token | same file | `0600` |
 | GitHub CLI token | `~/.config/gh/hosts.yml` (managed by `gh`) | `0600` |
-| GitLab CLI token | `~/.config/glab-cli/config.yml` (managed by `glab`) | `0600` |
+| GitHub CLI token | `~/.config/gh/hosts.yml` (managed by `gh`) | `0600` |
 | Git credentials for localhost targets | `~/.git-credentials` (managed by git) | `0600` |
 
 **Nothing is ever sent anywhere except the platforms you configure** —

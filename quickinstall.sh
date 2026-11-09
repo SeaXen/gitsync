@@ -58,7 +58,8 @@ ask_yn() {
 }
 
 # ---------------------------------------------------------------- arguments
-USER_MODE=0; USE_CRON=0; SCHEDULE="hourly"; DO_SETUP=1; DO_SYNC=1; AUTO_YES=0
+USER_MODE=0; USE_CRON=0; SYSTEM_UNIT=0; SCHEDULE="hourly"
+DO_SETUP=1; DO_SYNC=1
 while [ $# -gt 0 ]; do
     case "$1" in
         --user)       USER_MODE=1; shift ;;
@@ -67,7 +68,7 @@ while [ $# -gt 0 ]; do
         --no-setup)   DO_SETUP=0; shift ;;
         --no-sync)    DO_SYNC=0; shift ;;
         --branch)     BRANCH="${2:-main}"; shift 2 ;;
-        --yes|-y)     AUTO_YES=1; shift ;;
+        --yes|-y)     shift ;;      # accepted; nothing to confirm;
         -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            die "unknown option: $1  (try --help)" ;;
     esac
@@ -104,10 +105,13 @@ fi
 ok "downloaded to $TMP/gitsync"
 
 # ---------------------------------------------------------------- install
-ARGS=(--schedule "$SCHEDULE")
+# The scheduler is installed AFTER the wizard, so the schedule chosen there
+# is the one that gets installed. install.sh only puts the binary in place
+# here; `gitsync install` writes the unit.
+ARGS=(--schedule off)                     # no scheduler yet
 [ "$USER_MODE" = "1" ] && ARGS+=(--user)
 [ "$USE_CRON"   = "1" ] && ARGS+=(--cron)
-[ "$AUTO_YES"   = "1" ] && ARGS+=(--yes)
+[ "$SYSTEM_UNIT" = "1" ] && ARGS+=(--system)
 bash "$TMP/gitsync/install.sh" "${ARGS[@]}"
 
 # ---------------------------------------------------------------- setup
@@ -115,6 +119,14 @@ if [ "$DO_SETUP" = "1" ]; then
     say "starting the setup wizard (platforms, tokens, direction, schedule)"
     gitsync setup || die "setup wizard failed — re-run it anytime with: gitsync setup"
     ok "configuration saved"
+
+    # now the scheduler exists, install it for the schedule the wizard chose
+    say "installing the scheduler ($SCHEDULE)"
+    SCHED_ARGS=(--schedule "$SCHEDULE")
+    [ "$USE_CRON" = "1" ] && SCHED_ARGS+=(--cron)
+    [ "$SYSTEM_UNIT" = "1" ] && SCHED_ARGS+=(--system)
+    gitsync install "${SCHED_ARGS[@]}" --yes \
+        || say "scheduler install failed — run 'gitsync install' by hand"
 else
     say "skipping setup (--no-setup) — run 'gitsync setup' when ready"
 fi
@@ -122,9 +134,16 @@ fi
 # ---------------------------------------------------------------- first sync
 if [ "$DO_SYNC" = "1" ] && [ "$DO_SETUP" = "1" ]; then
     echo
-    if ask_yn "Run your first sync now? [Y/n]" "y"; then
+    # A preview first, always: the first thing a new user sees should be
+    # what would change, not a destructive mirror.
+    say "previewing the first sync (nothing is modified)..."
+    gitsync sync --dry-run || say "preview failed — check: gitsync records"
+    echo
+    if ask_yn "Run the real sync now? [y/N]" "n"; then
         say "running first sync (this may take a while the first time)..."
         gitsync sync || say "first sync reported failures — check: gitsync records"
+    else
+        say "skipped — run 'gitsync sync' (or press S in the TUI) when ready"
     fi
 fi
 

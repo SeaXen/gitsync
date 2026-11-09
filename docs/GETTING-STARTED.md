@@ -87,7 +87,7 @@ Instance URL [https://github.com]
 Press **Enter** to accept `github.com`, then:
 
 ```
-Use a personal access token? (No = use gh CLI) (Y/n)
+Use a personal access token? (No = use gh CLI) (y/N)
 ```
 
 - **Press Enter (No)** → gitsync uses the `gh` CLI. If `gh` isn't logged
@@ -107,8 +107,8 @@ gitlab token
 ```
 
 Create one at <https://gitlab.com/-/user_settings/personal_access_tokens>
-with the **`api`** scope and paste it. (Or `glab auth login` in another
-terminal and leave this blank if you prefer the CLI.)
+with the **`api`** scope and paste it. gitsync reads the token directly —
+there is no `glab` CLI path. The prompt hides what you type.
 
 ```
 Target namespace id (blank = your personal namespace) []
@@ -199,10 +199,12 @@ Parallel workers [4]
 Enter.
 
 ```
-Use safe mode? (No = exact mirror, prunes deleted refs) (y/N)
+Exact mirror? This DELETES branches on the destination that are not on
+the source (y/N)
 ```
-Press **Enter** (No = exact mirror — deleted repos/branches are pruned on
-the targets; `safe` never deletes anything there).
+Press **Enter (No)** → `safe` mode: nothing is ever deleted or force-pushed
+on a destination, so your first setup cannot lose work. Answer **y** only
+when you want the destination to become an exact copy of the source.
 
 ---
 

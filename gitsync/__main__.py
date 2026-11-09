@@ -181,27 +181,33 @@ def cmd_tui(args):
 
 def cmd_install(args):
     cfg = C.load_config()
-    key = C.setting(cfg, "schedule", "hourly")
+    # no --schedule means "the most demanding route wins", so a route on
+    # hourly with a global daily still fires hourly. Every route off means
+    # there is nothing to schedule.
+    key = args.schedule or C.finest_schedule(cfg)
+    if key is None and not C.routes(cfg):
+        key = C.setting(cfg, "schedule", "hourly")
     if args.schedule:
-        key = args.schedule
         C.set_setting(cfg, "schedule", key)
+    if not key:
+        S.uninstall_systemd(system=args.system)
+        S.uninstall_systemd()
+        print("scheduler disabled (every route is off)")
+        return 0
     if key == "off":
-        if S.systemd_installed():
-            S.uninstall_systemd()
-            print("systemd timer removed")
-        S.install_cron("off")
+        S.uninstall_systemd(system=args.system)
+        S.uninstall_systemd()
         print("scheduler disabled (manual runs only)")
         return 0
     if args.cron or not S.have_systemd():
         S.install_cron(key)
         print("cron installed: %s" % C.SCHEDULES[key]["label"])
         return 0
-    if S.install_systemd(key):
-        print("systemd timer installed: %s (Persistent=true — catches up "
-              "runs missed while the machine was off)"
+    if S.install_systemd(key, system=args.system):
+        print("timer installed: %s (Persistent=true — catches up runs "
+              "missed while the machine was off)"
               % C.SCHEDULES[key]["label"])
         print("status: %s" % S.status())
-        print("logs  : journalctl -u %s" % S.SERVICE)
         return 0
     print("systemd install failed — falling back to cron")
     S.install_cron(key)
@@ -1550,10 +1556,14 @@ def main(argv=None):
     sp.set_defaults(func=cmd_tui)
 
     sp = sub.add_parser("install", help="install the scheduler")
-    sp.add_argument("--schedule",
-                    choices=["hourly", "6h", "12h", "daily", "off"])
+    sp.add_argument("--schedule", choices=sorted(C.SCHEDULES),
+                    help="default: the most frequent route schedule")
     sp.add_argument("--cron", action="store_true",
                     help="force cron instead of systemd")
+    sp.add_argument("--system", action="store_true",
+                    help="install a root system unit instead of a user unit")
+    sp.add_argument("--yes", action="store_true",
+                    help="no prompts (idempotent)")
     sp.set_defaults(func=cmd_install)
 
     sp = sub.add_parser("platforms", help="manage accounts: add/remove/edit/test")

@@ -311,7 +311,7 @@ def menu(stdscr, title, items, note=None):
 def schedule_screen(stdscr):
     cur = C.setting(C.load_config(), "schedule", "hourly")
     items = []
-    for key in ["hourly", "6h", "12h", "daily", "off"]:
+    for key in ["hourly", "6h", "12h", "daily", "weekly", "off"]:
         lbl = C.SCHEDULES[key]["label"]
         items.append((lbl + ("   <-- current" if key == cur else ""),
                       C.SCHEDULES[key]["cron"] or "manual only",
@@ -325,16 +325,18 @@ def apply_schedule(key):
     cfg = C.load_config()
     C.set_setting(cfg, "schedule", key)
     if key == "off":
-        if S.systemd_installed():
-            S.uninstall_systemd()
+        S.uninstall_systemd(system=True)
+        S.uninstall_systemd()
         S.install_cron("off")
         flash("schedule OFF — manual syncs only (S)")
         return
     if S.systemd_installed() or S.have_systemd():
-        if S.install_systemd(key):
-            flash("systemd timer: %s" % C.SCHEDULES[key]["label"])
+        # the timer must fire as often as the most demanding route needs,
+        # not as often as the global setting says
+        if S.install_systemd(C.finest_schedule(cfg) or key):
+            flash("timer: %s" % C.SCHEDULES[key]["label"])
             return
-    S.install_cron(key)
+    S.install_cron(C.finest_schedule(cfg) or key)
     flash("cron: %s" % C.SCHEDULES[key]["label"])
 
 

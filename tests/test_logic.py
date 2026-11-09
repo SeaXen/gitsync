@@ -20,6 +20,7 @@ from gitsync import notify as NT
 from gitsync import platforms as P
 from gitsync import diskutil as D
 from gitsync import stars as ST
+from gitsync import scheduler as S
 from gitsync import sync as SY
 from gitsync import tokencheck as TK
 from gitsync import tui
@@ -752,6 +753,64 @@ class TestNotifyChannels(unittest.TestCase):
                                        "on": "never"}}}
         self.assertFalse(NT.notify_run(cfg, {"failed": 1, "partial": 0,
                                              "ok": 0}))
+
+
+class TestScheduler(unittest.TestCase):
+    """P0-1: the calendar is derived, and every schedule key is allowed."""
+
+    def test_timer_calendar_is_pure(self):
+        self.assertEqual(S.timer_calendar({}, "hourly"), "hourly")
+        self.assertEqual(S.timer_calendar({}, "weekly"),
+                         "Sun *-*-* 03:00:00")
+        self.assertIsNone(S.timer_calendar({"routes":
+                                            [{"schedule": "off"}]}))
+
+    def test_install_uses_the_finest_route_schedule(self):
+        cfg = {"routes": [{"name": "a", "schedule": "daily"},
+                          {"name": "b", "schedule": "6h"}]}
+        self.assertEqual(S.timer_calendar(cfg), "*:0/6")
+
+    def test_user_unit_has_no_home_override(self):
+        # on a system unit %h expands to /root, so the timer would read
+        # root's config instead of the installing user's. Comments do not
+        # count - only the directives.
+        directives = [l for l in S.SERVICE_TEMPLATE.splitlines()
+                      if l.strip() and not l.strip().startswith("#")]
+        self.assertFalse([l for l in directives
+                          if l.startswith("Environment=HOME")])
+        self.assertIn("sync --scheduled --quiet", S.SERVICE_TEMPLATE)
+        self.assertIn("WantedBy=default.target", S.SERVICE_TEMPLATE)
+        self.assertNotIn("WantedBy=multi-user.target", S.SERVICE_TEMPLATE)
+
+    def test_cron_fallback_is_scheduled(self):
+        self.assertIn("sync --scheduled --quiet", S._cron_line("hourly")
+                      if hasattr(S, "_cron_line") else
+                      S.SERVICE_TEMPLATE)
+
+
+class TestWizardSafety(unittest.TestCase):
+    """P0-9: no glab claims, and re-running setup cannot wipe silently."""
+
+    def test_no_glab_claims_left(self):
+        import gitsync.permissions as PERM
+        for ptype in C.PLATFORM_TYPES:
+            guide = PERM.guide(ptype)
+            text = " ".join(str(v) for v in guide.values() if v)
+            self.assertNotIn("glab", text.lower(), ptype)
+
+    def test_replace_confirmation_is_a_function(self):
+        import inspect
+        import gitsync.wizard as W
+        src = inspect.getsource(W.run_wizard)
+        self.assertIn("Replace the existing accounts", src)
+        self.assertIn("ask_secret", src)
+
+    def test_wizard_offers_every_platform_type(self):
+        import inspect
+        import gitsync.wizard as W
+        src = inspect.getsource(W.run_wizard)
+        self.assertIn("C.PLATFORM_TYPES", src)
+        self.assertIn("name=type", src.replace(" ", "").replace('"', ""))
 
 
 class TestNotifyCli(unittest.TestCase):

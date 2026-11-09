@@ -51,7 +51,7 @@ def _fs_safe(name):
 
 
 GIT_TIMEOUT = 14400        # long operations (clone/push) pass this explicitly
-API_TIMEOUT = 120          # CLI/API calls (gh repo list, glab api, ...)
+API_TIMEOUT = 120          # CLI/API calls (gh repo list, gh api, ...)
 
 
 def run(cmd, cwd=None, timeout=300):

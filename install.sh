@@ -19,26 +19,44 @@ APP_NAME="gitsync"
 SCHEDULE="hourly"
 USE_CRON=0
 USER_MODE=0
+SYSTEM_UNIT=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --schedule) SCHEDULE="$2"; shift 2 ;;
         --schedule=*) SCHEDULE="${1#*=}"; shift ;;
         --cron) USE_CRON=1; shift ;;
+        --system) SYSTEM_UNIT=1; shift ;;
         --user) USER_MODE=1; shift ;;
+        --yes|-y) shift ;;                    # accepted; nothing to confirm
         -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
-        *) echo "unknown option: $1" >&2; exit 1 ;;
+        *) echo "unknown option: $1 (allowed: --schedule KEY --cron --system --user --yes)" >&2
+           echo "schedules: hourly 6h 12h daily weekly off" >&2
+           exit 1 ;;
     esac
 done
+
+# allowlist the schedule, so a typo cannot silently install hourly
+case "$SCHEDULE" in
+    hourly|6h|12h|daily|weekly|off) ;;
+    *) echo "unknown schedule: $SCHEDULE (hourly 6h 12h daily weekly off)" >&2
+       exit 2 ;;
+esac
 
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ "$USER_MODE" = "1" ]; then
+    # a user install never uses sudo: the files must belong to the user, or
+    # the later chmod/install fails and ~/.local/share ends up root-owned
     INSTALL_DIR="$HOME/.local/share/$APP_NAME"
     BIN_DIR="$HOME/.local/bin"
+    SUDO=""
 else
     INSTALL_DIR="/opt/$APP_NAME"
     BIN_DIR="/usr/local/bin"
+    # sudo only when we are not already root, and it covers both the copy
+    # and the symlink
+    if [ "$(id -u)" = "0" ]; then SUDO=""; else SUDO="sudo"; fi
 fi
 
 echo "==> gitsync installer"
@@ -46,74 +64,36 @@ echo "    source : $SRC_DIR"
 echo "    target : $INSTALL_DIR"
 
 # --- copy the app ---
-sudo mkdir -p "$INSTALL_DIR" 2>/dev/null || mkdir -p "$INSTALL_DIR"
-sudo cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
+$SUDO mkdir -p "$INSTALL_DIR"
+$SUDO cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
          "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$SRC_DIR/quickinstall.sh" \
-         "$INSTALL_DIR/" 2>/dev/null \
-    || cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
-           "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$SRC_DIR/quickinstall.sh" \
-           "$INSTALL_DIR/"
+         "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/gitsync"
 
 # --- symlink ---
-sudo mkdir -p "$BIN_DIR" 2>/dev/null || mkdir -p "$BIN_DIR"
-sudo ln -sf "$INSTALL_DIR/bin/gitsync" "$BIN_DIR/gitsync" 2>/dev/null \
-    || ln -sf "$INSTALL_DIR/bin/gitsync" "$BIN_DIR/gitsync"
+$SUDO mkdir -p "$BIN_DIR"
+$SUDO ln -sf "$INSTALL_DIR/bin/gitsync" "$BIN_DIR/gitsync"
 echo "    command: $BIN_DIR/gitsync"
 
 # --- config + data dirs ---
 mkdir -p "$HOME/.config/$APP_NAME" "$HOME/.local/share/$APP_NAME/mirrors"
 
 # --- scheduler ---
-if [ "$SCHEDULE" = "off" ]; then
-    echo "==> scheduler: skipped (--schedule off)"
-else
-    if [ "$USE_CRON" = "1" ] || [ ! -d /etc/systemd/system ]; then
-        LINE=$(python3 - "$INSTALL_DIR" "$SCHEDULE" <<'PY'
-import sys
-install, sched = sys.argv[1], sys.argv[2]
-cron = {"hourly": "0 * * * *", "6h": "0 */6 * * *",
-        "12h": "0 */12 * * *", "daily": "0 3 * * *"}[sched]
-print("%s %s/bin/gitsync sync --quiet >/dev/null 2>&1" % (cron, install))
-PY
-)
-        ( crontab -l 2>/dev/null | grep -v "gitsync" ; echo "$LINE" ) | crontab -
-        echo "==> cron installed: $LINE"
+# The unit text is built by `gitsync install` (one source of truth). A user
+# unit by default: the timer must run as the user who owns the config, or
+# $HOME (gh CLI, tokens) is invisible to it.
+if [ "$SCHEDULE" != "off" ]; then
+    GITSYNC_BIN="$BIN_DIR/gitsync"
+    SCHED_ARGS="--schedule $SCHEDULE"
+    [ "$USE_CRON" = "1" ] && SCHED_ARGS="$SCHED_ARGS --cron"
+    [ "$SYSTEM_UNIT" = "1" ] && SCHED_ARGS="$SCHED_ARGS --system"
+    if "$GITSYNC_BIN" install $SCHED_ARGS --yes; then
+        :
     else
-        cat > /etc/systemd/system/$APP_NAME.service <<EOF
-[Unit]
-Description=gitsync repository sync
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-Environment=HOME=%h
-Environment=GH_CONFIG_DIR=%h/.config/gh
-Environment=XDG_CONFIG_HOME=%h/.config
-ExecStart=$INSTALL_DIR/bin/gitsync sync --quiet
-StandardOutput=journal
-StandardError=journal
-EOF
-        CAL=$(python3 -c "import sys; print({'hourly':'hourly','6h':'*:0/6','12h':'*:0/12','daily':'*-*-* 03:00:00'}['$SCHEDULE'])")
-        cat > /etc/systemd/system/$APP_NAME.timer <<EOF
-[Unit]
-Description=Run gitsync on schedule
-
-[Timer]
-OnCalendar=$CAL
-Persistent=true
-AccuracySec=1min
-Unit=$APP_NAME.service
-
-[Install]
-WantedBy=timers.target
-EOF
-        systemctl daemon-reload
-        systemctl enable --now $APP_NAME.timer
-        echo "==> systemd timer installed: $SCHEDULE (Persistent=true)"
-        echo "    status: $(systemctl list-timers $APP_NAME.timer --no-pager | tail -1)"
+        echo "==> scheduler install failed; run 'gitsync install' by hand" >&2
     fi
+else
+    echo "==> scheduler: skipped (--schedule off)"
 fi
 
 echo

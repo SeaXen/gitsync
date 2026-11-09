@@ -38,13 +38,17 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-# gh/glab read their config from $HOME — systemd does not set it by default
-Environment=HOME=%h
+# a user unit already has the right $HOME, so no Environment=HOME here:
+# on a system unit %h expands to /root and the timer would read root's
+# config instead of the installing user's
 Environment=GH_CONFIG_DIR=%h/.config/gh
 Environment=XDG_CONFIG_HOME=%h/.config
 ExecStart={gitsync} sync --scheduled --quiet
 StandardOutput=journal
 StandardError=journal
+
+[Install]
+WantedBy=default.target
 """
 
 TIMER_TEMPLATE = """[Unit]
@@ -91,35 +95,92 @@ def systemd_installed():
     return os.path.exists(os.path.join(SYSTEMD_DIR, TIMER))
 
 
-def install_systemd(schedule_key=None):
-    """write + enable the systemd service/timer for the given schedule"""
+def install_systemd(schedule_key=None, system=False):
+    """write + enable the timer for the given schedule.
+
+    A *user* unit by default: the scheduler must run as the user who owns
+    the config, or `gh`/tokens in $HOME are invisible to it. Pass
+    system=True for the old root-level system unit.
+    """
     cfg = C.load_config()
     # the timer fires as often as the most demanding route needs; routes
     # with a looser schedule are skipped by `sync --scheduled` itself
-    key = schedule_key or C.finest_schedule(cfg) or "hourly"
-    cal = C.SCHEDULES.get(key, C.SCHEDULES["hourly"])["calendar"]
+    key = schedule_key or C.finest_schedule(cfg)
+    cal = timer_calendar(cfg, key)
     if cal is None:
-        return uninstall_systemd()      # every route is off
+        return uninstall_systemd(system=system)      # every route is off
 
-    with open(os.path.join(SYSTEMD_DIR, SERVICE), "w") as f:
-        f.write(SERVICE_TEMPLATE.format(gitsync=gitsync_bin()))
-    with open(os.path.join(SYSTEMD_DIR, TIMER), "w") as f:
-        f.write(TIMER_TEMPLATE.format(calendar=cal, service=SERVICE))
-    _sh(["systemctl", "daemon-reload"])
-    _sh(["systemctl", "enable", "--now", TIMER])
+    if system:
+        with open(os.path.join(SYSTEMD_DIR, SERVICE), "w") as f:
+            f.write(SERVICE_TEMPLATE.format(gitsync=gitsync_bin()))
+        with open(os.path.join(SYSTEMD_DIR, TIMER), "w") as f:
+            f.write(TIMER_TEMPLATE.format(calendar=cal, service=SERVICE))
+        _sh(["systemctl", "daemon-reload"])
+        _sh(["systemctl", "enable", "--now", TIMER])
+        return True
+
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
+                            "user")
+    try:
+        os.makedirs(unit_dir, exist_ok=True)
+        with open(os.path.join(unit_dir, SERVICE), "w") as f:
+            f.write(SERVICE_TEMPLATE.format(gitsync=gitsync_bin()))
+        with open(os.path.join(unit_dir, TIMER), "w") as f:
+            f.write(TIMER_TEMPLATE.format(calendar=cal, service=SERVICE))
+    except OSError:
+        return False
+    _sh(["systemctl", "--user", "daemon-reload"])
+    ok = _sh(["systemctl", "--user", "enable", "--now", TIMER])
+    if ok.returncode != 0:
+        return False
+    print("  timer: systemctl --user list-timers gitsync.timer")
+    print("  to keep it running while logged out: "
+          "loginctl enable-linger $USER")
     return True
 
 
-def uninstall_systemd():
-    if not systemd_installed():
+def timer_calendar(cfg, key=None):
+    """the OnCalendar value for a schedule key (None = off).
+
+    Pure, so it can be tested without systemctl. `gitsync install` with no
+    --schedule uses the finest route schedule, so a route on hourly with a
+    global daily still fires hourly.
+    """
+    if key is None:
+        # no explicit key: the most demanding route wins. If every route is
+        # off there is nothing to schedule - returning None makes the caller
+        # uninstall rather than silently installing hourly.
+        key = C.finest_schedule(cfg)
+        if key is None and not C.routes(cfg):
+            key = "hourly"          # a fresh config: use the global setting
+    if key is None:
+        return None
+    return C.SCHEDULES.get(key, C.SCHEDULES["hourly"])["calendar"]
+
+
+def uninstall_systemd(system=False):
+    if system:
+        if not systemd_installed():
+            return True
+        _sh(["systemctl", "disable", "--now", TIMER])
+        for f in (SERVICE, TIMER):
+            try:
+                os.remove(os.path.join(SYSTEMD_DIR, f))
+            except OSError:
+                pass
+        _sh(["systemctl", "daemon-reload"])
         return True
-    _sh(["systemctl", "disable", "--now", TIMER])
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
+                            "user")
+    _sh(["systemctl", "--user", "disable", "--now", TIMER])
     for f in (SERVICE, TIMER):
         try:
-            os.remove(os.path.join(SYSTEMD_DIR, f))
+            os.remove(os.path.join(unit_dir, f))
         except OSError:
             pass
-    _sh(["systemctl", "daemon-reload"])
+    _sh(["systemctl", "--user", "daemon-reload"])
+    # a root-owned system unit from an older install is left alone unless
+    # the caller asks for it explicitly
     return True
 
 
@@ -158,7 +219,8 @@ def cron_line():
     expr = C.SCHEDULES.get(key, C.SCHEDULES["hourly"])["cron"]
     if expr is None:
         return None
-    return "%s %s sync --quiet >/dev/null 2>&1" % (expr, gitsync_bin())
+    return "%s %s sync --scheduled --quiet >/dev/null 2>&1" % (
+        expr, gitsync_bin())
 
 
 def install_cron(schedule_key=None):
@@ -168,7 +230,7 @@ def install_cron(schedule_key=None):
     expr = C.SCHEDULES.get(key, C.SCHEDULES["hourly"])["cron"]
     lines = [l for l in _crontab().splitlines() if "gitsync" not in l]
     if expr:
-        lines.append("%s %s sync --quiet >/dev/null 2>&1"
+        lines.append("%s %s sync --scheduled --quiet >/dev/null 2>&1"
                      % (expr, gitsync_bin()))
     _sh(["crontab", "-"], stdin_text="\n".join(lines) + "\n")
     return True

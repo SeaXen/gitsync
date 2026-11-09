@@ -46,6 +46,44 @@ def ask(prompt, default=None):
     return ans or (default or "")
 
 
+def ask_secret(prompt):
+    """read a token without echoing it (getpass on a tty).
+
+    The old path used input(), so tokens were shown on screen and stayed in
+    the terminal scrollback.
+    """
+    tty = _tty()
+    try:
+        if tty is None:
+            return ""
+        if tty is sys.stdin:
+            import getpass
+            return getpass.getpass(prompt + " ").strip()
+        tty.write(prompt + " ")
+        tty.flush()
+        import termios
+        fd = tty.fileno()
+        old_attrs = termios.tcgetattr(fd)
+        try:
+            new = termios.tcgetattr(fd)
+            new[3] = new[3] & ~termios.ECHO      # lflags
+            termios.tcsetattr(fd, termios.TCSADRAIN, new)
+            line = tty.readline()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+            tty.write("\n")
+            tty.flush()
+        return line.strip()
+    except Exception:
+        return ""
+    finally:
+        if tty is not None and tty is not sys.stdin:
+            try:
+                tty.close()
+            except OSError:
+                pass
+
+
 def ask_yes(prompt, default=True):
     d = "Y/n" if default else "y/N"
     ans = ask("%s (%s)" % (prompt, d)).lower()
@@ -70,18 +108,29 @@ def run_wizard():
 
     # ---- platforms ----
     hr("STEP 1/4 — platforms")
-    print(" Available: github, gitlab, forgejo, gitea, local")
-    print(" You can enable several of each kind (e.g. two Forgejo servers).")
+    print(" Available: %s" % ", ".join(C.PLATFORM_TYPES))
+    print(" Several of the same kind are fine - give each a name:")
+    print("   work=forgejo, home=forgejo")
+    if cfg.get("platforms"):
+        # re-running setup used to wipe every account with no warning
+        if not ask_yes("Replace the existing accounts in %s?"
+                       % C.CONFIG_FILE, False):
+            print("Keeping the current setup - nothing written.")
+            return 0
     chosen = ask("Which platforms to enable (comma-separated)",
                  "github,gitlab,local")
     chosen = [c.strip() for c in chosen.split(",") if c.strip()]
 
     cfg["platforms"] = {}
-    for name in chosen:
-        ptype = name
-        if ptype not in ("github", "gitlab", "forgejo", "gitea", "local"):
-            ptype = ask("Type for '%s' (github/gitlab/forgejo/gitea/local)"
-                        % name, "forgejo")
+    for item in chosen:
+        # "name=type" or just "type" (the name is then the type)
+        if "=" in item:
+            name, ptype = [x.strip() for x in item.split("=", 1)]
+        else:
+            name = ptype = item
+        if ptype not in C.PLATFORM_TYPES:
+            ptype = ask("Type for '%s' (%s)"
+                        % (name, "/".join(C.PLATFORM_TYPES)), "forgejo")
         hr("Platform: %s (%s)" % (name, ptype))
         print(PERM.format_guide(ptype))
         p = {"type": ptype, "enabled": True}
@@ -99,9 +148,22 @@ def run_wizard():
                         "Use a personal access token? (No = use gh CLI)",
                         False) else "gh"
                 if p["auth"] == "token":
-                    p["token"] = ask("GitHub token (starts with ghp_/github_pat_)")
+                    p["token"] = ask_secret(
+                        "GitHub token (hidden; ghp_/github_pat_):")
             else:
-                p["token"] = ask("%s token" % ptype)
+                # a blank token is not a saved blank: every API call would
+                # fail with a confusing error. Re-prompt instead.
+                while True:
+                    p["token"] = ask_secret("%s token (hidden):" % ptype)
+                    if p["token"]:
+                        break
+                    print("  a token is required for %s" % ptype)
+                    if not ask_yes("Try again?", True):
+                        print("  skipping %s" % name)
+                        break
+                if not p["token"]:
+                    cfg["platforms"].pop(name, None)
+                    continue
                 if ptype == "gitlab":
                     p["ns_id"] = ask("Target namespace id (blank = your "
                                      "personal namespace)", "")

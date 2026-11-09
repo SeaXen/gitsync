@@ -34,7 +34,8 @@ https://github.com/settings/tokens?type=beta (fine-grained)
 | `write_repository` | Narrower alternative for git-over-HTTP only |
 
 **Minimum:** `api`
-**Alternative:** `glab auth login` + `glab auth switch` for the CLI path.
+**Note:** gitsync reads a GitLab *token* only. There is no `glab` CLI path —
+paste a personal access token with the `api` scope.
 
 ---
 
