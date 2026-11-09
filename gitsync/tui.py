@@ -434,7 +434,7 @@ def accounts_screen(stdscr):
                  (" ACCOUNTS — %d site(s) " % len(rows)).center(w - 1)[:w - 1],
                  curses.A_BOLD | curses.color_pair(1))
         safe_add(stdscr, 1, 0,
-                 " A=add  E=edit  X=remove  T=test  Space=on/off  "
+                 " A=add  E=edit  X=remove  T=test  ?=scopes  Space=on/off  "
                  "R=refresh  B=back ".ljust(w - 1)[:w - 1], curses.A_DIM)
         avail = max(1, h - 5)
         if idx < top:
@@ -467,8 +467,8 @@ def accounts_screen(stdscr):
                                                       len(rows)),
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
-                     " A=add  E=edit  X=remove  T=test  Space=on/off  "
-                     "up/dn=move  B=back ")
+                     " A=add  E=edit  X=remove  T=test  ?=scopes  "
+                     "Space=on/off  up/dn=move  B=back ")
         commit_screen(stdscr)
 
         ch = stdscr.getch()
@@ -484,6 +484,8 @@ def accounts_screen(stdscr):
             idx = min(len(rows) - 1, idx + avail) if rows else 0
         elif ch in (ord("r"), ord("R")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
+        elif ch in (ord("?"),):
+            _scopes_screen(stdscr)
         elif ch in (ord(" "), 10, 13, curses.KEY_ENTER):
             if not rows:
                 continue
@@ -504,6 +506,22 @@ def accounts_screen(stdscr):
             _edit_platform_screen(stdscr, rows[idx][0])
         elif ch in (ord("x"), ord("X")) and rows:
             _remove_platform_screen(stdscr, rows[idx][0])
+
+
+def _scopes_screen(stdscr):
+    """what token each kind of site needs, and where to create it"""
+    lines = ["TOKEN SCOPES - what each platform needs", ""]
+    for ptype in C.PLATFORM_TYPES:
+        g = PERM.guide(ptype)
+        lines.append("  %-24s minimum: %s" % (g["title"], g["minimum"]))
+        if g.get("token_url"):
+            lines.append("      create at: %s" % g["token_url"])
+        lines.append("")
+    lines += ["Several platforms of the same kind are supported - each gets",
+              "its own name, token and routes.",
+              "",
+              "Press B to go back."]
+    _scroll_view(stdscr, " TOKEN SCOPES ", lines)
 
 
 def _toggle_platform(name):
@@ -835,15 +853,26 @@ def _webhooks_screen(stdscr, cfg):
 
 
 def _suspend_run(stdscr, cmd):
-    """drop to the shell for a command that needs the whole terminal"""
+    """drop to the shell for a command that needs the whole terminal.
+
+    Ctrl-C inside the child must come back to the dashboard, not kill the
+    TUI - that is what used to happen, because the interrupt propagated out
+    of curses.wrapper().
+    """
     curses.def_prog_mode()
     curses.endwin()
     try:
-        subprocess.run(cmd, env=dict(os.environ, PYTHONPATH=_app_dir()))
-        input("\npress Enter to return...")
-    except Exception as e:
-        print("failed: %s" % e)
-        input("\npress Enter to return...")
+        try:
+            subprocess.run(cmd, env=dict(os.environ, PYTHONPATH=_app_dir()))
+            note = "\npress Enter to return to the dashboard..."
+        except KeyboardInterrupt:
+            note = "\ncancelled - press Enter to return to the dashboard..."
+        except Exception as e:
+            note = "\nfailed: %s - press Enter to return..." % e
+        try:
+            input(note)
+        except (KeyboardInterrupt, EOFError):
+            pass
     finally:
         curses.reset_prog_mode()
         curses.curs_set(0)
@@ -996,15 +1025,7 @@ def repos_screen(stdscr):
                     continue
                 cmd += ["--to", local]         # local hub only
             state["repo_scroll"] = cur
-            curses.def_prog_mode()
-            curses.endwin()
-            try:
-                subprocess.run(cmd, env=dict(os.environ,
-                                             PYTHONPATH=_app_dir()))
-                input("\npress Enter to return...")
-            finally:
-                curses.reset_prog_mode()
-                curses.curs_set(0)
+            _suspend_run(stdscr, cmd)
             state["repo_loaded"] = False
             query = ""
 
@@ -1413,6 +1434,10 @@ def draw_routes(stdscr, h, w, G, R, dim):
     if not rows:
         rows.append(("(no routes — add one: gitsync routes add main github "
                      "gitlab,forgejo)", dim))
+    inner = w - 6
+    for i, (text, attr) in enumerate(rows):
+        if len(text) > inner:
+            rows[i] = (text[:inner - 18] + " ... (P for details)", attr)
     _panel_rows(stdscr, h, w, 4, rows, "ROUTES (direction + pause)")
     safe_add(stdscr, h - 2, 2,
              "P = pause/resume a route or target   |   "
@@ -2548,6 +2573,26 @@ def _run_capture(cmd, timeout=300):
         return ["failed: %s" % e]
 
 
+def _confirm_run(stdscr, title, cmd, warning):
+    """ask before running something that changes every repo"""
+    h, w = stdscr.getmaxyx()
+    while True:
+        stdscr.erase()
+        safe_add(stdscr, 0, 0, (" %s " % title).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(4))
+        safe_add(stdscr, 2, 1, warning[:w - 4], curses.A_DIM)
+        safe_add(stdscr, 3, 1, "Dry-run first if you are unsure.",
+                 curses.A_DIM)
+        modal_footer(stdscr, h, w, " Y = run it   N = cancel ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
+            return
+        if ch in (ord("y"), ord("Y")):
+            _suspend_run(stdscr, cmd)
+            return
+
+
 def _tools_screen(stdscr):
     """everything that still needed a terminal, in one menu.
 
@@ -2574,9 +2619,14 @@ def _tools_screen(stdscr):
         ("Compare sites", "which repos differ across a route",
          lambda: show("COMPARE", ["python3", "-m", "gitsync", "compare"])),
         ("Mirror one repo", "sync a single repo now", ask_repo),
-        ("Fix drift (preview)", "re-sync repos whose sites disagree",
+        ("Fix drift (preview)", "see which repos disagree, change nothing",
          lambda: show("FIX DRIFT", ["python3", "-m", "gitsync", "fix",
                                     "--dry-run"])),
+        ("Fix drift (run it)", "re-sync every repo whose sites disagree",
+         lambda: _confirm_run(stdscr, "FIX DRIFT",
+                              ["python3", "-m", "gitsync", "fix"],
+                              "This re-pushes every mismatched repo to all "
+                              "of its targets.")),
         ("Update gitsync", "pull the newest release and reinstall",
          lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
                                        "update"])),
@@ -2591,15 +2641,5 @@ def _tools_screen(stdscr):
 
 def launch_wizard(stdscr):
     """suspend curses, run the setup wizard, resume"""
-    curses.def_prog_mode()
-    curses.endwin()
-    try:
-        subprocess.run(["python3", "-m", "gitsync", "setup"],
-                       env=dict(os.environ, PYTHONPATH=_app_dir()))
-        input("\npress Enter to return to the dashboard...")
-    except Exception as e:
-        print("wizard error: %s" % e)
-    finally:
-        curses.reset_prog_mode()
-        curses.curs_set(0)
-        threading.Thread(target=refresh_platforms, daemon=True).start()
+    _suspend_run(stdscr, ["python3", "-m", "gitsync", "setup"])
+    threading.Thread(target=refresh_platforms, daemon=True).start()

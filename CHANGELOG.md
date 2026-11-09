@@ -4,6 +4,28 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-11-09
+
+### Fixed
+
+- **Ctrl-C inside a suspended run killed the whole TUI.** Pressing Ctrl-C in
+  the wizard, in `mirror`, or in any Tools entry that drops to the shell
+  propagated out of `curses.wrapper()` and printed the snapshot before
+  exiting. It now catches the interrupt, says "cancelled", and returns to
+  the dashboard. The wizard, the repo browser's inline sync and every Tools
+  entry share one helper, so they all behave the same.
+- **A route line wider than the panel was cut with no hint.** It now ends
+  with `... (P for details)`.
+
+### Added
+
+- **Fix drift can now actually be run** from Tools (preview stays the
+  default; the real run asks for confirmation first, because it re-pushes
+  every mismatched repo).
+- **The token-scope guide is back in the TUI**: `?` on the accounts screen
+  lists what each platform needs and where to create the token. It had been
+  lost when the read-only accounts screen became the manager.
+
 ## [1.5.0] - 2026-11-09
 
 The TUI is now the whole app: no command needs the terminal any more, and
