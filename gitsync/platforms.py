@@ -475,9 +475,25 @@ class GitLabPlatform:
                 return self._url_with_token(out["http_url_to_repo"])
         ns_id = self.ns_id
         if not ns_id:
+            # namespaces[0] may be a group, so the repo could be created
+            # somewhere the user does not expect. Prefer the namespace whose
+            # path matches the account login (the personal namespace).
             rc, out = self._api("/namespaces")
+            login = self.user()
             if isinstance(out, list) and out:
-                ns_id = str(out[0]["id"])
+                pick = None
+                for ns in out:
+                    if login and ns.get("path") == login:
+                        pick = ns
+                        break
+                if pick is None:
+                    for ns in out:
+                        if ns.get("kind") == "user":
+                            pick = ns
+                            break
+                if pick is None:
+                    pick = out[0]
+                ns_id = str(pick["id"])
         rc, out = self._api("/projects", "POST", {
             "name": name, "path": path,
             "namespace_id": int(ns_id) if str(ns_id).isdigit() else ns_id,

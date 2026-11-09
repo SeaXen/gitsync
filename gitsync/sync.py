@@ -85,13 +85,20 @@ def mirror_path(repo, ptype, claimants=None):
 
 
 def mirror_is_valid(path):
+    """is this a usable bare mirror?
+
+    Zero refs is not a failure: an empty source repo is legitimately empty.
+    Requiring at least one ref made an empty repo get rm -rf'd and re-cloned
+    on every single run. A bare repo git can talk to is valid.
+    """
     if not os.path.isdir(path):
         return False
-    rc, out, _ = P.run(["git", "for-each-ref"], cwd=path, timeout=60)
-    return rc == 0 and bool(out.strip())
+    rc, out, _ = P.run(["git", "rev-parse", "--is-bare-repository"],
+                       cwd=path, timeout=60)
+    return rc == 0 and out.strip() == "true"
 
 
-def sync_repo(repo, source, targets, mode, claimants=None):
+def sync_repo(repo, source, targets, mode, claimants=None, relax=False):
     """one repo: source -> hub -> targets. Returns (status, detail, errors)."""
     name = repo["name"]
     src_url = repo["clone_url"]
@@ -121,7 +128,7 @@ def sync_repo(repo, source, targets, mode, claimants=None):
     # 2. push to each target
     pushed = []
     for tname, tplat in targets.items():
-        err = _push_target(tname, tplat, repo, hub, mode)
+        err = _push_target(tname, tplat, repo, hub, mode, relax=relax)
         if err:
             errors.append(err)
         else:
@@ -175,7 +182,8 @@ def _secure_hub_config(hub):
         pass
 
 
-def _push_target(tname, tplat, repo, hub, mode, refspecs=None):
+def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
+                 relax=False):
     """push the hub to one target. Returns None on success, else an error.
 
     refspecs pins exactly which refs travel (used by a mesh that is skipping
@@ -189,10 +197,14 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None):
             return None
         rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
         if rc != 0 and _protection_error(err):
-            # a protected branch refuses force-push. Ask the adapter to
-            # relax it, then retry the same push exactly once. Doing this
-            # lazily keeps the happy path free of extra API calls, which
-            # matters: GitLab rate-limits aggressively.
+            # A protected branch refused the push. Turning on force-push
+            # there is a lasting security change on the destination, so it
+            # only happens when the user asked for it
+            # (settings.relax_protection). Otherwise say so and move on.
+            if not relax:
+                return ("%s: push rejected by branch protection. gitsync "
+                        "will not change it. Set settings.relax_protection="
+                        "true only if you mean to." % tname)
             try:
                 for note in tplat.prepare_push(repo, push_url) or []:
                     log("    %s" % note)
@@ -308,7 +320,8 @@ def _drop_absent(hub, space, keep):
     return dropped
 
 
-def mesh_sync_repo(repo, peers, conflict="newest", claimants=None):
+def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
+                   relax=False):
     """all-direction sync: newest commit wins per branch and per tag.
 
     Peers' refs are fetched into a private namespace in the hub, the hub
@@ -413,7 +426,8 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None):
                        for t in chosen_tags])
     pushed = []
     for pname, plat in peers.items():
-        err = _push_target(pname, plat, repo, hub, "safe", refspecs)
+        err = _push_target(pname, plat, repo, hub, "safe", refspecs,
+                           relax=relax)
         if err:
             errors.append(err)
         else:
@@ -574,20 +588,27 @@ def _plan_repo(repo, source, targets, mode):
             actions.append("%s: unreachable - would CREATE" % tname)
             behind += 1
             continue
-        thead = trefs.get("HEAD")
-        if thead == src_head:
+        # every branch and tag is compared, even when HEAD agrees: a target
+        # can be level with HEAD and still be missing (or ahead on) a branch
+        missing = [r for r, sha in trefs.items()
+                   if r.startswith(("refs/heads/", "refs/tags/"))
+                   and src_refs.get(r) != sha]
+        if not missing:
             actions.append("%s: up to date" % tname)
         else:
-            missing = [r for r, sha in trefs.items()
-                       if src_refs.get(r) != sha
-                       and r.startswith(("refs/heads/", "refs/tags/"))]
-            if missing:
-                actions.append("%s: %d ref(s) behind (%s)"
-                               % (tname, len(missing), ", ".join(
-                                   m.split("/")[-1] for m in missing[:3])))
-                behind += len(missing)
-            else:
-                actions.append("%s: would update" % tname)
+            behind_names = [m.split("/")[-1] for m in missing
+                            if m.startswith("refs/heads/")]
+            extra = [m.split("/")[-1] for m in missing
+                     if m.startswith("refs/tags/")]
+            bits = []
+            if behind_names:
+                bits.append("%d branch(es)" % len(behind_names))
+            if extra:
+                bits.append("%d tag(s)" % len(extra))
+            actions.append("%s: %s differ (%s)"
+                           % (tname, " + ".join(bits),
+                              ", ".join((behind_names + extra)[:3])))
+            behind += len(missing)
         # refs the target has and the source does not: pruned by --mirror
         if mode == "full":
             doomed = [r for r in trefs
@@ -749,6 +770,9 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
     cfg = cfg or C.load_config()
     include_forks = bool(C.setting(cfg, "include_forks", False))
     pace = float(C.setting(cfg, "pace", 0) or 0)
+    # changing branch protection is a lasting security change on a
+    # destination; it is opt-in (P1-2)
+    relax = bool(C.setting(cfg, "relax_protection", False))
 
     selected = C.routes(cfg)
     if route_name:

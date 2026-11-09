@@ -352,7 +352,8 @@ def options_screen(stdscr):
         ("Include forks: %s" % C.setting(cfg, "include_forks", False),
          "mirror forked repos too", lambda: cycle(
              cfg, "include_forks", [False, True], "include_forks")),
-        ("Notify on: %s" % C.setting(cfg, "notify:on", "failure"),
+        ("Notify on: %s" % (cfg.get("settings", {}).get("notify", {})
+                            .get("on", "failure")),
          "failure | success | always | never", lambda: cycle(
              cfg, "notify:on", ["failure", "success", "always", "never"],
              "notify on")),

@@ -292,8 +292,14 @@ def make_handler(cfg, secret, bind_allow=None):
                 self._reply(202, "deduped\n")
                 return
 
+            # a mesh route is triggered by a push on ANY of its peers, not
+            # only the one listed as its source. The config is re-read per
+            # request so a route added while the receiver runs is picked up.
+            cfg = C.load_config()
             routes = [r for r in C.routes(cfg)
-                      if r.get("source") == pname]
+                      if r.get("source") == pname
+                      or (r.get("direction") == "mesh"
+                          and pname in (r.get("targets") or []))]
             if not routes:
                 log("no route uses '%s' as a source — nothing to do" % pname)
                 self._reply(200, "no route for %s\n" % pname)

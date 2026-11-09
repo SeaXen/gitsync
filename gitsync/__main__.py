@@ -231,6 +231,10 @@ def cmd_platforms(args):
                                 token=args.token, owner=args.owner,
                                 path=args.path, protocol=args.protocol,
                                 ssh_port=args.ssh_port)
+        if getattr(args, "url_template", None):
+            p["url_template"] = args.url_template
+        if getattr(args, "user", None):
+            p["user"] = args.user
         err = C.add_platform(cfg, name, p)
         if err:
             print(err)
@@ -262,7 +266,9 @@ def cmd_platforms(args):
         p = plats[args.name]
         changed = []
         for field, val in (("token", args.token), ("url", args.url),
-                           ("owner", args.owner), ("path", args.path)):
+                           ("owner", args.owner), ("path", args.path),
+                           ("protocol", getattr(args, "protocol", None)),
+                           ("ssh_port", getattr(args, "ssh_port", None))):
             if val is not None:
                 p[field] = os.path.expanduser(val) if field == "path" else val
                 changed.append(field)
@@ -1484,6 +1490,11 @@ def cmd_watch(args):
     """foreground poller: sync every N seconds (faster than the hourly timer)"""
     cfg = C.load_config()
     interval = args.interval
+    if interval < 30:
+        # 0 busy-loops the run lock and a small number is almost always a
+        # typo; 30s is the floor that still feels live
+        print("interval %ss is too short - using 30s" % interval)
+        interval = 30
     print("gitsync watch: syncing every %ds — Ctrl+C to stop" % interval)
     runs = 0
     try:
@@ -1581,6 +1592,9 @@ def main(argv=None):
                     help="clone protocol (ssh needs an ssh key on the host)")
     sp.add_argument("--ssh-port", type=int, dest="ssh_port",
                     help="ssh port when protocol=ssh")
+    sp.add_argument("--url-template", dest="url_template",
+                    help="generic: URL template with {owner}/{name}")
+    sp.add_argument("--user", help="git username for token URLs")
     sp.add_argument("--enable", action="store_true")
     sp.add_argument("--disable", action="store_true")
     sp.add_argument("--force", action="store_true")

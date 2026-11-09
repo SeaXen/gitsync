@@ -18,6 +18,8 @@ All credentials live in the user's own config file - never in the code.
 
 import json
 import os
+
+from . import __version__
 import urllib.request
 
 TIMEOUT = 15
@@ -46,7 +48,8 @@ def _telegram(cfg):
 def _post_raw(url, payload, headers=None):
     data = json.dumps(payload).encode()
     h = {"Content-Type": "application/json",
-         "User-Agent": "gitsync/1.0 (+https://github.com/SeaXen/gitsync)"}
+         "User-Agent": "gitsync/%s (+https://github.com/SeaXen/gitsync)"
+                   % __version__}
     if headers:
         h.update(headers)
     req = urllib.request.Request(url, data=data, method="POST", headers=h)

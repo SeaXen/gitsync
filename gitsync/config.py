@@ -8,8 +8,10 @@ Runtime data (mirror hub, logs, run records) lives at ~/.local/share/gitsync
 import json
 import os
 
+from . import __version__
+
 APP = "gitsync"
-VERSION = "1.0.0"
+VERSION = __version__      # one source of truth
 
 CONFIG_DIR = os.environ.get(
     "GITSYNC_CONFIG_DIR",

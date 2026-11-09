@@ -47,7 +47,8 @@ def starred(plat):
             out, page = [], 1
             while True:
                 rc, o = plat._api("/user/starred?per_page=100&page=%d" % page)
-                if rc != 0 or not isinstance(o, list):
+                # rc != 0 treated a perfectly good 200 as failure
+                if rc != 200 or not isinstance(o, list):
                     break
                 out += [r.get("full_name") or "" for r in o if r]
                 if len(o) < 100:
