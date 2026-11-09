@@ -23,7 +23,10 @@ from . import notify as NT
 from . import permissions as PERM
 from . import platforms as P
 from . import scheduler as S
+from . import diskutil as DK
 from . import sync as SYNC
+from . import tokencheck as TK
+from . import webhooks as WH
 
 TABS = ["Dashboard", "Platforms", "Routes", "Log", "History", "Settings"]
 
@@ -102,6 +105,8 @@ def _refresh_platforms_inner():
                         list(r.get("targets", [])),
                         r.get("include") or [], r.get("exclude") or [])
                        for r in C.routes(cfg)]
+    state["route_sched"] = {r.get("name"): r.get("schedule")
+                            for r in C.routes(cfg)}
     state["settings"] = dict(cfg.get("settings", {}))
     state["counts_age"] = time.time()
     state["dirty"] = True
@@ -169,15 +174,6 @@ def safe_add(win, y, x, text, attr=0):
             win.addnstr(y, x, str(text), max(0, w - x - 1), attr)
         except curses.error:
             pass
-
-
-def box(win, title):
-    win.erase()
-    try:
-        win.box()
-    except curses.error:
-        pass
-    safe_add(win, 0, 2, " %s " % title, curses.A_BOLD)
 
 
 def commit_screen(stdscr=None):
@@ -699,14 +695,16 @@ def status_line():
 
 
 def update_clock(stdscr):
-    """repaint ONLY the clock cells (19 chars at a fixed column) so the
-    terminal diff — and therefore the bytes on the wire — stays tiny"""
-    h, w = stdscr.getmaxyx()
-    if h < 2 or w < 24:
-        return
-    safe_add(stdscr, 1, CLOCK_X,
-             datetime.now().strftime("%Y-%m-%d %H:%M:%S"), curses.A_DIM)
-    curses.doupdate()
+    """Ask for a full redraw because the clock ticked.
+
+    This used to repaint only the 19 clock cells and call doupdate(), to
+    keep the byte count on the wire tiny. That was wrong: draw() erases
+    stdscr and the panels live in their own windows, so a bare stdscr
+    flush overwrote the panels with blanks — which is why the Platforms
+    and Routes tabs rendered empty while the Log tab (no panels) was fine.
+    Redrawing everything is a slightly larger diff and always correct.
+    """
+    state["dirty"] = True
 
 
 def tab_bar(w):
@@ -767,12 +765,35 @@ def draw(stdscr):
 
 
 def _panel_rows(stdscr, h, w, top, rows, title, colors=None):
-    """render rows [(text, attr)] inside a bordered panel"""
-    pw = curses.newwin(min(h - top - 1, len(rows) + 2), w - 2, top, 1)
-    box(pw, title)
-    for i, (text, attr) in enumerate(rows[:h - top - 3]):
-        safe_add(pw, 1 + i, 2, text[:w - 6], attr)
-    pw.noutrefresh()
+    """render rows [(text, attr)] inside a bordered panel.
+
+    Drawn straight onto stdscr instead of into a separate curses window.
+    commit_screen() only calls doupdate(), which flushes what was staged
+    with noutrefresh(); a separate panel window was staged correctly but
+    then wiped by the clock's stdscr flush, which is why the Platforms
+    and Routes tabs rendered an empty panel for every release so far.
+    Drawing on stdscr makes the panel exactly as reliable as the header,
+    tab bar and footer, which always worked.
+    """
+    avail = h - top - 2          # leave the hint line + footer alone
+    if avail < 1 or w < 8:
+        return
+    inner = w - 4
+    n = min(len(rows), avail - 1)
+    label = " %s " % title
+    if len(label) > inner:
+        label = label[:inner]
+    rule = "+" + label + "-" * max(0, inner - len(label)) + "+"
+    safe_add(stdscr, top, 1, rule[:w - 2], curses.A_DIM)
+    for i in range(n):
+        text, attr = rows[i]
+        body = "| " + str(text)
+        safe_add(stdscr, top + 1 + i, 1,
+                 body.ljust(inner + 1)[:inner + 1] + "+", attr)
+    if n < len(rows):
+        safe_add(stdscr, top + 1 + n, 1,
+                 ("| ... %d more" % (len(rows) - n)).ljust(inner + 1)[:inner + 1]
+                 + "+", curses.A_DIM)
 
 
 def draw_platforms(stdscr, h, w, G, R, dim):
@@ -792,8 +813,14 @@ def draw_platforms(stdscr, h, w, G, R, dim):
 
 def draw_routes(stdscr, h, w, G, R, dim):
     rows = []
+    cfg = C.load_config()
     for name, source, targets, inc, exc in state["routes"]:
-        rows.append(("%s:  %s  ->  %s" % (name, source, ", ".join(targets)),
+        sched = C.route_schedule(cfg, {"name": name, "schedule":
+                                       state["route_sched"].get(name)})
+        nxt = SYNC.next_due_text({"name": name,
+                                  "schedule": state["route_sched"].get(name)}, cfg)
+        rows.append(("%s:  %s  ->  %s   [%s, next: %s]"
+                     % (name, source, ", ".join(targets), sched, nxt),
                      curses.A_BOLD))
         if inc or exc:
             rows.append(("    filters: include=%s exclude=%s"
@@ -803,8 +830,8 @@ def draw_routes(stdscr, h, w, G, R, dim):
                      "gitlab,forgejo)", dim))
     _panel_rows(stdscr, h, w, 4, rows, "ROUTES (sync direction)")
     safe_add(stdscr, h - 2, 2,
-             "add: gitsync routes add NAME SRC t1,t2 [--include 'Sea*']",
-             dim)
+             "add: gitsync routes add NAME SRC t1,t2 [--include 'Sea*'] "
+             "[--schedule daily]", dim)
 
 
 def draw_log_tab(stdscr, h, w, R, G):
@@ -875,6 +902,49 @@ def draw_settings(stdscr, h, w, dim):
         safe_add(stdscr, 4 + i, 1, text[:w - 2], attr)
 
 
+def _health_strip(stdscr, row, w, G, Y, R, dim):
+    """one line: token health + hub disk + webhook receiver state"""
+    if row >= stdscr.getmaxyx()[0] - 2:
+        return
+    try:
+        cfg = C.load_config()
+        tok = TK.check(cfg)
+        tok_txt = TK.summary(tok)
+        tok_attr = G if not TK.bad(tok) else (
+            R if any(t["level"] in ("expired", "critical") for t in tok) else Y)
+    except Exception:
+        tok_txt, tok_attr = "tokens: unknown", dim
+
+    disk_txt, disk_attr = "disk: ?", dim
+    try:
+        from . import diskutil as D
+        ms = D.mirrors()
+        free, tot = D.fs_free(C.MIRROR_DIR)
+        pct = (100.0 * (tot - free) / tot) if tot else 0
+        disk_txt = "hub: %d mirrors, %s, disk %s%% full" % (
+            len(ms), D.human(sum(m[2] for m in ms)), int(pct))
+        disk_attr = R if pct > 90 else (Y if pct > 75 else G)
+    except Exception:
+        pass
+
+    wh_txt, wh_attr = "webhooks: off", dim
+    try:
+        from . import webhooks as WH
+        if WH.get_secret():
+            wh_attr = G if S.webhooks_active() else dim
+            wh_txt = "webhooks: %s" % ("live" if S.webhooks_active()
+                                       else "configured, not running")
+        else:
+            wh_txt = "webhooks: not set up"
+    except Exception:
+        pass
+
+    safe_add(stdscr, row, 1, (" %-34s %-46s %s"
+                              % (tok_txt, disk_txt, wh_txt))[:w - 3], dim)
+    # recolour just the token segment
+    safe_add(stdscr, row, 2, tok_txt[:32], tok_attr)
+
+
 def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
     compact = h < 18 or w < 70      # phones / narrow splits
 
@@ -922,57 +992,54 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         return
 
     # ---------------- full (desktop) layout ----------------
-    top, ph = 4, min(len(state["platforms"]) + 2, 8)
-    pw = curses.newwin(ph, w - 2, top, 1)
-    box(pw, "PLATFORMS")
-    for i, (name, ptype, on, ok, info, count) in enumerate(
-            state["platforms"][:ph - 2]):
+    # Every section is drawn straight onto stdscr via _panel_rows: the
+    # old per-section curses windows were noutrefresh'd correctly but then
+    # wiped by the clock's stdscr flush, so the dashboard rendered empty.
+    top = 4
+    plat_rows = []
+    for name, ptype, on, ok, info, count in state["platforms"][:6]:
         attr = (G if ok else R) if on else dim
-        safe_add(pw, 1 + i, 2,
-                 ("%-14s %-9s %-4s %-5s repos=%-5s %s"
-                  % (name, ptype, "ON" if on else "off", "OK" if ok else "FAIL",
-                     count, info))[:w - 6], attr)
-    pw.noutrefresh()
+        plat_rows.append(("%-14s %-9s %-4s %-5s repos=%-5s %s"
+                          % (name, ptype, "ON" if on else "off",
+                             "OK" if ok else "FAIL", count, info), attr))
+    if not plat_rows:
+        plat_rows.append(("platforms: loading...", dim))
+    _panel_rows(stdscr, h, w, top, plat_rows, "PLATFORMS (A = manage accounts)")
+    top2 = top + min(len(plat_rows) + 2, h - top - 6)
 
-    top2 = top + ph
-    rh = 3
-    rw = curses.newwin(rh, w - 2, top2, 1)
-    box(rw, "ROUTES & SETTINGS")
     routes_txt = "  |  ".join("%s: %s -> %s" % (n, s, ", ".join(t))
                               for n, s, t, _i, _e in state["routes"]) or "(none)"
-    safe_add(rw, 1, 2, routes_txt[:w - 6], curses.A_BOLD)
     st = state["settings"]
-    safe_add(rw, 2, 2, ("workers=%s  mode=%s  forks=%s   scheduler: %s"
-                        % (st.get("workers"), st.get("mode"),
-                           st.get("include_forks"),
-                           cached_status()))[:w - 6], dim)
-    rw.noutrefresh()
+    route_rows = [
+        (routes_txt[:w - 8], curses.A_BOLD),
+        ("workers=%s  mode=%s  forks=%s   scheduler: %s"
+         % (st.get("workers"), st.get("mode"), st.get("include_forks"),
+            cached_status()), dim),
+    ]
+    _panel_rows(stdscr, h, w, top2, route_rows, "ROUTES & SETTINGS")
 
-    # live sync progress
-    top3 = top2 + rh
-    prog_h = 3 if state["syncing"] else 0
+    # ---- health strip: tokens, disk, webhooks ----
+    _health_strip(stdscr, top2 + len(route_rows) + 2, w, G, Y, R, dim)
+
+    top3 = top2 + len(route_rows) + 3
     if state["syncing"]:
-        prw = curses.newwin(prog_h, w - 2, top3, 1)
-        box(prw, "SYNC IN PROGRESS")
         prog = SYNC.progress
         active = list(prog.get("active", {}).keys())
         done, total = prog.get("done", 0), prog.get("total", 0)
         pct = ("%d/%d" % (done, total)) if total else "starting..."
-        bar_w = max(10, w - 40)
+        bar_w = max(10, w - 44)
         filled = int(bar_w * done / total) if total else 0
-        bar = "[%s%s] %s" % ("#" * filled, "-" * (bar_w - filled), pct)
-        safe_add(prw, 1, 2, bar[:w - 6], curses.A_BOLD)
-        safe_add(prw, 2, 2, ("in flight: %s"
-                             % (", ".join(a[:18] for a in active[:4])
-                                or "..."))[:w - 6], Y)
-        prw.noutrefresh()
+        _panel_rows(stdscr, h, w, top3, [
+            ("[%s%s] %s" % ("#" * filled, "-" * (bar_w - filled), pct),
+             curses.A_BOLD),
+            ("in flight: %s" % (", ".join(a[:18] for a in active[:4])
+                                or "..."), Y),
+        ], "SYNC IN PROGRESS")
+        top3 += 4
 
-    top4 = top3 + prog_h
-    log_h = h - top4 - 2
-    lw = curses.newwin(log_h, w - 2, top4, 1)
-    box(lw, "LOG (live tail - L for full log, H for history)")
     lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
-    for i, line in enumerate(lines[-(log_h - 2):][:log_h - 2]):
+    log_rows = []
+    for line in lines[-(h - top3 - 3):][:h - top3 - 3]:
         attr = 0
         if "FAIL" in line or "failed" in line.lower():
             attr = R
@@ -980,8 +1047,11 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
             attr = G
         elif "===" in line:
             attr = curses.A_BOLD
-        safe_add(lw, 1 + i, 2, line[:w - 6], attr)
-    lw.noutrefresh()
+        log_rows.append((line[:w - 8], attr))
+    if not log_rows:
+        log_rows.append(("(no log lines yet)", dim))
+    _panel_rows(stdscr, h, w, top3, log_rows,
+                "LOG (live tail - L for full log, H for history)")
 
 
 # ---------------------------------------------------------------- snapshot
@@ -1058,6 +1128,8 @@ def _run(stdscr):
                         list(r.get("targets", [])),
                         r.get("include") or [], r.get("exclude") or [])
                        for r in C.routes(_cfg)]
+    state["route_sched"] = {r.get("name"): r.get("schedule")
+                            for r in C.routes(_cfg)}
     state["settings"] = dict(_cfg.get("settings", {}))
     threading.Thread(target=refresh_platforms, daemon=True).start()
     last_draw = 0.0
@@ -1076,6 +1148,7 @@ def _run(stdscr):
         elif now - last_clock >= 1.0:
             update_clock(stdscr)
             last_clock = now
+            dirty = True
         ch = stdscr.getch()
         if ch != -1:
             dirty = True

@@ -107,6 +107,11 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **Drift repair** | `gitsync fix` detects divergence across platforms and re-syncs |
 | **Repo filters** | per-route `include`/`exclude` globs |
 | **Selective sync** | browse the account's repos in the TUI (`E`) and sync only the ones you pick |
+| **Webhook sync** | platforms push events → instant sync of just that repo (no polling) |
+| **Dry run** | `sync --dry-run` shows exactly what would change first |
+| **Per-route schedules** | hourly for active repos, weekly for archives |
+| **Token health** | warns before an expiring credential kills the sync |
+| **Disk analytics** | per-mirror sizes, orphan detection, safe `gc` reclaim |
 | **Self-repair** | `doctor --fix` removes broken mirror shells automatically |
 | **Watch mode** | `gitsync watch --interval 60` for near-real-time sync |
 | **SSH transport** | `"protocol": "ssh"` per platform (+ `ssh_port`) |
@@ -139,7 +144,12 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync sync --route main` | sync one route |
 | `gitsync sync --to gitlab` | push to **one target only** |
 | `gitsync sync --repos "tradex,SeaVault"` | sync **only these repos** |
+| `gitsync sync --dry-run` | **preview** what would change, change nothing |
 | `gitsync repos` | **browse the logged account's repo list** |
+| `gitsync disk` | hub disk usage, orphaned mirrors, reclaim space |
+| `gitsync tokens` | check every credential for expiry / revocation |
+| `gitsync webhooks --serve` | **receive push events** and sync instantly |
+| `gitsync route-schedule NAME daily` | give one route its own frequency |
 | `gitsync repos --platform gitlab --forks` | list another account, forks included |
 | `gitsync mirror tradex` | sync a **single repo** |
 | `gitsync mirror tradex SeaVault` | sync **several repos at once** |
@@ -250,6 +260,126 @@ token. `gitsync platforms` lists every account you have configured.
 3. **`mirror --to` finds the right route.** When several routes share a source,
    it picks the one that actually has the target you asked for instead of
    taking the first match.
+
+---
+
+## Dry run
+
+Never wonder what a sync is about to do:
+
+```bash
+gitsync sync --dry-run                          # whole account
+gitsync sync --repos "tradex,SeaVault" --dry-run
+gitsync mirror tradex --to backup --dry-run     # not supported yet: mirror only
+```
+
+```
+[09:30:06]   [1/2] PLAN gitsync
+[09:30:06]            - hub up to date
+[09:30:06]            - backup: up to date
+[09:30:06]   [2/2] PLAN SeaVault
+[09:30:06]            - hub: would clone (a1b2c3d4)
+[09:30:06]            - gitlab: would CREATE
+
+2 of 2 repos would change (nothing was modified)
+```
+
+It reads the source and each target with `git ls-remote` and **never creates a
+repo and never writes to the hub** — so it is safe to run anywhere, any time.
+
+---
+
+## Per-route schedules
+
+Different repos need different frequencies. Give a route its own:
+
+```bash
+gitsync routes add archives github backup --schedule weekly
+gitsync route-schedule github-to-all hourly      # change an existing one
+gitsync route-schedule github-to-all inherit     # back to the global setting
+gitsync routes                                    # see every route + next run
+```
+
+```
+github-to-all      hourly (inherited)  github -> gitlab, forgejo, backup   next: in 58 min
+archives           weekly              github -> backup                    next: in 6 d
+
+timer fires: hourly (the most frequent route schedule)
+```
+
+The systemd timer fires as often as the *most demanding* route needs; routes
+with a looser schedule are skipped by `sync --scheduled` until they are due.
+Manual `gitsync sync` always runs everything.
+
+---
+
+## Webhook sync (instant, instead of polling)
+
+The timer polls hourly, so a push can sit unsynced for up to an hour. Let the
+platforms tell you instead:
+
+```bash
+gitsync webhooks --secret --rotate      # generate the shared secret
+gitsync webhooks --install              # systemd service, survives reboot
+gitsync webhooks --status
+```
+
+Then point each platform's webhook at
+`http://<this-box>:8791/hook/<platform-name>` and paste the same secret in.
+
+| Platform | Where | Auth it checks |
+|---|---|---|
+| GitHub | repo → Settings → Webhooks | `X-Hub-Signature-256` (HMAC-SHA256) |
+| GitLab | project → Settings → Webhooks | `X-Gitlab-Token` |
+| Forgejo/Gitea | repo → Settings → Webhooks | `X-Gitea-Token` |
+
+```bash
+curl -X POST -H "X-Gitlab-Token: $SECRET" \
+     -H "Content-Type: application/json" \
+     -d '{"project":{"name":"tradex"}}' \
+     http://localhost:8791/hook/gitlab
+```
+
+Only `push` events trigger anything (`ping` answers `pong`, everything else is
+ignored). Bursts for the same repo collapse into one sync, the sync runs
+detached so the platform never times out, and every request is authenticated
+**before** any sync is spawned — an unsigned request gets a 401 and is logged.
+
+**Security notes:** it binds to `127.0.0.1` by default (`--bind 0.0.0.0` only
+if you front it with a proxy or tunnel), the secret is stored mode 0600, and
+signature comparison is constant-time. An unset secret refuses to start.
+
+---
+
+## Disk usage and reclaim
+
+```bash
+gitsync disk                       # hub size, per-platform size, free space
+gitsync disk --top 10              # the 10 largest mirrors
+gitsync disk --orphans             # mirrors whose repo is gone upstream
+gitsync disk --gc --dry-run        # what a gc would do
+gitsync disk --gc --older-than 7   # gc only idle mirrors
+```
+
+```
+mirror hub: /root/.local/share/gitsync/mirrors
+  mirrors      : 53
+  total size   : 7.2G
+  filesystem   : 847.1G free of 916.5G
+  orphans      : 2 (696.0K)
+
+orphaned mirrors (repo gone from github):
+  mdsagar-com-claude1              600.0K
+  my-portable-llm-wikis             96.0K
+
+re-run with --orphans --prune-orphans to delete them
+```
+
+`--gc` runs `git reflog expire --expire=now --all` + `git gc --prune=now`,
+which reclaims loose objects **without touching any reachable commit** — a
+mirror is a cache, so this is always safe. `--orphans --prune-orphans` removes
+mirrors for repos that no longer exist on the source (they come back on the
+next sync if the repo reappears).
 
 ---
 

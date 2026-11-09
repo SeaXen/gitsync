@@ -4,6 +4,69 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-11-09
+
+Five new capabilities, plus a fix for a rendering bug that had silently
+broken most of the TUI since 1.0.0.
+
+### Added
+
+- **Webhook-driven sync** — new `gitsync/webhooks.py`: a stdlib HTTP receiver
+  that authenticates GitHub (`X-Hub-Signature-256`, HMAC-SHA256), GitLab and
+  Forgejo/Gitea (`X-Gitlab-Token` / `X-Gitea-Token`) push events and syncs
+  just that repo. `--install` wires a systemd service; `--secret --rotate`
+  manages the shared secret (stored 0600, constant-time compare). Binds to
+  127.0.0.1 by default, dedupes bursts, runs the sync detached so platforms
+  never time out, and refuses to start without a secret.
+- **`sync --dry-run`** — plans a sync with `git ls-remote` and reports
+  `would CREATE` / `N ref(s) behind` / `up to date` per target. Creates
+  nothing and writes nothing to the hub. Backed by a new read-only
+  `repo_url()` on every platform adapter.
+- **Per-route schedules** — a route may carry its own
+  `hourly|6h|12h|daily|weekly|off`, set via `routes add --schedule` or
+  `gitsync route-schedule NAME`. The systemd timer fires at the finest
+  schedule any route needs; `sync --scheduled` (what the timer runs) skips
+  routes that are not due yet, tracked in `route_state.json`. `gitsync routes`
+  now shows each route's schedule and next run.
+- **`gitsync disk`** — hub and per-platform sizes, the N largest mirrors,
+  orphan detection (mirrors whose repo no longer exists upstream) with
+  `--prune-orphans`, and safe reclaim via `--gc`
+  (`reflog expire` + `gc --prune=now`, optionally `--older-than N`).
+  Sizes count `st_blocks`, so they match `du`.
+- **`gitsync tokens`** + a doctor section — checks every credential for
+  expiry and revocation. GitLab via `/personal_access_tokens/self`, GitHub
+  via the `GitHub-Authentication-Token-Expiration` response header; Forgejo
+  and Bitbucket report "not exposed" rather than guessing.
+- **Dashboard health strip** — one line showing token health, hub size and
+  webhook state.
+- **Routes tab** now shows each route's schedule and next run.
+
+### Fixed
+
+- **The TUI's panel rendering was broken in every release so far.** The
+  dashboard, Platforms tab and Routes tab drew their boxes into separate
+  curses windows and staged them with `noutrefresh()`, but `commit_screen()`
+  only calls `doupdate()`, and the clock's bare stdscr flush then overwrote
+  those staged windows with blanks. Net effect: an almost-empty dashboard
+  and two blank tabs, with only the Log and History tabs (which write to
+  stdscr) working. Everything now draws onto stdscr, which is what the
+  commit path actually flushes. Found while adding the health strip.
+- `update_clock()` repainted 19 cells and called `doupdate()` to keep the
+  byte count small; it now requests a full redraw, which is a slightly
+  larger diff and always correct.
+- Webhook event detection treated GitLab's `Push Hook` header as an unknown
+  event and ignored it. GitHub (`push`), GitLab (`Push Hook`, `Tag Push
+  Hook`) and Forgejo (`push`) are all recognised now.
+- `subprocess.run` in the platform adapters inherited the TTY on stdin; it
+  now passes `stdin=DEVNULL` so a child can never read the terminal.
+- Removed the now-unused `box()` helper.
+
+### Changed
+
+- 58 unit assertions (was 20), covering the dry-run planner's URL probing,
+  size formatting, token-expiry levels, webhook auth/event/dedupe logic and
+  per-route schedule resolution.
+
 ## [1.1.1] - 2026-11-09
 
 Fixes the route selection behind multi-repo `mirror --to`, and documents

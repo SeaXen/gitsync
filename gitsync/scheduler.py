@@ -9,6 +9,27 @@ from . import config as C
 SYSTEMD_DIR = "/etc/systemd/system"
 SERVICE = "gitsync.service"
 TIMER = "gitsync.timer"
+WEBHOOK_SERVICE = "gitsync-webhooks.service"
+
+WEBHOOK_TEMPLATE = """[Unit]
+Description=gitsync webhook receiver (push-triggered sync)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HOME=%h
+Environment=GH_CONFIG_DIR=%h/.config/gh
+Environment=XDG_CONFIG_HOME=%h/.config
+ExecStart={gitsync} webhooks --serve --port {port} --bind {bind}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+"""
 
 SERVICE_TEMPLATE = """[Unit]
 Description=gitsync repository sync
@@ -21,7 +42,7 @@ Type=oneshot
 Environment=HOME=%h
 Environment=GH_CONFIG_DIR=%h/.config/gh
 Environment=XDG_CONFIG_HOME=%h/.config
-ExecStart={gitsync} sync --quiet
+ExecStart={gitsync} sync --scheduled --quiet
 StandardOutput=journal
 StandardError=journal
 """
@@ -73,10 +94,12 @@ def systemd_installed():
 def install_systemd(schedule_key=None):
     """write + enable the systemd service/timer for the given schedule"""
     cfg = C.load_config()
-    key = schedule_key or C.setting(cfg, "schedule", "hourly")
+    # the timer fires as often as the most demanding route needs; routes
+    # with a looser schedule are skipped by `sync --scheduled` itself
+    key = schedule_key or C.finest_schedule(cfg) or "hourly"
     cal = C.SCHEDULES.get(key, C.SCHEDULES["hourly"])["calendar"]
     if cal is None:
-        return uninstall_systemd()      # "off"
+        return uninstall_systemd()      # every route is off
 
     with open(os.path.join(SYSTEMD_DIR, SERVICE), "w") as f:
         f.write(SERVICE_TEMPLATE.format(gitsync=gitsync_bin()))
@@ -150,6 +173,36 @@ def install_cron(schedule_key=None):
     _sh(["crontab", "-"], stdin_text="\n".join(lines) + "\n")
     return True
 
+
+
+def install_webhooks(port=8791, bind="127.0.0.1"):
+    """write + enable the webhook receiver service"""
+    if not have_systemd():
+        return False
+    path = os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE)
+    with open(path, "w") as f:
+        f.write(WEBHOOK_TEMPLATE.format(gitsync=gitsync_bin(), port=port,
+                                        bind=bind))
+    _sh(["systemctl", "daemon-reload"])
+    _sh(["systemctl", "enable", "--now", WEBHOOK_SERVICE])
+    return True
+
+
+def uninstall_webhooks():
+    if not os.path.exists(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE)):
+        return False
+    _sh(["systemctl", "disable", "--now", WEBHOOK_SERVICE])
+    try:
+        os.unlink(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE))
+    except OSError:
+        pass
+    _sh(["systemctl", "daemon-reload"])
+    return True
+
+
+def webhooks_active():
+    rc, out, _ = _sh(["systemctl", "is-active", WEBHOOK_SERVICE])
+    return (out or "").strip() == "active"
 
 def status():
     """human-readable scheduler status"""

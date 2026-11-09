@@ -1,0 +1,126 @@
+"""Mirror-hub disk analytics and safe space reclaim.
+
+The hub holds one bare mirror per repo. Over time these accumulate loose
+objects, stale reflogs and unreachable objects — `git gc` reclaims that
+without touching any reachable commit, so it is safe to run on a mirror.
+"""
+
+import os
+import subprocess
+import time
+
+from . import config as C
+
+
+def dir_size(path):
+    """bytes of disk actually used by a directory tree.
+
+    Counts st_blocks (what du reports) rather than st_size, so sparse
+    files and per-file block rounding are reflected honestly — this is
+    the number that matters when asking "am I running out of space".
+    """
+    total = 0
+    stack = [path]
+    while stack:
+        d = stack.pop()
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    try:
+                        st = e.stat(follow_symlinks=False)
+                        if e.is_dir(follow_symlinks=False):
+                            stack.append(e.path)
+                        else:
+                            total += st.st_blocks * 512
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+    return total
+
+
+def human(n):
+    for unit in ("B", "K", "M", "G", "T", "P"):
+        if n < 1024 or unit == "P":
+            if unit == "B":
+                return "%d%s" % (n, unit)
+            return "%.1f%s" % (n, unit)
+        n /= 1024.0
+    return "%.1fP" % n
+
+
+def mirrors():
+    """[(name, path, bytes, mtime)] for every hub mirror, biggest first"""
+    out = []
+    root = C.MIRROR_DIR
+    if not os.path.isdir(root):
+        return out
+    for entry in sorted(os.listdir(root)):
+        full = os.path.join(root, entry)
+        if not entry.endswith(".git") or not os.path.isdir(full):
+            continue
+        try:
+            mtime = os.path.getmtime(full)
+        except OSError:
+            mtime = 0
+        out.append((entry[:-4], full, dir_size(full), mtime))
+    out.sort(key=lambda t: t[2], reverse=True)
+    return out
+
+
+def fs_free(path):
+    """(free, total) bytes for the filesystem holding path"""
+    try:
+        st = os.statvfs(path)
+        return st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
+    except OSError:
+        return None, None
+
+
+def gc_mirror(path, aggressive=False, timeout=600):
+    """reflog-expire + gc one mirror. Returns bytes reclaimed."""
+    before = dir_size(path)
+    steps = [["reflog", "expire", "--expire=now", "--all"],
+             ["gc", "--prune=now", "--quiet"] +
+             (["--aggressive"] if aggressive else [])]
+    for step in steps:
+        rc = subprocess.run(["git", "-C", path] + step,
+                            capture_output=True, timeout=timeout).returncode
+        if rc != 0:
+            break
+    return max(0, before - dir_size(path))
+
+
+def local_platform_paths(cfg):
+    """[(name, path)] for every local-type platform"""
+    out = []
+    for name, p in (cfg.get("platforms") or {}).items():
+        if p.get("type") == "local" and p.get("enabled") and p.get("path"):
+            out.append((name, p["path"]))
+    return out
+
+
+def orphans(source_names):
+    """hub mirrors whose repo no longer exists on the source.
+
+    source_names: iterable of current repo names (any case). Returns
+    [(name, path, bytes)] sorted biggest-first — safe to delete, since a
+    mirror is only a cache of something that must exist upstream.
+    """
+    live = {n.lower() for n in source_names}
+    out = []
+    for name, path, size, _ in mirrors():
+        if name.lower() not in live:
+            out.append((name, path, size))
+    out.sort(key=lambda t: t[2], reverse=True)
+    return out
+
+
+def delete_mirror(path):
+    """remove one hub mirror. Returns True on success."""
+    import shutil
+    try:
+        shutil.rmtree(path)
+        return True
+    except OSError:
+        return False

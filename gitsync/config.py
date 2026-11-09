@@ -64,9 +64,37 @@ SCHEDULES = {
                "label": "Every 12 hours"},
     "daily":  {"cron": "0 3 * * *", "calendar": "*-*-* 03:00:00",
                "label": "Once daily at 03:00"},
+    "weekly": {"cron": "0 3 * * 0", "calendar": "Sun *-*-* 03:00:00",
+               "label": "Once weekly, Sunday 03:00"},
     "off":    {"cron": None, "calendar": None, "label": "OFF (manual only)"},
 }
 
+# how often each schedule fires, in hours (for picking the finest one)
+SCHEDULE_HOURS = {"hourly": 1, "6h": 6, "12h": 12, "daily": 24,
+                  "weekly": 168, "off": None}
+
+
+
+def route_schedule(cfg, route):
+    """a route's own schedule, falling back to the global setting"""
+    return route.get("schedule") or setting(cfg, "schedule", "hourly")
+
+
+def finest_schedule(cfg):
+    """the most frequent schedule any route wants (drives the systemd timer).
+
+    Returns None when every route is off.
+    """
+    best = None
+    best_h = None
+    for r in routes(cfg):
+        key = route_schedule(cfg, r)
+        h = SCHEDULE_HOURS.get(key)
+        if h is None:
+            continue
+        if best_h is None or h < best_h:
+            best, best_h = key, h
+    return best
 
 def ensure_dirs():
     for d in (CONFIG_DIR, DATA_DIR, MIRROR_DIR):

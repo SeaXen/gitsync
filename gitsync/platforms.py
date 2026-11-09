@@ -5,6 +5,7 @@ Every adapter exposes:
     user()          -> str | None
     list_repos()    -> [{"name", "private", "clone_url"}]   (the source side)
     ensure_repo(r)  -> push URL (creates the repo if missing)  (target side)
+    repo_url(r)     -> expected URL, read-only (used by sync --dry-run)
 
 Auth: tokens are embedded in URLs used by the tool (config file is 0600),
 so no ambient git credential helper is required.
@@ -43,6 +44,7 @@ API_TIMEOUT = 120          # CLI/API calls (gh repo list, glab api, ...)
 def run(cmd, cwd=None, timeout=300):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
+                           stdin=subprocess.DEVNULL,
                            cwd=cwd, timeout=timeout)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
@@ -52,8 +54,12 @@ def run(cmd, cwd=None, timeout=300):
 
 
 def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
-          auth_style="token"):
-    """auth_style: 'token' (GitHub/Forgejo), 'private-token' or 'bearer' (GitLab)"""
+          auth_style="token", want_headers=False):
+    """auth_style: 'token' (GitHub/Forgejo), 'private-token' or 'bearer' (GitLab)
+
+    want_headers=True returns (status, body, headers) instead of
+    (status, body) — needed to read GitHub's token-expiry header.
+    """
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, method=method)
     if token:
@@ -68,10 +74,13 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read().decode() or "{}"
+            hdrs = {k.lower(): v for k, v in r.headers.items()}
             try:
-                return r.status, json.loads(body)
+                parsed = json.loads(body)
             except ValueError:
-                return r.status, body
+                parsed = body
+            return (r.status, parsed, hdrs) if want_headers \
+                else (r.status, parsed)
     except urllib.error.HTTPError as e:
         body = e.read().decode()
         try:
@@ -165,6 +174,25 @@ class GitHubPlatform:
             page += 1
         return repos
 
+    def repo_url(self, repo):
+        """expected URL without creating anything (read-only probing)"""
+        owner = self.owner or (self.user() or "")
+        return self._clone_url("%s/%s" % (owner, repo["name"]))
+
+    def token_info(self):
+        """expiry + scopes, for the token-expiry warning"""
+        if not self.token:
+            return {"has_token": False,
+                    "note": "gh CLI auth — expiry not exposed"}
+        rc, out, hdrs = _http("GET", "https://api.github.com/user",
+                              token=self.token, want_headers=True)
+        if not isinstance(out, dict) or not out.get("login"):
+            return {"has_token": True, "error": "token rejected"}
+        return {"has_token": True,
+                "expires_at": hdrs.get("github-authentication-token-expiration"),
+                "scopes": hdrs.get("x-oauth-scopes"),
+                "user": out.get("login")}
+
     def ensure_repo(self, repo):
         owner = self.owner or (self.user() or "")
         name = repo["name"]
@@ -245,6 +273,26 @@ class GitLabPlatform:
         if self.token and http_url:
             return http_url.replace("://", "://oauth2:%s@" % self.token, 1)
         return http_url
+
+    def repo_url(self, repo):
+        """expected URL without creating anything (read-only probing)"""
+        owner = self.owner or (self.user() or "")
+        return self._url_with_token("%s/%s.git" % (self.url, owner,
+                                                   repo["name"]))
+
+    def token_info(self):
+        """expiry + scopes, for the token-expiry warning"""
+        if not self.token:
+            return {"has_token": False}
+        rc, out = self._api("/personal_access_tokens/self")
+        if not isinstance(out, dict):
+            return {"has_token": True, "error": "cannot read token info"}
+        return {"has_token": True,
+                "expires_at": out.get("expires_at"),
+                "scopes": out.get("scopes"),
+                "active": out.get("active"),
+                "revoked": out.get("revoked"),
+                "user": out.get("name")}
 
     def ensure_repo(self, repo):
         name = repo["name"]
@@ -341,6 +389,16 @@ class ForgejoPlatform:
             page += 1
         return repos
 
+    def repo_url(self, repo):
+        """expected URL without creating anything (read-only probing)"""
+        owner = self.owner or (self.user() or "")
+        return self._push_url(owner, repo["name"])
+
+    def token_info(self):
+        """Forgejo/Gitea access tokens do not expire by default"""
+        return {"has_token": bool(self.token), "expires_at": None,
+                "note": "%s tokens do not expire" % self.ptype}
+
     def ensure_repo(self, repo):
         name = repo["name"]
         owner = self.owner or (self.user() or "")
@@ -398,6 +456,14 @@ class LocalPlatform:
                     repos.append({"name": entry[:-4], "private": True,
                                   "fork": False, "clone_url": full})
         return repos
+
+    def repo_url(self, repo):
+        """expected URL without creating anything (read-only probing)"""
+        return os.path.join(self.path, _fs_safe(repo["name"]) + ".git")
+
+    def token_info(self):
+        """local folders need no credentials"""
+        return {"has_token": False, "note": "local folder — no credentials"}
 
     def ensure_repo(self, repo):
         if not self.path:
@@ -475,6 +541,15 @@ class BitbucketPlatform:
             path = nxt.replace(self.url + "/2.0", "") if nxt else None
         return repos
 
+    def repo_url(self, repo):
+        """expected URL without creating anything (read-only probing)"""
+        return "%s/%s.git" % (self.url, repo["name"])
+
+    def token_info(self):
+        """Bitbucket app-password expiry is not exposed by the API"""
+        return {"has_token": bool(self.token), "expires_at": None,
+                "note": "Bitbucket app-password expiry not exposed"}
+
     def ensure_repo(self, repo):
         name = repo["name"]
         slug = name.lower().replace(" ", "-").replace("_", "-")
@@ -527,6 +602,14 @@ class GenericPlatform:
         if not self.template or "{name}" not in self.template:
             return False, "url_template must contain {name}"
         return True, "template: %s" % self.template
+
+    def repo_url(self, repo):
+        """generic platforms have no predictable URL"""
+        raise RuntimeError("generic platforms cannot probe repos")
+
+    def token_info(self):
+        return {"has_token": bool(self.token), "expires_at": None,
+                "note": "generic — expiry unknown"}
 
     def list_repos(self):
         raise RuntimeError("generic platforms cannot list repos — "

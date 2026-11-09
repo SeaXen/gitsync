@@ -26,6 +26,10 @@ from . import scheduler as S
 from . import notify as NT
 from datetime import datetime
 from . import sync as SYNC
+from . import tokencheck as TK
+from . import webhooks as WH
+
+WH_PORT = WH.DEFAULT_PORT
 
 
 def _platforms_table(cfg):
@@ -63,7 +67,13 @@ def cmd_sync(args):
             return 2
     only = [r for r in (args.repos or "").split(",") if r.strip()]
     t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet,
-                      only=only or None)
+                      only=only or None, dry_run=args.dry_run,
+                      scheduled=args.scheduled)
+    if args.dry_run:
+        n_upd = sum(1 for p in t.get("planned", [])
+                    if p.get("verdict") == "update")
+        print("\n%d of %d repos would change (nothing was modified)"
+              % (n_upd, t.get("repos", 0)))
     print("\n%d ok, %d partial, %d failed of %d repos in %ss"
           % (t["ok"], t["partial"], t["failed"], t["repos"],
              t["elapsed_sec"]))
@@ -297,6 +307,12 @@ def cmd_routes(args):
             print("route '%s' already exists" % name)
             return 2
         route = {"name": name, "source": source, "targets": targets}
+        if args.schedule:
+            if args.schedule not in C.SCHEDULES:
+                print("unknown schedule '%s' (choose from: %s)"
+                      % (args.schedule, ", ".join(C.SCHEDULES)))
+                return 2
+            route["schedule"] = args.schedule
         if args.include:
             route["include"] = [p.strip() for p in args.include.split(",")
                                 if p.strip()]
@@ -325,11 +341,42 @@ def cmd_routes(args):
 
     # list
     for r in C.routes(cfg):
-        print("%-18s %s -> %s" % (r.get("name"), r.get("source"),
-                                  ", ".join(r.get("targets", []))))
+        key = C.route_schedule(cfg, r)
+        own = "" if r.get("schedule") else " (inherited)"
+        print("%-18s %-19s %s -> %-26s next: %s"
+              % (r.get("name"), key + own, r.get("source"),
+                 ", ".join(r.get("targets", [])),
+                 SYNC.next_due_text(r, cfg)))
     if not C.routes(cfg):
         print("(no routes - add one: gitsync routes add main github gitlab)")
+    else:
+        print("\ntimer fires: %s (the most frequent route schedule)"
+              % (C.finest_schedule(cfg) or "off"))
+        print("per-route: gitsync route-schedule NAME hourly|6h|12h|daily|"
+              "weekly|off|inherit")
     return 0
+
+
+def cmd_route_sched(args):
+    """set or clear one route's own schedule"""
+    cfg = C.load_config()
+    for r in cfg.get("routes", []):
+        if r.get("name") == args.name:
+            if args.schedule == "inherit":
+                r.pop("schedule", None)
+                print("%s: schedule cleared (uses the global setting)"
+                      % args.name)
+            elif args.schedule in C.SCHEDULES:
+                r["schedule"] = args.schedule
+                print("%s: schedule set to %s" % (args.name, args.schedule))
+            else:
+                print("unknown schedule '%s' (choose from: %s)"
+                      % (args.schedule, ", ".join(C.SCHEDULES)))
+                return 2
+            C.save_config(cfg)
+            return 0
+    print("no such route: %s" % args.name)
+    return 2
 
 
 def cmd_compare(args):
@@ -525,6 +572,198 @@ def sh(cmd, timeout=30, stdin_text=None, cwd=None):
         return 1, "", str(e)
 
 
+def cmd_disk(args):
+    """mirror-hub disk usage, orphan detection and safe space reclaim"""
+    from . import diskutil as D
+    cfg = C.load_config()
+
+    # ---- orphan detection (mirrors whose repo is gone upstream) ----
+    src_name = args.route_source
+    if not src_name:
+        routes = C.routes(cfg)
+        src_name = routes[0].get("source") if routes else None
+    orphans = []
+    if src_name:
+        sp = C.platform(cfg, src_name)
+        if sp and sp.get("enabled"):
+            try:
+                live = [r["name"] for r in P.make(src_name, sp).list_repos()]
+                orphans = D.orphans(live)
+            except Exception as e:
+                print("cannot list %s to check for orphans: %s"
+                      % (src_name, e))
+
+    ms = D.mirrors()
+    total = sum(m[2] for m in ms)
+    free, fstot = D.fs_free(C.MIRROR_DIR)
+
+    print("mirror hub: %s" % C.MIRROR_DIR)
+    print("  mirrors      : %d" % len(ms))
+    print("  total size   : %s" % D.human(total))
+    if free:
+        print("  filesystem   : %s free of %s" % (D.human(free),
+                                                  D.human(fstot)))
+    print("  orphans      : %d (%s)"
+          % (len(orphans),
+             D.human(sum(o[2] for o in orphans)) if orphans else "nothing to reclaim"))
+
+    for name, path in D.local_platform_paths(cfg):
+        if os.path.realpath(path) == os.path.realpath(C.MIRROR_DIR):
+            continue
+        if not os.path.isdir(path):
+            continue
+        sz = D.dir_size(path)
+        n = len([e for e in os.listdir(path) if e.endswith(".git")])
+        print("\nlocal target '%s': %s" % (name, path))
+        print("  mirrors      : %d" % n)
+        print("  total size   : %s" % D.human(sz))
+
+    if args.orphans:
+        print("\norphaned mirrors (repo gone from %s):" % src_name)
+        if not orphans:
+            print("  none — hub matches the source")
+        for name, path, size in orphans:
+            print("  %-30s %8s" % (name, D.human(size)))
+        if orphans and args.prune_orphans:
+            print("\nremoving %d orphaned mirror(s)..." % len(orphans))
+            ok = 0
+            for name, path, size in orphans:
+                if D.delete_mirror(path):
+                    print("  removed %-24s %s" % (name, D.human(size)))
+                    ok += 1
+                else:
+                    print("  FAILED  %s" % name)
+            print("\n%d removed, %s reclaimed" % (ok, D.human(
+                sum(o[2] for o in orphans[:ok]))))
+        elif orphans:
+            print("\nre-run with --orphans --prune-orphans to delete them")
+
+    if args.top:
+        print("\nlargest mirrors:")
+        for name, path, size, mt in ms[:args.top]:
+            age = (time.time() - mt) / 86400
+            print("  %-30s %8s  last update %5.1f d ago"
+                  % (name, D.human(size), age))
+
+    if args.gc:
+        older = args.older_than
+        todo = ms
+        if older:
+            cutoff = time.time() - older * 86400
+            todo = [m for m in ms if m[3] < cutoff]
+        if not todo:
+            print("\nnothing to gc (no mirror older than %s d)" % older)
+            return 0
+        if args.dry_run:
+            print("\ndry run: would gc %d mirror(s)%s"
+                  % (len(todo), " (idle > %s d)" % older if older else ""))
+            return 0
+        print("\ngc-ing %d mirror(s)%s — this can take a while..."
+              % (len(todo), " (idle > %s d)" % older if older else ""))
+        reclaimed = 0
+        for i, (name, path, size, mt) in enumerate(todo, 1):
+            got = D.gc_mirror(path, aggressive=args.aggressive)
+            reclaimed += got
+            print("  [%d/%d] %-28s %s -> %s"
+                  % (i, len(todo), name, D.human(size),
+                     D.human(max(0, size - got))))
+        print("\nreclaimed %s" % D.human(reclaimed))
+    return 0
+
+
+def cmd_webhooks(args):
+    """run / install / configure the webhook receiver"""
+    from . import webhooks as WH
+
+    if args.secret:
+        if args.rotate:
+            val = WH.rotate_secret()
+            print("new webhook secret generated (%d chars):" % len(val))
+            print("  %s" % val)
+            print("\nstored in %s (mode 600)" % WH._secret_path())
+            print("put this same value in each platform's webhook settings.")
+            return 0
+        if args.show:
+            s = WH.get_secret()
+            if not s:
+                print("no secret set — generate one with:")
+                print("  gitsync webhooks --secret --rotate")
+                return 2
+            print(s)
+            return 0
+        print("use --rotate to generate a secret, or --show to print it")
+        return 2
+
+    if args.uninstall:
+        ok = S.uninstall_webhooks()
+        print("webhook service removed" if ok else
+              "webhook service not installed")
+        return 0
+
+    if args.install:
+        ok = S.install_webhooks(port=args.port, bind=args.bind)
+        if not ok:
+            print("install failed (needs root + systemd)")
+            return 1
+        print("webhook receiver installed and started")
+        print("  port : %d" % args.port)
+        print("  bind : %s" % args.bind)
+        print("  log  : journalctl -u gitsync-webhooks -f")
+        print("\nconfigure each platform to POST to:")
+        print("  http://<this-box>:%d/hook/<platform-name>" % args.port)
+        print("\nset the shared secret first if you have not:")
+        print("  gitsync webhooks --secret --rotate")
+        return 0
+
+    if args.status:
+        rc, out, _ = sh(["systemctl", "is-active", "gitsync-webhooks"],
+                        timeout=20)
+        active = (out or "").strip()
+        print("webhook service : %s" % (active or "not installed"))
+        if active == "active":
+            rc2, out2, _ = sh(["systemctl", "status", "gitsync-webhooks",
+                               "--no-pager", "-n", "0"], timeout=20)
+            for line in (out2 or "").splitlines():
+                if "Main PID" in line or "Active:" in line:
+                    print("  " + line.strip())
+        print("secret          : %s"
+              % ("set" if WH.get_secret() else "NOT SET"))
+        print("port            : %d" % args.port)
+        cfg = C.load_config()
+        for name, p in (cfg.get("platforms") or {}).items():
+            if p.get("enabled") and p.get("type") in WH.AUTH_STYLE:
+                print("  endpoint       : /hook/%s (%s)"
+                      % (name, p.get("type")))
+        return 0
+
+    return WH.serve(port=args.port, bind=args.bind, allow=args.allow)
+
+
+def cmd_tokens(args):
+    """check every platform's credential for expiry / revocation"""
+    cfg = C.load_config()
+    res = TK.check(cfg)
+    if not res:
+        print("no platforms configured")
+        return 2
+    print("token health\n")
+    bad = 0
+    for t in res:
+        mark = {"ok": "  ok  ", "warning": " WARN ",
+                "critical": " CRIT ", "expired": " DEAD ",
+                "unknown": "  ?   "}.get(t["level"], "  ?   ")
+        print("  %s %-14s %-9s %s" % (mark, t["platform"], t["type"],
+                                     t.get("note", "")))
+        if t["level"] in ("expired", "critical", "warning"):
+            bad += 1
+    print("\n%s" % TK.summary(res))
+    if bad:
+        print("\nGitHub note: expiry is only visible when a token is set.")
+        print("  gh-CLI auth (the default) does not expose it — set one with:")
+        print("  gitsync platforms edit github --token ghp_...")
+    return 1 if bad else 0
+
+
 def cmd_doctor(args):
     """health check: config, platforms, disk, scheduler, hub"""
     cfg = C.load_config()
@@ -542,6 +781,19 @@ def cmd_doctor(args):
             problems.append("platform %s failing" % name)
         print("  %-14s %-9s %-4s %-5s %s"
               % (name, ptype, en, ok, info))
+    print("\ntokens:")
+    tok = TK.check(cfg)
+    if not tok:
+        print("  (none)")
+    for t in tok:
+        mark = {"ok": "  ok ", "warning": "WARN", "critical": "CRIT",
+                "expired": "DEAD", "unknown": "  ? "}.get(t["level"], "  ? ")
+        print("  %-14s %-5s %s" % (t["platform"], mark, t.get("note", "")))
+        if t["level"] in ("expired", "critical"):
+            problems.append("token %s: %s" % (t["platform"],
+                                              t.get("note", "problem")))
+        elif t["level"] == "warning":
+            problems.append("token %s expiring soon" % t["platform"])
     print("\nroutes:")
     if not C.routes(cfg):
         problems.append("no routes")
@@ -716,7 +968,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (20 assertions)", c_units)
+    check("unit checks (58 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -745,7 +997,7 @@ assert P.ssh_url('git.example.com', 'me', 'repo', 2222) == 'ssh://git@git.exampl
 assert P.ssh_url('https://codeberg.org', 'me', 'repo') == 'git@codeberg.org:me/repo.git'
 assert P._norm('My-Repo.Name') == 'myreponame'
 assert P._fs_safe('a b/c') == 'a_b_c'
-assert set(C.SCHEDULES) == {'hourly', '6h', '12h', 'daily', 'off'}
+assert set(C.SCHEDULES) == {'hourly', '6h', '12h', 'daily', 'weekly', 'off'}
 assert C.SCHEDULES['hourly']['cron'] == '0 * * * *'
 assert C.SCHEDULES['daily']['calendar'] == '*-*-* 03:00:00'
 cfg = {'settings': {'notify': {}}}
@@ -769,6 +1021,72 @@ assert len(SY._filter_repos(repos, {}, [])) == 3
 assert len(SY._filter_repos(repos, {}, None)) == 3
 spark = tui._sparkline([0, 5, 10])
 assert len(spark) == 3 and spark[0] == ' ' and spark[-1] == '@'
+
+# ---- dry-run planner: repo_url must not create anything ----
+from gitsync import diskutil as D
+from gitsync import tokencheck as TK
+from gitsync import webhooks as WH
+
+assert D.human(0) == '0B'
+assert D.human(1023) == '1023B'
+assert D.human(1024) == '1.0K'
+assert D.human(1536) == '1.5K'
+assert D.human(1024 ** 3) == '1.0G'
+
+# token expiry levels
+assert TK.level_for(200) == 'ok'
+assert TK.level_for(20) == 'warning'
+assert TK.level_for(5) == 'critical'
+assert TK.level_for(0) == 'critical'
+assert TK.level_for(-1) == 'expired'
+assert TK.level_for(None) == 'unknown'
+assert TK._parse('2026-12-01') is not None
+assert TK._parse('2026-12-01T10:00:00Z') is not None
+assert TK._parse('2026-12-01 10:00:00 UTC') is not None
+assert TK._parse('garbage') is None
+assert TK.days_left(None) is None
+
+# webhook event mapping (GitLab uses 'Push Hook', GitHub uses 'push')
+assert WH._event({}, 'push') == 'push'
+assert WH._event({}, 'Push Hook') == 'push'
+assert WH._event({}, 'Tag Push Hook') == 'push'
+assert WH._event({}, 'ping') == 'ping'
+assert WH._event({}, 'Merge Request Hook') == 'other'
+assert WH._event({'commits': [1]}, None) == 'push'
+assert WH._event({'zen': 'x'}, None) == 'ping'
+assert WH._event({}, None) == 'other'
+# payload repo-name extraction
+assert WH._repo_name({'repository': {'name': 'tradex'}}) == 'tradex'
+assert WH._repo_name({'project': {'path': 'SeaVault'}}) == 'SeaVault'
+assert WH._repo_name({}) is None
+
+# an unset secret must never authenticate
+import hmac as _hmac, hashlib as _hl, json as _js
+_body = _js.dumps({'repository': {'name': 'x'}}).encode()
+_sig = 'sha256=' + _hmac.new(b'k', _body, _hl.sha256).hexdigest()
+ok, _ = WH._verify('hmac-sha256', '', {'X-Hub-Signature-256': _sig}, _body)
+assert ok is False
+ok, _ = WH._verify('hmac-sha256', 'k', {'X-Hub-Signature-256': _sig}, _body)
+assert ok is True
+ok, _ = WH._verify('hmac-sha256', 'k', {'X-Hub-Signature-256': 'sha256=bad'}, _body)
+assert ok is False
+ok, _ = WH._verify('token', 'k', {'X-Gitlab-Token': 'k'}, _body)
+assert ok is True
+ok, _ = WH._verify('token', 'k', {'X-Gitlab-Token': 'wrong'}, _body)
+assert ok is False
+
+# per-route schedule resolution + finest
+assert C.route_schedule(cfg, {}) == 'hourly'
+assert C.route_schedule(cfg, {'schedule': 'daily'}) == 'daily'
+assert C.SCHEDULE_HOURS['hourly'] == 1
+assert C.SCHEDULE_HOURS['weekly'] == 168
+_c2 = {'routes': [{'name': 'a', 'schedule': 'weekly'},
+                  {'name': 'b', 'schedule': '6h'},
+                  {'name': 'c', 'schedule': 'daily'}]}
+assert C.finest_schedule(_c2) == '6h'
+_c3 = {'routes': [{'name': 'a', 'schedule': 'off'}]}
+assert C.finest_schedule(_c3) is None
+
 print('all unit checks passed')
 """
 
@@ -904,6 +1222,10 @@ def main(argv=None):
     sp.add_argument("--route", help="only this route")
     sp.add_argument("--to", help="only push to this platform")
     sp.add_argument("--repos", help="comma-separated repo names to sync")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="show what would change, change nothing")
+    sp.add_argument("--scheduled", action="store_true",
+                    help="skip routes whose own schedule is not due yet")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(func=cmd_sync)
 
@@ -954,7 +1276,16 @@ def main(argv=None):
                     help="add: NAME SOURCE t1,t2 | remove: NAME")
     sp.add_argument("--include", help="comma-separated globs to include")
     sp.add_argument("--exclude", help="comma-separated globs to skip")
+    sp.add_argument("--schedule", choices=sorted(C.SCHEDULES),
+                    help="this route's own sync frequency")
     sp.set_defaults(func=cmd_routes)
+
+    sp = sub.add_parser("route-schedule",
+                        help="set one route's sync frequency")
+    sp.add_argument("name", help="route name")
+    sp.add_argument("schedule",
+                    help="hourly|6h|12h|daily|weekly|off|inherit")
+    sp.set_defaults(func=cmd_route_sched)
 
     sp = sub.add_parser("compare", help="drift check: HEADs across platforms")
     sp.add_argument("--route", help="only this route")
@@ -975,6 +1306,50 @@ def main(argv=None):
     sp.add_argument("--private-only", action="store_true")
     sp.add_argument("--public-only", action="store_true")
     sp.set_defaults(func=cmd_repos)
+
+    sp = sub.add_parser("disk", help="hub disk usage, orphans, reclaim")
+    sp.add_argument("--top", type=int, default=0, metavar="N",
+                    help="list the N largest mirrors")
+    sp.add_argument("--gc", action="store_true",
+                    help="reflog-expire + gc mirrors to reclaim space")
+    sp.add_argument("--aggressive", action="store_true",
+                    help="slower, smaller result (repacks everything)")
+    sp.add_argument("--older-than", type=int, default=0, metavar="DAYS",
+                    help="only gc mirrors idle longer than this")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="with --gc: report, change nothing")
+    sp.add_argument("--orphans", action="store_true",
+                    help="list hub mirrors whose repo is gone upstream")
+    sp.add_argument("--prune-orphans", action="store_true",
+                    help="with --orphans: delete those mirrors")
+    sp.add_argument("--route-source", help="platform to compare orphans against")
+    sp.set_defaults(func=cmd_disk)
+
+    sp = sub.add_parser("webhooks", help="receive push events, sync instantly")
+    sp.add_argument("--serve", action="store_true",
+                    help="run the receiver in the foreground (default)")
+    sp.add_argument("--install", action="store_true",
+                    help="install + start a systemd service")
+    sp.add_argument("--uninstall", action="store_true",
+                    help="remove the systemd service")
+    sp.add_argument("--status", action="store_true",
+                    help="is the receiver running?")
+    sp.add_argument("--port", type=int, default=WH_PORT,
+                    help="listen port (default %d)" % WH_PORT)
+    sp.add_argument("--bind", default="127.0.0.1",
+                    help="bind address (default 127.0.0.1)")
+    sp.add_argument("--allow",
+                    help="comma-separated source IPs to accept")
+    sp.add_argument("--secret", action="store_true",
+                    help="manage the shared secret")
+    sp.add_argument("--rotate", action="store_true",
+                    help="generate a new shared secret")
+    sp.add_argument("--show", action="store_true",
+                    help="print the current shared secret")
+    sp.set_defaults(func=cmd_webhooks)
+
+    sp = sub.add_parser("tokens", help="check credentials for expiry")
+    sp.set_defaults(func=cmd_tokens)
 
     sp = sub.add_parser("doctor", help="health check: everything")
     sp.add_argument("--fix", action="store_true",

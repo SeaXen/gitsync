@@ -133,8 +133,154 @@ def _filter_repos(repos, route, only=None):
     return repos
 
 
-def run_sync(cfg=None, route_name=None, quiet=False, only=None):
-    """Run all routes (or one). Returns a summary dict."""
+def _remote_head(url, timeout=60):
+    """HEAD sha of a remote, or None if unreachable / no refs"""
+    rc, out, _ = P.run(["git", "ls-remote", url, "HEAD"], timeout=timeout)
+    if rc != 0 or not out.strip():
+        return None
+    return out.split()[0]
+
+
+def _plan_repo(repo, source, targets, mode):
+    """what a sync of this repo WOULD do — read-only, no mutations.
+
+    Returns a list of human-readable action strings. Uses git ls-remote
+    against the source and each target's expected URL, so it never creates
+    a repo and never writes to the hub.
+    """
+    name = repo["name"]
+    src_url = repo.get("clone_url")
+    src_head = _remote_head(src_url) if src_url else None
+    if src_head is None:
+        return ["cannot reach source %s" % name], "error"
+
+    hub = mirror_path(name)
+    actions = []
+    if os.path.isdir(hub) and mirror_is_valid(hub):
+        hub_head = _remote_head(hub)
+        if hub_head == src_head:
+            actions.append("hub up to date")
+        else:
+            actions.append("hub: %s -> %s" % ((hub_head or "none")[:8],
+                                              src_head[:8]))
+    else:
+        actions.append("hub: would clone (%s)" % src_head[:8])
+        behind += 1
+
+    behind = 0
+    for tname, tplat in targets.items():
+        try:
+            url = tplat.repo_url(repo)
+        except Exception as e:
+            actions.append("%s: cannot probe (%s)" % (tname, str(e)[:60]))
+            behind += 1
+            continue
+        thead = _remote_head(url)
+        if thead is None:
+            actions.append("%s: would CREATE" % tname)
+            behind += 1
+            continue
+        if thead == src_head:
+            actions.append("%s: up to date" % tname)
+            continue
+        # count how many commits the target is missing
+        rc, out, _ = P.run(["git", "ls-remote", url, "refs/heads/*"],
+                           timeout=60)
+        refs = [l.split() for l in out.strip().splitlines() if l.strip()]
+        # count objects the target lacks by asking the source
+        rc2, cnt, _ = P.run(
+            ["git", "ls-remote", src_url, "refs/heads/*"], timeout=60)
+        src_refs = {l.split()[1]: l.split()[0]
+                    for l in cnt.strip().splitlines() if l.strip()}
+        missing = [r for r, sha in refs if src_refs.get(r) != sha]
+        if missing:
+            actions.append("%s: %d ref(s) behind (%s)"
+                           % (tname, len(missing), ", ".join(
+                               m.split("/")[-1] for m in missing[:3])))
+            behind += len(missing)
+        else:
+            actions.append("%s: would update" % tname)
+    return actions, ("update" if behind else "ok")
+
+
+ROUTE_STATE_FILE = "route_state.json"
+
+
+def _route_state_path():
+    C.ensure_dirs()
+    return os.path.join(C.DATA_DIR, ROUTE_STATE_FILE)
+
+
+def _load_route_state():
+    try:
+        with open(_route_state_path()) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_route_state(state):
+    try:
+        with open(_route_state_path(), "w") as f:
+            json.dump(state, f)
+    except OSError:
+        pass
+
+
+def route_due(route, cfg, now=None):
+    """is this route due to run? (False = it ran too recently)"""
+    import time as _t
+    now = now or _t.time()
+    key = C.route_schedule(cfg, route)
+    hours = C.SCHEDULE_HOURS.get(key)
+    if hours is None:            # "off" — timer never runs it
+        return False, "schedule is off"
+    last = _load_route_state().get(route.get("name"))
+    if not last:
+        return True, "never run"
+    elapsed_h = (now - last) / 3600.0
+    if elapsed_h >= hours:
+        return True, "due (last run %.1fh ago)" % elapsed_h
+    return False, "not due for %.1fh" % (hours - elapsed_h)
+
+
+def mark_route_run(route, now=None):
+    import time as _t
+    st = _load_route_state()
+    st[route.get("name")] = now or _t.time()
+    _save_route_state(st)
+
+
+def next_due_text(route, cfg, now=None):
+    """human-readable 'next run' for a route"""
+    import time as _t
+    now = now or _t.time()
+    key = C.route_schedule(cfg, route)
+    hours = C.SCHEDULE_HOURS.get(key)
+    if hours is None:
+        return "off"
+    last = _load_route_state().get(route.get("name"))
+    if not last:
+        return "on next timer run"
+    due_at = last + hours * 3600
+    delta = due_at - now
+    if delta <= 0:
+        return "now"
+    if delta < 3600:
+        return "in %d min" % int(delta / 60)
+    if delta < 86400:
+        return "in %.1f h" % (delta / 3600)
+    return "in %.1f d" % (delta / 86400)
+
+
+def run_sync(cfg=None, route_name=None, quiet=False, only=None,
+             dry_run=False, scheduled=False):
+    """Run all routes (or one). Returns a summary dict.
+
+    dry_run=True    computes what would change without touching anything.
+    scheduled=True  skip routes whose own schedule says they are not due
+                    yet (this is what the systemd timer uses).
+    """
     global _start
     # one run at a time — the timer and manual runs must never overlap
     import fcntl
@@ -161,9 +307,17 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None):
         selected = [r for r in selected if r.get("name") == route_name]
 
     totals = {"routes": len(selected), "repos": 0, "ok": 0,
-              "failed": 0, "partial": 0, "failures": []}
+              "failed": 0, "partial": 0, "failures": [], "planned": [],
+              "dry_run": dry_run, "skipped": 0}
 
     for route in selected:
+        if scheduled:
+            due, why = route_due(route, cfg)
+            if not due:
+                log("route '%s': skipped — %s" % (route.get("name"), why))
+                totals["skipped"] = totals.get("skipped", 0) + 1
+                continue
+        mark_route_run(route)
         sname = route.get("source")
         sp = C.platform(cfg, sname)
         if not sp or not sp.get("enabled"):
@@ -180,8 +334,9 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None):
             log("route '%s': no enabled targets — skipped" % route.get("name"))
             continue
 
-        log("=== route '%s': %s -> %s (workers=%d, mode=%s) ==="
-            % (route.get("name"), sname, ", ".join(targets), workers, mode))
+        log("=== route '%s': %s -> %s (workers=%d, mode=%s%s) ==="
+            % (route.get("name"), sname, ", ".join(targets), workers, mode,
+               ", DRY RUN" if dry_run else ""))
         progress["route"] = route.get("name")
         try:
             repos = source.list_repos()
@@ -205,14 +360,23 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None):
         def work(repo):
             progress["active"][repo["name"]] = "syncing"
             try:
-                status, detail, errors = sync_repo(repo, source, targets,
-                                                   mode)
+                if dry_run:
+                    actions, verdict = _plan_repo(repo, source, targets, mode)
+                    status, detail, errors = verdict, "", actions
+                else:
+                    status, detail, errors = sync_repo(repo, source, targets,
+                                                       mode)
             finally:
                 progress["active"].pop(repo["name"], None)
                 progress["done"] += 1
             with dlock:
                 done["n"] += 1
                 idx = done["n"]
+            if dry_run:
+                log("  [%d/%d] PLAN %s" % (idx, len(repos), repo["name"]))
+                for a in errors:
+                    log("           - %s" % a)
+                return repo, status, errors
             if status == "ok":
                 log("  [%d/%d] OK   %s -> %s"
                     % (idx, len(repos), repo["name"], detail))
@@ -234,6 +398,13 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None):
                     totals["failures"].append({"route": route.get("name"),
                                                "repo": "?", "error": str(e)[:200]})
                     continue
+                if dry_run:
+                    totals["planned"].append(
+                        {"route": route.get("name"), "repo": repo["name"],
+                         "verdict": status, "actions": errors})
+                    if status == "update":
+                        totals["ok"] += 1
+                    continue
                 if status == "ok":
                     totals["ok"] += 1
                 elif status == "partial":
@@ -250,9 +421,15 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None):
     elapsed = round(time.time() - _start, 1)
     totals["elapsed_sec"] = elapsed
     totals["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log("=== sync done: %d ok, %d partial, %d failed of %d repos in %ss ==="
-        % (totals["ok"], totals["partial"], totals["failed"],
-           totals["repos"], elapsed))
+    if dry_run:
+        n_upd = sum(1 for p in totals["planned"]
+                    if p["verdict"] == "update")
+        log("=== dry run done: %d of %d repos would change (%ss) ==="
+            % (n_upd, totals["repos"], elapsed))
+    else:
+        log("=== sync done: %d ok, %d partial, %d failed of %d repos in %ss ==="
+            % (totals["ok"], totals["partial"], totals["failed"],
+               totals["repos"], elapsed))
     _record(totals)
     try:
         if NT.enabled(cfg):
