@@ -968,7 +968,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (75 assertions)", c_units)
+    check("unit checks (76 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1110,6 +1110,11 @@ assert SY._short_error('') == ''
 for _cls in (P.GitHubPlatform, P.GitLabPlatform, P.ForgejoPlatform,
              P.LocalPlatform):
     assert hasattr(_cls, 'prepare_push')
+# repo_url must format every URL part (regression: one % arg too many)
+_gp = P.GitLabPlatform('gl', {'url': 'https://gitlab.com',
+                      'owner': 'me', 'token': 'tok'})
+assert _gp.repo_url({'name': '_weird name'}) == 'https://oauth2:tok@gitlab.com/me/weird-name.git'
+
 
 print('all unit checks passed')
 """

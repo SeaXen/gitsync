@@ -4,6 +4,21 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-11-09
+
+### Fixed
+
+- **`sync --dry-run` could not probe GitLab targets.** `repo_url()` built the
+  URL with two `%s` placeholders and three arguments, so the plan printed
+  `gitlab: cannot probe (not all arguments converted during string
+  formatting)` instead of the real state. The URL is now built correctly and
+  the repo name is passed through the same `gitlab_path()` sanitiser as
+  creation. Regression test added.
+
+### Changed
+
+- 76 unit assertions (was 75).
+
 ## [1.2.1] - 2026-11-09
 
 Fixes the three things that made a sync report "partial" on a healthy setup.

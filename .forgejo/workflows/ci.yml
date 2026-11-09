@@ -157,4 +157,9 @@ jobs:
           for _cls in (P.GitHubPlatform, P.GitLabPlatform, P.ForgejoPlatform,
                        P.LocalPlatform):
               assert hasattr(_cls, 'prepare_push')
+          # repo_url must format every URL part (regression: one % arg too many)
+          _gp = P.GitLabPlatform('gl', {'url': 'https://gitlab.com',
+                      'owner': 'me', 'token': 'tok'})
+          assert _gp.repo_url({'name': '_weird name'}) == 'https://oauth2:tok@gitlab.com/me/weird-name.git'
+
           PY

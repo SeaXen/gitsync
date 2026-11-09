@@ -339,8 +339,8 @@ class GitLabPlatform:
     def repo_url(self, repo):
         """expected URL without creating anything (read-only probing)"""
         owner = self.owner or (self.user() or "")
-        return self._url_with_token("%s/%s.git" % (self.url, owner,
-                                                   repo["name"]))
+        return self._url_with_token("%s/%s/%s.git" % (self.url, owner,
+                                                      gitlab_path(repo["name"])))
 
     def prepare_push(self, repo, push_url):
         """Enable force-push on protected branches.
