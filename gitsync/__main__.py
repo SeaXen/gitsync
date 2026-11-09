@@ -85,12 +85,22 @@ def cmd_sync(args):
     if args.dry_run:
         n_upd = sum(1 for p in t.get("planned", [])
                     if p.get("verdict") == "update")
+        n_err = sum(1 for p in t.get("planned", [])
+                    if p.get("verdict") == "error")
         print("\n%d of %d repos would change (nothing was modified)"
               % (n_upd, t.get("repos", 0)))
+        print("\n%d ok, %d partial, %d failed of %d repos in %ss"
+              % (t["ok"], t["partial"], t["failed"], t["repos"],
+                 t["elapsed_sec"]))
+        # a dry run that could not read a repo is a failure, not a preview
+        return 1 if n_err else 0
     print("\n%d ok, %d partial, %d failed of %d repos in %ss"
           % (t["ok"], t["partial"], t["failed"], t["repos"],
              t["elapsed_sec"]))
-    return 0 if t["failed"] == 0 else 1
+    # partial is not success: a target that refused the push, or a mesh that
+    # skipped a conflict, must be visible in the exit code (the timer mails
+    # on non-zero)
+    return 0 if (t["failed"] == 0 and t["partial"] == 0) else 1
 
 
 def cmd_status(args):
@@ -997,7 +1007,7 @@ def cmd_doctor(args):
     except OSError:
         n_mirrors = 0
     print("  mirror hub    : %d mirrors (%s)" % (n_mirrors, C.MIRROR_DIR))
-    rc, out, _ = sh(["bash", "-c", "df -h %s | tail -1" % C.DATA_DIR],
+    rc, out, _ = sh(["df", "-h", C.DATA_DIR],
                     timeout=30)
     parts = (out or "").split()
     if len(parts) > 4:
@@ -1204,6 +1214,33 @@ def cmd_ci(args):
                                env=e2, timeout=120)
             if "WOULD DELETE" in (p.stdout or ""):
                 raise RuntimeError("safe mode must never report a prune")
+
+            # and the real pushes behave the same way (P0-7): safe keeps a
+            # branch only the destination has, full removes it
+            def dest_refs():
+                o = subprocess.run(
+                    ["git", "-C", os.path.join(dst_dir, "y.git"),
+                     "for-each-ref", "--format=%(refname:short)"],
+                    capture_output=True, text=True).stdout
+                return o.split()
+
+            cfg["settings"]["mode"] = "safe"
+            with open(os.path.join(cfgdir, "config.json"), "w") as f:
+                _json.dump(cfg, f)
+            subprocess.run(["python3", "-m", "gitsync", "sync"],
+                           capture_output=True, text=True, env=e2,
+                           timeout=120)
+            if "only-on-target" not in dest_refs():
+                raise RuntimeError("safe mode deleted a branch only the "
+                                   "destination had")
+            cfg["settings"]["mode"] = "full"
+            with open(os.path.join(cfgdir, "config.json"), "w") as f:
+                _json.dump(cfg, f)
+            subprocess.run(["python3", "-m", "gitsync", "sync"],
+                           capture_output=True, text=True, env=e2,
+                           timeout=120)
+            if "only-on-target" in dest_refs():
+                raise RuntimeError("full mode did not prune the stale branch")
 
             for argv in (["status"], ["routes"],
                          ["stars", "list", "src"]):

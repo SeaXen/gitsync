@@ -546,15 +546,16 @@ class ForgejoPlatform:
         # HTTPS must carry credentials, or a private clone/push fails: stdin
         # is /dev/null during a sync, so git cannot prompt. The token is
         # percent-encoded so one containing @ or / cannot break the URL.
+        # The scheme follows the configured URL: a LAN Forgejo served over
+        # plain http must not be forced to https.
+        scheme = "https" if self.url.startswith("https") else "http"
+        host = self.url.replace("https://", "").replace("http://", "")
         user = self.cfg.get("user") or self._login() or "git"
         if self.token:
-            return "https://%s:%s@%s/%s/%s.git" % (
-                user, urllib.parse.quote(self.token, safe=""),
-                self.url.replace("https://", "").replace("http://", ""),
-                owner, name)
-        return "https://%s/%s/%s.git" % (
-            self.url.replace("https://", "").replace("http://", ""),
-            owner, name)
+            return "%s://%s:%s@%s/%s/%s.git" % (
+                scheme, user, urllib.parse.quote(self.token, safe=""),
+                host, owner, name)
+        return "%s://%s/%s/%s.git" % (scheme, host, owner, name)
 
     def list_repos(self):
         repos, page = [], 1

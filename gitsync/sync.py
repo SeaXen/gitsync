@@ -30,13 +30,17 @@ def reset_progress():
 
 
 def log(msg):
-    line = "[%s] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), msg)
+    # redacted: git error text echoes the remote URL, and the URL carries
+    # the token. The file is 0600 for the same reason.
+    line = "[%s] %s" % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        _redact(str(msg)))
     with _log_lock:
         print(line, flush=True)
         try:
             C.ensure_dirs()
             with open(C.LOG_FILE, "a") as f:
                 f.write(line + "\n")
+            os.chmod(C.LOG_FILE, 0o600)
         except OSError:
             pass
 
@@ -65,10 +69,11 @@ def sync_repo(repo, source, targets, mode):
         P.run(["rm", "-rf", hub])
     if os.path.isdir(hub):
         P.run(["git", "remote", "set-url", "origin", src_url], cwd=hub)
+        _secure_hub_config(hub)
         rc, _, err = P.run(["git", "remote", "update", "--prune"], cwd=hub,
                             timeout=P.GIT_TIMEOUT)
         if rc != 0:
-            return "mirror-update-failed", err.strip()[:200], []
+            return "mirror-update-failed", _redact(err.strip())[:200], []
     else:
         rc, _, err = P.run(["git", "clone", "--mirror", src_url, hub],
                             timeout=P.GIT_TIMEOUT)
@@ -92,7 +97,45 @@ def sync_repo(repo, source, targets, mode):
     return "ok", ",".join(pushed), []
 
 
-PUSH_REFS = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
+# only heads and tags ever travel to a non-local host. --mirror also copies
+# refs/pull/* and other host-specific namespaces, which those hosts reject or
+# store as junk (and Forgejo's collide with its own PR storage).
+HEAD_TAGS = ["refs/heads/*:refs/heads/*", "refs/tags/*:refs/tags/*"]
+
+
+def push_args(mode, ptype, url, refspecs=None):
+    """the git push argv for one target. Pure, so tests can assert it.
+
+    safe  -> no --force, no `+`, no --mirror. A non-fast-forward is refused
+             by the remote and reported, never retried with force.
+    full  -> force-update heads and tags, and prune target heads/tags the
+             hub does not have. Still never --mirror off a local target.
+    local -> --mirror is allowed: it is our own bare copy.
+
+    Forgejo/Gitea get the same treatment as every other host: the special
+    case that always force-pushed is gone.
+    """
+    if refspecs is not None:
+        if not refspecs:
+            return []                       # nothing is safe to push
+        return ["git", "push", "--force", url] + refspecs
+    if ptype == "local" and mode == "full":
+        return ["git", "push", "--mirror", url]
+    if mode == "full":
+        return ["git", "push", "--force", "--prune", url] + HEAD_TAGS
+    return ["git", "push", url] + HEAD_TAGS
+
+
+def _secure_hub_config(hub):
+    """the hub's git config holds the remote URL, which holds the token.
+
+    git creates it with the process umask (world-readable by default), so
+    tighten it after any write that could have touched it.
+    """
+    try:
+        os.chmod(os.path.join(hub, "config"), 0o600)
+    except OSError:
+        pass
 
 
 def _push_target(tname, tplat, repo, hub, mode, refspecs=None):
@@ -104,18 +147,9 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None):
     """
     try:
         push_url = tplat.ensure_repo(repo)
-        if refspecs is not None:
-            if not refspecs:
-                return None               # nothing is safe to push
-            cmd = ["git", "push", "--force", push_url] + refspecs
-        elif tplat.ptype in ("forgejo", "gitea"):
-            # GitHub's refs/pull/* namespace collides with Forgejo's own
-            # PR storage and its pre-receive hook rejects the whole push
-            cmd = ["git", "push", "--force", push_url] + PUSH_REFS
-        elif mode == "full":
-            cmd = ["git", "push", "--mirror", push_url]
-        else:
-            cmd = ["git", "push", "--force", push_url] + PUSH_REFS
+        cmd = push_args(mode, tplat.ptype, push_url, refspecs)
+        if not cmd:
+            return None
         rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
         if rc != 0 and _protection_error(err):
             # a protected branch refuses force-push. Ask the adapter to
@@ -130,6 +164,11 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None):
                 log("    %s: prepare_push failed: %s"
                     % (tname, str(e)[:100]))
         if rc != 0:
+            if "non-fast-forward" in (err or "") or \
+                    "fetch first" in (err or ""):
+                # safe mode must never fall back to force
+                return ("%s: refused non-fast-forward (run mode=full to "
+                        "overwrite)" % tname)
             return "%s: %s" % (tname, _short_error(err))
         if tplat.ptype == "local":
             # git init --bare defaults HEAD to master; point it at the
@@ -276,7 +315,8 @@ def mesh_sync_repo(repo, peers, conflict="newest"):
     if not os.path.isdir(hub):
         rc, _, err = P.run(["git", "init", "--bare", hub])
         if rc != 0:
-            return "clone-failed", err.strip()[:200], []
+            return "clone-failed", _redact(err.strip())[:200], []
+        _secure_hub_config(hub)
 
     # 1. fetch every reachable peer into the private namespace
     for pname, (url, _refs) in reachable.items():
@@ -346,8 +386,15 @@ def mesh_sync_repo(repo, peers, conflict="newest"):
         return "partial", "; ".join(errors), errors
     detail = "%s (%d refs merged)" % (",".join(pushed), updated)
     if skipped:
-        detail += ", %d conflict(s) skipped: %s" % (
-            len(skipped), ", ".join(sorted(skipped)[:4]))
+        # a mesh that refused to overwrite is NOT a clean run: say so, or a
+        # newbie reads "ok" and assumes everything converged
+        names = ", ".join(sorted(skipped)[:20])
+        if len(skipped) > 20:
+            names += " +%d more" % (len(skipped) - 20)
+        detail += ", %d conflict(s) SKIPPED: %s" % (len(skipped), names)
+        return "partial", detail, [
+            "%d ref(s) left alone because the peers disagree: %s"
+            % (len(skipped), names)]
     return "ok", detail, []
 
 
@@ -481,11 +528,14 @@ def _plan_repo(repo, source, targets, mode):
             behind += 1
             continue
         trefs = _ls_remote_map(url)
-        thead = trefs.get("HEAD")
         if not trefs:
-            actions.append("%s: would CREATE" % tname)
+            # unreachable (or not created yet). Must be checked before any
+            # use of trefs: an unreachable target used to crash the plan and
+            # make a dry run report every repo as failed.
+            actions.append("%s: unreachable - would CREATE" % tname)
             behind += 1
             continue
+        thead = trefs.get("HEAD")
         if thead == src_head:
             actions.append("%s: up to date" % tname)
         else:
@@ -599,15 +649,38 @@ def _protection_error(err):
             or "not allowed to force push" in e)
 
 
+import re as _re
+
+_TOKEN_URL = _re.compile(
+    r"(https?://)[^/\s:@]+:[^/\s@]+@|x-access-token:[^@\s]+@")
+
+
+def _redact(text):
+    """strip credentials out of git error text before it is logged/stored.
+
+    git echoes the remote URL, and the URL carries the token (every HTTPS
+    adapter embeds it). A log line or a records.json entry must never
+    contain it.
+    """
+    if not text:
+        return text
+    return _TOKEN_URL.sub(lambda m: m.group(0).split(":")[0] + ":***@"
+                          if m.group(0).startswith("x-access-token")
+                          else m.group(1) + "***@", text)
+
+
 def _short_error(err, limit=160):
-    """the most useful line of a git error, not the wall of remote noise"""
+    """the most useful line of a git error, not the wall of remote noise.
+
+    Redacted first: git echoes the remote URL, and the URL carries the token.
+    """
     lines = [l.strip() for l in (err or "").strip().splitlines() if l.strip()]
     for l in lines:
         if l.lower().startswith("remote:"):
             l = l[7:].strip()
         if l and not l.startswith("To ") and not l.startswith("hint:"):
-            return l[:limit]
-    return (lines[0] if lines else "")[:limit]
+            return _redact(l)[:limit]
+    return _redact(lines[0])[:limit] if lines else ""
 
 
 def run_sync(cfg=None, route_name=None, quiet=False, only=None,
@@ -696,23 +769,31 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
         conflict = route.get("mesh_conflict") or \
             C.setting(cfg, "mesh_conflict", "newest")
 
-        mark_route_run(route)
+        mode_note = ("mode=%s (%s)"
+                     % (mode, "will not delete or force-push" if mode != "full"
+                        else "force-push, prunes heads and tags on non-local "
+                             "targets"))
         if mesh:
-            log("=== route '%s': mesh %s (workers=%d%s) ==="
-                % (rname, ", ".join(peers), workers,
+            log("=== route '%s': mesh %s (workers=%d, conflicts=%s, %s%s) ==="
+                % (rname, ", ".join(peers), workers, conflict, mode_note,
                    ", DRY RUN" if dry_run else ""))
         else:
-            log("=== route '%s': %s -> %s (workers=%d, mode=%s%s) ==="
-                % (rname, sname, ", ".join(targets), workers, mode,
+            log("=== route '%s': %s -> %s (workers=%d, %s%s) ==="
+                % (rname, sname, ", ".join(targets), workers, mode_note,
                    ", DRY RUN" if dry_run else ""))
         progress["route"] = rname
         try:
             repos = source.list_repos()
         except Exception as e:
+            # listing failed: this is not a run, so the schedule slot must
+            # not be consumed (a newbie previewing with --dry-run used to
+            # silently delay the real backup)
             log("  cannot list repos on %s: %s" % (sname, e))
             totals["failures"].append({"route": rname,
                                        "repo": "-", "error": str(e)[:200]})
             continue
+        if not dry_run:
+            mark_route_run(route)
         repos = _filter_repos(repos, route, only)
         if not include_forks:
             # best-effort fork filter (platforms that expose it)
@@ -839,6 +920,7 @@ def _record(summary):
         with open(tmp, "w") as f:
             json.dump(records, f, indent=2)
         os.replace(tmp, C.RECORDS_FILE)
+        os.chmod(C.RECORDS_FILE, 0o600)   # failure text can name a remote
     except OSError:
         pass
 

@@ -91,16 +91,20 @@ class TestPlatformUrls(unittest.TestCase):
         p = P.make('fj', {'type': 'forgejo', 'url': 'http://localhost:3002',
                           'owner': 'sagar', 'token': 'a/b'})
         self.assertEqual(p._push_url('sagar', 'repo'),
-                         'https://git:a%2Fb@localhost:3002/sagar/repo.git')
+                         'http://git:a%2Fb@localhost:3002/sagar/repo.git')
         p2 = P.make('fj2', {'type': 'forgejo', 'url': 'https://codeberg.org',
                             'owner': 'me', 'token': 'tok'})
         self.assertEqual(p2._push_url('me', 'repo'),
                          'https://git:tok@codeberg.org/me/repo.git')
+        # the scheme must follow the configured URL: a LAN Forgejo over
+        # plain http must not be forced to https (regression: TLS error)
+        self.assertTrue(p._push_url('sagar', 'repo').startswith('http://'))
+        self.assertTrue(p2._push_url('me', 'repo').startswith('https://'))
         # no token -> plain URL, ssh -> never embedded
         p3 = P.make('fj3', {'type': 'forgejo', 'url': 'http://h:3002',
                             'owner': 'me'})
         self.assertEqual(p3._push_url('me', 'repo'),
-                         'https://h:3002/me/repo.git')
+                         'http://h:3002/me/repo.git')
 
     def test_github_api_base(self):
         # P0-14: GitHub Enterprise was broken (hardcoded api.github.com)
@@ -447,6 +451,123 @@ class TestSyncHelpers(unittest.TestCase):
             C.DATA_DIR = td
             try:
                 self.assertIsNone(SY.last_route_run('no-such-route'))
+            finally:
+                C.DATA_DIR = old
+
+
+class TestPushPolicy(unittest.TestCase):
+    """P0-7: safe must never force or prune; full prunes only heads/tags."""
+
+    def test_push_args_safe_does_not_force(self):
+        for ptype in ("gitlab", "github", "forgejo", "gitea", "bitbucket",
+                      "generic"):
+            args = SY.push_args("safe", ptype, "URL")
+            self.assertNotIn("--force", args, ptype)
+            self.assertNotIn("--mirror", args, ptype)
+            self.assertFalse([a for a in args if a.startswith("+")], ptype)
+            self.assertEqual(args[:3], ["git", "push", "URL"])
+
+    def test_push_args_full_forces_and_prunes_without_mirror(self):
+        for ptype in ("gitlab", "github", "forgejo", "gitea", "bitbucket",
+                      "generic"):
+            args = SY.push_args("full", ptype, "URL")
+            self.assertIn("--force", args, ptype)
+            self.assertIn("--prune", args, ptype)
+            self.assertNotIn("--mirror", args, ptype)
+            # only heads and tags travel, so no refs/pull/* junk
+            self.assertEqual(args[-2:], SY.HEAD_TAGS)
+
+    def test_mirror_only_for_a_local_full_target(self):
+        self.assertEqual(SY.push_args("full", "local", "URL")[:3],
+                         ["git", "push", "--mirror"])
+        self.assertNotIn("--mirror", SY.push_args("safe", "local", "URL"))
+
+    def test_pinned_refspecs_win(self):
+        self.assertEqual(
+            SY.push_args("safe", "gitlab", "URL",
+                         ["+refs/heads/a:refs/heads/a"]),
+            ["git", "push", "--force", "URL", "+refs/heads/a:refs/heads/a"])
+        self.assertEqual(SY.push_args("safe", "gitlab", "URL", []), [])
+
+    def test_default_mode_for_a_new_config_is_safe(self):
+        self.assertEqual(C.DEFAULT_CONFIG["settings"]["mode"], "safe")
+
+    def test_default_mesh_conflict_is_skip(self):
+        self.assertEqual(C.DEFAULT_CONFIG["settings"]["mesh_conflict"],
+                         "skip")
+
+
+class TestRedaction(unittest.TestCase):
+    """P0-10: a token must never reach a log line or a record."""
+
+    def test_redact_strips_credentials(self):
+        self.assertEqual(
+            SY._redact("fatal: https://oauth2:glpat-SECRET@gitlab.com/x/y"),
+            "fatal: https://***@gitlab.com/x/y")
+        self.assertEqual(
+            SY._redact("To https://x-access-token:ghs_ABC@github.com/o/r"),
+            "To https://***@github.com/o/r")
+        self.assertEqual(SY._redact("plain error"), "plain error")
+        self.assertIsNone(SY._redact(None))
+
+    def test_short_error_redacts(self):
+        out = SY._short_error("remote: https://oauth2:glpat-SECRET@gitlab.com"
+                              "/x denied")
+        self.assertNotIn("glpat-SECRET", out)
+        self.assertIn("gitlab.com", out)
+
+
+class TestScheduleStamp(unittest.TestCase):
+    """P0-6: a dry run or a failed listing must not consume the slot."""
+
+    def test_dry_run_does_not_mark_route(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                cfg = {"platforms": {
+                           "src": {"type": "local", "enabled": True,
+                                   "path": os.path.join(td, "src")},
+                           "dst": {"type": "local", "enabled": True,
+                                   "path": os.path.join(td, "dst")}},
+                       "routes": [{"name": "r", "source": "src",
+                                   "targets": ["dst"]}],
+                       "settings": {}}
+                for d in ("src", "dst"):
+                    os.makedirs(os.path.join(td, d))
+                SY.run_sync(cfg, route_name="r", dry_run=True)
+                self.assertIsNone(SY.last_route_run("r"))
+            finally:
+                C.DATA_DIR = old
+
+    def test_failed_listing_does_not_mark_route(self):
+        # LocalPlatform returns [] for a missing folder (a real "0 repos"
+        # run, which *should* be stamped), so force the listing to raise
+        from unittest import mock
+
+        class Boom:
+            ptype = "local"
+
+            def list_repos(self):
+                raise RuntimeError("cannot list")
+
+        with tempfile.TemporaryDirectory() as td:
+            old = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                cfg = {"platforms": {
+                           "src": {"type": "local", "enabled": True,
+                                   "path": os.path.join(td, "src")},
+                           "dst": {"type": "local", "enabled": True,
+                                   "path": os.path.join(td, "dst")}},
+                       "routes": [{"name": "r", "source": "src",
+                                   "targets": ["dst"]}],
+                       "settings": {}}
+                for d in ("src", "dst"):
+                    os.makedirs(os.path.join(td, d))
+                with mock.patch.object(SY.P, "make", return_value=Boom()):
+                    SY.run_sync(cfg, route_name="r")
+                self.assertIsNone(SY.last_route_run("r"))
             finally:
                 C.DATA_DIR = old
 

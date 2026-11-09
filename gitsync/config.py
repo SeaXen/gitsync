@@ -45,7 +45,11 @@ DEFAULT_CONFIG = {
     ],
     "settings": {
         "workers": 4,
-        "mode": "full",          # full = exact mirror (prunes), safe = never delete
+        # a new setup must not delete anything on a destination until the
+        # user asks for it (P0-7); a mesh must not silently overwrite the
+        # older side of a disagreement either (P0-8)
+        "mode": "safe",          # full = exact mirror (prunes), safe = never delete
+        "mesh_conflict": "skip", # newest | skip
         "schedule": "hourly",    # hourly | 6h | 12h | daily | off
         "include_forks": False,
         "notify": {              # Discord webhook alerts

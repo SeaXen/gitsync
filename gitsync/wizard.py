@@ -142,14 +142,18 @@ def run_wizard():
 
     # ---- settings ----
     hr("STEP 4/4 — schedule & options")
-    print(" Schedules: hourly | 6h | 12h | daily | off (manual only)")
+    print(" Schedules: hourly | 6h | 12h | daily | weekly | off (manual only)")
     sched = ask("Schedule", "hourly")
     cfg["settings"]["schedule"] = sched if sched in C.SCHEDULES else "hourly"
     cfg["settings"]["workers"] = int(ask("Parallel workers", "4") or 4)
-    # "Yes" = safe mode (never delete refs); "No" (default) = exact mirror
-    cfg["settings"]["mode"] = "safe" if ask_yes(
-            "Use safe mode? (No = exact mirror, prunes deleted refs)",
-            False) else "full"
+    # Default No = safe: a new setup must not delete branches on the
+    # destination until the user explicitly asks for an exact mirror.
+    cfg["settings"]["mode"] = "full" if ask_yes(
+            "Exact mirror? This DELETES branches on the destination that "
+            "are not on the source (y/N)", False) else "safe"
+    cfg["settings"]["mesh_conflict"] = "skip" if ask_yes(
+            "Two-way routes: report conflicts instead of overwriting the "
+            "older side? (Y/n)", True) else "newest"
 
     C.save_config(cfg)
     hr("saved")
