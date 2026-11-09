@@ -26,6 +26,20 @@ from gitsync import tokencheck as TK
 from gitsync import tui
 from gitsync import webhooks as WH
 
+# CI runners inject credential env vars (GITHUB_TOKEN, FORGEJO_TOKEN, ...).
+# The adapters deliberately fall back to them, so a test that does not set a
+# token would silently use the runner's - and then hit the real API. Strip
+# them for the whole module instead of per test.
+_TOKEN_ENV = ("GITHUB_TOKEN", "FORGEJO_TOKEN", "GITEA_TOKEN", "GITLAB_TOKEN",
+              "BITBUCKET_TOKEN", "GITSYNC_DISCORD_WEBHOOK",
+              "GITSYNC_TELEGRAM_TOKEN", "GITSYNC_TELEGRAM_CHAT_ID",
+              "GITSYNC_NOTIFY_ON")
+
+
+def setUpModule():
+    for k in _TOKEN_ENV:
+        os.environ.pop(k, None)
+
 
 # --------------------------------------------------------------- platforms
 

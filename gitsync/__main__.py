@@ -1270,25 +1270,35 @@ def cmd_ci(args):
             # LocalPlatform lists the *.git dirs inside its path, so the
             # folders each hold one bare repo.
             def sh2(args, cwd=None):
-                subprocess.run(args, capture_output=True, cwd=cwd,
-                               timeout=60)
+                # every git call carries its own identity: a clean CI
+                # container has no user.name/user.email, and `git commit`
+                # then fails with "Committer identity unknown", which
+                # silently starved the rest of this scenario
+                ident = ["-c", "user.name=gitsync-ci",
+                         "-c", "user.email=ci@example.invalid"]
+                r = subprocess.run(["git"] + ident + args,
+                                   capture_output=True, cwd=cwd, timeout=60)
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        "git %s failed: %s"
+                        % (" ".join(args), (r.stderr or "").strip()[-160:]))
 
-            sh2(["git", "init", "--bare", "-q",
+            sh2(["init", "--bare", "-q",
                  os.path.join(src_dir, "y.git")])
-            sh2(["git", "init", "--bare", "-q",
+            sh2(["init", "--bare", "-q",
                  os.path.join(dst_dir, "y.git")])
             seed = os.path.join(td, "seed")
             os.makedirs(seed)
-            sh2(["git", "init", "-q", seed])
-            sh2(["git", "-C", seed, "commit", "--allow-empty", "-q",
+            sh2(["init", "-q", seed])
+            sh2(["-C", seed, "commit", "--allow-empty", "-q",
                  "-m", "x", "--author", "t <t@t>",
                  "--date", "2020-01-01T00:00:00"])
-            sh2(["git", "-C", seed, "branch", "-M", "main"])
-            sh2(["git", "-C", seed, "push", "-q",
+            sh2(["-C", seed, "branch", "-M", "main"])
+            sh2(["-C", seed, "push", "-q",
                  os.path.join(src_dir, "y.git"), "main"])
-            sh2(["git", "-C", seed, "push", "-q",
+            sh2(["-C", seed, "push", "-q",
                  os.path.join(dst_dir, "y.git"), "main"])
-            sh2(["git", "-C", seed, "push", "-q",
+            sh2(["-C", seed, "push", "-q",
                  os.path.join(dst_dir, "y.git"),
                  "main:refs/heads/only-on-target"])
             cfg["settings"]["mode"] = "full"
