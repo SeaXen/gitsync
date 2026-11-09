@@ -15,6 +15,11 @@ what makes a sync resumable and gives an offline copy. Consequence: **the hub
 is shared state between routes** — a one-way route and a mesh route over the
 same repo will fight over it. One set of peers, one mode.
 
+Push policy lives in one pure function, `sync.push_args(mode, ptype, url)`:
+`safe` (the default for new configs) never forces and never prunes; `full`
+force-updates and prunes heads+tags only, and only `--mirror`s a local target.
+A mesh that refuses to overwrite a disagreement reports `partial`, not `ok`.
+
 Route kinds (`config.json` → `routes[]`):
 - **one-way** (default): `source` is truth, targets are overwritten.
   `mode: full` pushes `--mirror` and **prunes refs the target has and the
@@ -47,31 +52,26 @@ editing source you must re-run `bash install.sh` before TUI testing — otherwis
 you are testing yesterday's code. `CHANGELOG.md` and this file are *not*
 copied. Verify with `diff -r --exclude=__pycache__ gitsync /opt/gitsync/gitsync`.
 
-## CI: four copies of one test block, keep them identical
+## CI and tests
 
-`gitsync ci` runs: python syntax, shell syntax, CLI smoke tests, unit checks.
-The unit-check code lives **four times** and all four must stay in sync:
+`python3 -m gitsync ci` runs: python syntax, shell syntax, and a CLI smoke
+block. All three workflows run the same, plus `python3 -m unittest
+tests.test_logic`.
 
-| file | quote | indent | `\n` in test strings |
-|---|---|---|---|
-| `gitsync/__main__.py` (`UNIT_CHECKS`, a triple-quoted string) | `'` | 0 | `\\n` |
-| `.gitlab-ci.yml` (shell heredoc) | `"` | 6 | `\n` |
-| `.github/workflows/ci.yml` | `'` | 10 | `\n` |
-| `.forgejo/workflows/ci.yml` | `'` | 10 | `\n` |
-
-After editing any of them, verify all four:
-```bash
-python3 -c "import subprocess,os;from gitsync.__main__ import UNIT_CHECKS;print(subprocess.run(['python3','-c',UNIT_CHECKS],capture_output=True,text=True,env=dict(os.environ,PYTHONPATH=os.getcwd())).returncode)"
-# plus, for each YAML: yaml.safe_load, extract 'import curses'..'PY',
-# textwrap.dedent, run it
-```
-The assertion count is quoted in `gitsync/__main__.py` and `README.md`
-(`unit checks (N assertions)`) — update both when it changes.
-
-**The CLI smoke test must run a real offline sync**, not just `--help`: two
-local platforms with a route between them, in a temp config. A `NameError` in
-`cmd_sync` once shipped because only `--help` was exercised — and `cmd_sync`
-is what the systemd timer runs, so installs silently stopped syncing.
+- **`tests/test_logic.py` is the only home for logic assertions** (stdlib
+  `unittest`, no network). The assertion blob used to be duplicated four
+  times (`UNIT_CHECKS` plus a heredoc in each CI file) and drifted; it is
+  gone. Add cases there, not to a workflow.
+- **The smoke block must run a real offline sync**, not just `--help`: two
+  local platforms with a route between them, in a temp config. It also
+  performs the real pushes and asserts `safe` keeps a branch only the
+  destination has while `full` prunes it. A `NameError` in `cmd_sync` once
+  shipped because only `--help` was exercised — and `cmd_sync` is what the
+  systemd timer runs, so installs silently stopped syncing.
+- Assertion count appears in `gitsync/__main__.py` and `README.md`.
+- `_plan_repo`, `_push_target` and the mesh path all need network; cover
+  them through the offline local-folder smoke or a fake platform, never by
+  pointing a test at a live account.
 
 ## Testing the TUI
 
