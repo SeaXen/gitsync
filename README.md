@@ -95,6 +95,7 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **Everything in the TUI** | add / edit / remove accounts, add / remove routes, stars, disk, doctor, compare, mirror, update — no terminal needed |
 | **Copy your stars** | read one account's starred repos and star the same ones on your other accounts |
 | **Two-way (mesh)** | one route where every peer is source and target: edit on GitLab, it lands on GitHub, Forgejo and the local hub |
+| **Safe by default** | a new setup uses `mode: safe` (never deletes, never force-pushes) and `mesh_conflict: skip` (reports a disagreement instead of overwriting the older side) |
 | **Pause anything** | pause one target or a whole route from the TUI (`P`) or CLI — the timer keeps running the rest |
 | **Conflict-safe mesh** | a mesh can be told to *report* a disagreement instead of overwriting it (`mesh_conflict: skip`) |
 | **Dry run anywhere** | `D` in the TUI previews a whole run, or one route, without touching anything |
@@ -491,7 +492,7 @@ next sync if the repo reappears).
 └───────────────────────────────────────────────────────────────────────┘
 ┌ ROUTES & SETTINGS ────────────────────────────────────────────────────┐
 │ github-to-all: github -> gitlab, forgejo, backup                      │
-│ workers=4  mode=full  forks=False   scheduler: systemd timer: hourly  │
+│ workers=4  mode=safe  forks=False   scheduler: user timer: hourly    │
 └───────────────────────────────────────────────────────────────────────┘
 ┌ LOG (live tail — L for full log, H for history) ──────────────────────┐
 │ [52/52] OK   Sea-Wallpaper -> gitlab,forgejo,backup                   │
@@ -558,11 +559,10 @@ A pace of 1 s over 54 repos adds about a minute to a run and is logged:
 
 ## What a sync would delete (and how to stop it)
 
-`mode: full` (the default) means "make the target an exact mirror": the push
-is `git push --mirror`, so **a branch or tag that exists on the target but
-not on the source is deleted there**. That is what you want most of the time,
-and it is the one operation in gitsync that can lose work, so it is always
-visible first:
+`mode: full` means "make the target an exact mirror": heads and tags the
+source does not have are **deleted** on the target. `mode: safe` — the
+default for a new setup — never deletes and never force-pushes. Either way,
+the one operation in gitsync that can lose work is always visible first:
 
 ```bash
 gitsync sync --dry-run          # or press D in the TUI
@@ -644,7 +644,7 @@ The wizard prints this before asking for anything — here it is for reference:
 
 | Platform | Create token at | Required scopes | Notes |
 |---|---|---|---|
-| **GitHub** | [github.com/settings/tokens](https://github.com/settings/tokens) | `repo` (+`workflow`, `read:org` as needed) | or use the `gh` CLI (no token) |
+| **GitHub** | [github.com/settings/tokens](https://github.com/settings/tokens) | `repo` | or the `gh` CLI (no token). Org repos need `read:org` **and** `"affiliation": "owner,organization_member"` in the platform config — the scope alone does nothing |
 | **GitLab** | [gitlab.com/-/user_settings/personal_access_tokens](https://gitlab.com/-/user_settings/personal_access_tokens) | `api` | self-hosted: `<host>/-/user_settings/...` |
 | **Forgejo** | `<url>/user/settings/applications` | `write:repository` **+** `write:user` | `write:user` is required because repo creation goes through `/user/repos` |
 | **Gitea** | `<url>/user/settings/applications` | `write:repository` + `write:user` | same model as Forgejo (1.22+) |
@@ -960,7 +960,7 @@ source and target state without changing anything.
 | `gitsync: command not found` | `~/.local/bin` not in PATH (with `--user`), or re-run the installer |
 | A platform shows FAIL | `gitsync platforms` for the reason; check token scopes with `gitsync scopes` |
 | New repo missing on a target | run `gitsync sync` — it creates them automatically |
-| Refs deleted on a target | that's `mode: full` (exact mirror). Use `mode: safe` to keep them |
+| Refs deleted on a target | that's `mode: full` (exact mirror). `mode: safe` — the default for new setups — keeps them |
 | Another sync already running | a run is in progress (timer or manual); wait and retry |
 | TUI looks garbled | resize the terminal; the layout adapts |
 

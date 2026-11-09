@@ -4,6 +4,91 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-11-09
+
+A full review pass: 14 correctness/safety bugs, 10 honesty fixes, and one
+test module instead of four drifting copies. The short version for users:
+
+- **A new setup no longer deletes anything.** `mode: safe` is the default
+  (never deletes, never force-pushes) and a mesh defaults to
+  `mesh_conflict: skip`, which reports a disagreement instead of silently
+  overwriting the older side. Existing configs that say `full`/`newest`
+  keep their setting.
+- **`compare` and `fix` now tell the truth.** They probed the source URL for
+  every target, so drift was invisible; they use each platform's own URL and
+  no longer create repos during a read-only check.
+- **The one-click install works for a normal user.** `--yes` was rejected,
+  a non-root install died writing `/etc/systemd/system`, and the timer ran
+  as root against `/root`'s config. It now installs a *user* unit (or user
+  cron) for the schedule the wizard chose, and previews with `--dry-run`
+  before offering the first real sync.
+- **No silent security changes.** Turning on force-push over branch
+  protection on a destination is now opt-in
+  (`settings.relax_protection`).
+- **No false claims.** Every `glab` path is deleted — it never existed.
+  Tokens are hidden in the wizard, and re-running setup asks before it
+  replaces your accounts.
+- **Secrets stay put.** Git error text is redacted before it is logged or
+  stored, and the log, `records.json` and every hub `config` are `0600`.
+
+### Fixed
+
+- **P0-1** installer: `--yes` rejected (reproduced), non-root install died
+  at the system unit, the unit ran as root against `/root`, `ExecStart`
+  lacked `--scheduled`, `weekly` raised KeyError, `--user` called sudo.
+  One unit builder (`gitsync install`), user unit by default,
+  `finest_schedule` decides the calendar, an all-off config installs
+  nothing, quickinstall installs the scheduler *after* the wizard.
+- **P0-2** Bitbucket crashed on every call (`_api` returns 2 values, the
+  methods unpacked 3); `repo_url` pointed at the API host with no workspace
+  and no token.
+- **P0-3** Forgejo/Gitea git URLs carried no token, so private clone/push
+  failed; the token is percent-encoded and the login is cached.
+- **P0-4** `compare`/`fix` used the source's `clone_url` for every target
+  (false "all in sync") and called `ensure_repo` in a read-only path.
+- **P0-5** the hub was keyed by the short repo name, so two `docs` projects
+  in different groups shared one mirror. Keyed by a stable id
+  (`owner/name`, `path_with_namespace`, ...) with a read-only migration of
+  the existing flat layout.
+- **P0-6** a dry run or a failed listing consumed the schedule slot;
+  `sync` exits 0 only when nothing failed *and* nothing was partial.
+- **P0-7** `safe` still `--force`-pushed and `full` used `--mirror` against
+  every host. One pure `push_args()`; `safe` never forces or prunes,
+  `full` force-prunes heads and tags only, `--mirror` only for a local
+  target.
+- **P0-8** a mesh that refused to overwrite reported `ok`; it now reports
+  `partial` and lists the skipped refs.
+- **P0-9** `glab` was documented and never implemented; wizard tokens were
+  echoed; re-running setup wiped every account silently.
+- **P0-10** tokens leaked through git error text; `bash -c "df -h %s"` was
+  shell injection.
+- **P0-11** `doctor --fix` unlinked `sync.lock` during a live sync (two
+  syncs could push the same repo); `disk --orphans` compared against the
+  first route only and `--prune-orphans` could delete live mirrors.
+- **P0-12** GitHub token check crashed on 401 instead of reporting
+  "token rejected".
+- **P0-13** Telegram-only users never got sync alerts; `notify --set-url`
+  and `ci --install-hook` were parsed and ignored; `ci` hid assertion
+  failures.
+- **P0-14** GitHub listing capped at 500, org repos never listed, GitHub
+  Enterprise impossible.
+- Plus: an unreachable target crashed the dry-run plan; Forgejo over plain
+  http was forced to https; `config.VERSION` disagreed with `__version__`;
+  `mirror_is_valid` re-cloned empty repos every run; `watch --interval 0`
+  busy-looped; the TUI options screen always showed notify mode `failure`.
+
+### Changed
+
+- **One test module.** The assertion blob that lived in `UNIT_CHECKS` plus a
+  heredoc in each of the three CI files (with different quoting per copy,
+  and one already drifted) is now `tests/test_logic.py`, run by `gitsync ci`
+  and all three workflows. The offline sync smoke also performs the real
+  pushes and asserts both modes.
+- 85 unit tests (was 136 loose asserts in four places).
+- New config keys: `github.affiliation`, `settings.mesh_conflict`,
+  `settings.relax_protection`. New defaults for *new* configs:
+  `mode: safe`, `mesh_conflict: skip`.
+
 ## [1.6.2] - 2026-11-09
 
 ### Fixed

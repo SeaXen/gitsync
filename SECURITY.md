@@ -54,3 +54,19 @@ gitsync platforms test <name>
 ```
 
 Then revoke the old one at the provider.
+
+## What this build does with secrets
+
+- Every HTTPS adapter embeds the token in the git URL it uses (GitHub,
+  GitLab, Forgejo/Gitea, Bitbucket, generic). That URL is stored in the
+  hub mirror's `config`, which is written `0600` after every change.
+- The log (`gitsync.log`) and `records.json` are `0600`, and git error text
+  is redacted (`https://user:token@` -> `https://***@`) before it is logged
+  or stored, because git echoes the remote URL.
+- `doctor --fix` never removes `sync.lock`: it probes the lock instead, so a
+  live sync is never interrupted by a repair.
+- Branch protection on a destination is never changed unless
+  `settings.relax_protection` is true. A rejected push is reported, not
+  worked around.
+- Passing `--token` on the command line puts it in your shell history;
+  prefer `gitsync platforms edit NAME` (prompted) or the TUI (`A` -> `E`).

@@ -15,7 +15,10 @@ https://github.com/settings/tokens?type=beta (fine-grained)
 |---|---|
 | `repo` | **Required.** Read/write private repositories — clone + push |
 | `workflow` | Only if `.github/workflows/` files must be mirrored |
-| `read:org` | Only if you mirror organization repositories |
+| `read:org` | Only if you mirror organization repositories. It is not
+enough on its own: gitsync asks GitHub for `affiliation=owner` unless you
+set `"affiliation": "owner,organization_member"` (or add collaborators)
+in the platform config, so org repos stay invisible until you do |
 
 **Minimum:** `repo`
 **Alternative:** if the `gh` CLI is installed and logged in
