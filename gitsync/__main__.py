@@ -455,6 +455,19 @@ def cmd_mirror(args):
     if not routes:
         print("no matching route - configure one with: gitsync routes add")
         return 2
+    # several routes can share a source: prefer one that actually has the
+    # requested target instead of blindly taking the first match
+    if args.to:
+        with_to = [r for r in routes if args.to in r.get("targets", [])]
+        if with_to:
+            routes = with_to
+        else:
+            print("no route from '%s' has target '%s' - routes with that source:"
+                  % (args.src or routes[0].get("source"), args.to))
+            for r in routes:
+                print("  %s -> %s" % (r.get("name"),
+                                      ", ".join(r.get("targets", []))))
+            return 2
     route = routes[0]
     src_name = args.src or route["source"]
     sp = C.platform(cfg, src_name)

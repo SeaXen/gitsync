@@ -47,6 +47,7 @@ state = {
     "repo_sel": set(),      # selected repo names
     "repo_scroll": 0,
     "repo_loaded": False,
+    "repo_src": "",          # which platform the browser listed
 }
 
 
@@ -434,6 +435,7 @@ def load_repos():
         flash("no routes configured", 6)
         return
     src = routes[0]["source"]
+    state["repo_src"] = src
     try:
         repos = P.make(src, C.platform(cfg, src)).list_repos()
     except Exception as e:
@@ -474,8 +476,9 @@ def repos_screen(stdscr):
         h, w = stdscr.getmaxyx()
         n_sel = len(state["repo_sel"])
         safe_add(stdscr, 0, 0,
-                 (" REPOS - %d repos, %d selected "
-                  % (len(state["repo_list"]), n_sel)).center(w - 1)[:w - 1],
+                 (" REPOS on %s - %d repos, %d selected "
+                  % (state.get("repo_src") or "?", len(state["repo_list"]),
+                     n_sel)).center(w - 1)[:w - 1],
                  curses.A_BOLD | curses.color_pair(1))
         if q:
             safe_add(stdscr, 1, 0,

@@ -91,6 +91,7 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 |---|---|
 | **6 providers** | GitHub, GitLab, Forgejo, Gitea, Bitbucket, local folders — any as source or target |
 | **Any direction** | `github → gitlab`, `gitlab → forgejo`, `folder → github`, `bitbucket → everything`… |
+| **Same-site too** | `github → github`, `gitlab → gitlab` — several accounts per site, side by side |
 | **One-click install** | download + install + wizard + scheduler + first sync in one command |
 | **Token guidance** | the wizard shows exactly which scopes each platform needs before asking |
 | **TUI dashboard** | live status, per-platform repo counts, log tail, run history |
@@ -208,6 +209,47 @@ gitsync mirror tradex --from gitlab            # use another platform as source
 route's `include`/`exclude` globs — so a repo excluded by the route stays
 excluded. Names that don't exist on the source are reported, not silently
 skipped.
+
+---
+
+## Same-site sync (GitHub → GitHub, GitLab → GitLab, …)
+
+Yes — and it needs no special mode. Every adapter is keyed on its **type**,
+while a platform name is just a config key, so you can run as many accounts of
+the same site side by side as you like and route between them.
+
+```bash
+# 1. add a second account on the same site
+gitsync platforms add github-work --type github --token ghp_xxx --owner my-org
+
+# 2. route account A -> account B
+gitsync routes add gh-a-to-b github github-work
+
+# 3. sync one repo, several, or the whole account
+gitsync mirror tradex --from github --to github-work
+gitsync mirror tradex SeaVault SeaDash --from github --to github-work
+gitsync sync --repos "tradex,SeaVault" --route gh-a-to-b
+gitsync sync --route gh-a-to-b                      # every repo on the route
+```
+
+The same three steps work for **GitLab → GitLab**, **Forgejo → Forgejo**,
+**Gitea → Gitea** and **Bitbucket → Bitbucket** — just change `--type` and the
+token. `gitsync platforms` lists every account you have configured.
+
+**Three things to know:**
+
+1. **A second GitHub account needs `--token`, not the `gh` CLI.** The `gh`
+   adapter is bound to whichever account `gh` has active, so two GitHub
+   platforms cannot both use it. A token (`repo` scope) makes each platform
+   independent. GitLab, Forgejo, Gitea and Bitbucket are token-only already.
+2. **The local hub is keyed on repo name, not on source + name.** Two routes
+   that mirror the same repo name from *different* sources share one hub
+   clone. The run lock stops them colliding, but the hub's `origin` follows
+   whichever source ran last — so keep one direction per repo name
+   (`A → B`, not also `B → A`) and this never matters.
+3. **`mirror --to` finds the right route.** When several routes share a source,
+   it picks the one that actually has the target you asked for instead of
+   taking the first match.
 
 ---
 

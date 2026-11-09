@@ -4,6 +4,32 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-11-09
+
+Fixes the route selection behind multi-repo `mirror --to`, and documents
+same-site sync (GitHub → GitHub and friends).
+
+### Fixed
+
+- **`mirror --from SRC --to TGT` no longer picks the wrong route.** With
+  several routes sharing a source, it took the first match and then failed
+  if that route lacked the target. It now prefers a route that actually has
+  the requested target, and when none does it prints the candidate routes
+  instead of a dead end. Found while wiring up a GitHub → GitHub route.
+- **The TUI repo browser names the platform it listed.** The header said
+  "REPOS - 53 repos" without saying *whose*; it now reads
+  "REPOS on github - 53 repos". Matters as soon as you configure a second
+  account on the same site.
+
+### Documentation
+
+- **Same-site sync** — several accounts per site side by side
+  (`github → github`, `gitlab → gitlab`, `forgejo → forgejo`), with the
+  three-step setup, and the two caveats worth knowing: a second GitHub
+  account must use `--token` rather than the `gh` CLI (which is bound to the
+  active account), and the local hub mirror is keyed on repo name only, so
+  keep one direction per repo name.
+
 ## [1.1.0] - 2026-11-09
 
 Selective sync: browse an account's repos and sync only the ones you pick,
