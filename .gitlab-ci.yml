@@ -39,7 +39,7 @@ syntax-and-tests:
       assert P._fs_safe("a b/c") == "a_b_c"
 
       # schedule table
-      assert set(C.SCHEDULES) == {"hourly", "6h", "12h", "daily", "off"}
+      assert set(C.SCHEDULES) == {"hourly", "6h", "12h", "daily", "weekly", "off"}
       assert C.SCHEDULES["hourly"]["cron"] == "0 * * * *"
       assert C.SCHEDULES["daily"]["calendar"] == "*-*-* 03:00:00"
 
