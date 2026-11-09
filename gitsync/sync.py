@@ -94,8 +94,20 @@ def sync_repo(repo, source, targets, mode):
                        "+refs/heads/*:refs/heads/*",
                        "+refs/tags/*:refs/tags/*"]
             rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
+            if rc != 0 and _protection_error(err):
+                # a protected branch refuses force-push. Ask the adapter to
+                # relax it, then retry the same push exactly once. Doing this
+                # lazily keeps the happy path free of extra API calls, which
+                # matters: GitLab rate-limits aggressively.
+                try:
+                    for note in tplat.prepare_push(repo, push_url) or []:
+                        log("    %s" % note)
+                    rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
+                except Exception as e:
+                    log("    %s: prepare_push failed: %s"
+                        % (tname, str(e)[:100]))
             if rc != 0:
-                errors.append("%s: %s" % (tname, err.strip()[:120]))
+                errors.append("%s: %s" % (tname, _short_error(err)))
             else:
                 pushed.append(tname)
                 if tplat.ptype == "local":
@@ -271,6 +283,25 @@ def next_due_text(route, cfg, now=None):
     if delta < 86400:
         return "in %.1f h" % (delta / 3600)
     return "in %.1f d" % (delta / 86400)
+
+
+def _protection_error(err):
+    """did the push fail because a branch is protected?"""
+    e = (err or "").lower()
+    return ("protected branch" in e or "pre-receive hook declined" in e
+            or "protected branches" in e or "force push" in e
+            or "not allowed to force push" in e)
+
+
+def _short_error(err, limit=160):
+    """the most useful line of a git error, not the wall of remote noise"""
+    lines = [l.strip() for l in (err or "").strip().splitlines() if l.strip()]
+    for l in lines:
+        if l.lower().startswith("remote:"):
+            l = l[7:].strip()
+        if l and not l.startswith("To ") and not l.startswith("hint:"):
+            return l[:limit]
+    return (lines[0] if lines else "")[:limit]
 
 
 def run_sync(cfg=None, route_name=None, quiet=False, only=None,

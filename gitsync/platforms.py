@@ -15,6 +15,7 @@ import json
 import os
 import re
 import subprocess
+import time
 import urllib.error
 import urllib.request
 
@@ -61,35 +62,50 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
     (status, body) — needed to read GitHub's token-expiry header.
     """
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    if token:
-        if auth_style == "private-token":
-            req.add_header("PRIVATE-TOKEN", token)
-        elif auth_style == "bearer":
-            req.add_header("Authorization", "Bearer " + token)
-        else:
-            req.add_header("Authorization", "token " + token)
-    if data:
-        req.add_header("Content-Type", "application/json")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            body = r.read().decode() or "{}"
-            hdrs = {k.lower(): v for k, v in r.headers.items()}
-            try:
-                parsed = json.loads(body)
-            except ValueError:
-                parsed = body
-            return (r.status, parsed, hdrs) if want_headers \
-                else (r.status, parsed)
-    except urllib.error.HTTPError as e:
-        body = e.read().decode()
+    # GitLab.com rate-limits aggressively (HTTP 429) and briefly returns
+    # 502/503 under load. A sync of 50 repos bursts hard, so back off and
+    # retry rather than reporting a perfectly healthy repo as failed.
+    for attempt in range(3):
+        req = urllib.request.Request(url, data=data, method=method)
+        if token:
+            if auth_style == "private-token":
+                req.add_header("PRIVATE-TOKEN", token)
+            elif auth_style == "bearer":
+                req.add_header("Authorization", "Bearer " + token)
+            else:
+                req.add_header("Authorization", "token " + token)
+        if data:
+            req.add_header("Content-Type", "application/json")
         try:
-            body = json.loads(body)
-        except ValueError:
-            pass
-        return e.code, body
-    except Exception as e:
-        return None, str(e)[:200]
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                body = r.read().decode() or "{}"
+                hdrs = {k.lower(): v for k, v in r.headers.items()}
+                try:
+                    parsed = json.loads(body)
+                except ValueError:
+                    parsed = body
+                return (r.status, parsed, hdrs) if want_headers \
+                    else (r.status, parsed)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode()
+            try:
+                body = json.loads(body)
+            except ValueError:
+                pass
+            if e.code in (429, 500, 502, 503, 504) and attempt < 2:
+                wait = 2 ** attempt
+                try:
+                    ra = e.headers.get("Retry-After") if e.headers else None
+                    if ra:
+                        wait = min(float(ra), 30)
+                except (TypeError, ValueError):
+                    pass
+                time.sleep(wait)
+                continue
+            return e.code, body
+        except Exception as e:
+            return None, str(e)[:200]
+    return None, "request failed after retries"
 
 
 # ---------------------------------------------------------------- GitHub
@@ -179,6 +195,10 @@ class GitHubPlatform:
         owner = self.owner or (self.user() or "")
         return self._clone_url("%s/%s" % (owner, repo["name"]))
 
+    def prepare_push(self, repo, push_url):
+        """allow a mirror force-push to succeed. GitHub: nothing to do."""
+        return []
+
     def token_info(self):
         """expiry + scopes, for the token-expiry warning"""
         if not self.token:
@@ -214,6 +234,48 @@ class GitHubPlatform:
 
 
 # ---------------------------------------------------------------- GitLab
+
+def gitlab_path(name):
+    """sanitise a repo name into a valid GitLab project path.
+
+    GitLab is stricter than GitHub: a path may hold only non-accented
+    letters, digits, '_', '-' and '.', may not start with '-', '_' or '.',
+    and may not end with '-', '_', '.', '.git' or '.atom'. A GitHub name
+    like '_gstest_src' is legal there but rejected here, which used to
+    surface as an opaque 'GitLab create failed'.
+    """
+    import unicodedata
+    p = unicodedata.normalize("NFKD", str(name))
+    p = p.encode("ascii", "ignore").decode("ascii")
+    p = re.sub(r"[^A-Za-z0-9_.\-]", "-", p)
+    p = p.lstrip("-_.")
+    for suffix in (".git", ".atom"):
+        if p.lower().endswith(suffix):
+            p = p[:-len(suffix)]
+    p = p.rstrip("-_.")
+    return p or "repo"
+
+
+def _api_error(out):
+    """flatten a GitLab/Gitea error body into something readable"""
+    if isinstance(out, dict):
+        msg = out.get("message")
+        if isinstance(msg, dict):
+            # validation errors: {'path': ['can only include ...']}
+            bits = []
+            for k, v in msg.items():
+                if isinstance(v, list):
+                    bits.append("%s: %s" % (k, "; ".join(str(x) for x in v)))
+                else:
+                    bits.append("%s: %s" % (k, v))
+            return " | ".join(bits)
+        if isinstance(msg, list):
+            return "; ".join(str(x) for x in msg)
+        if msg:
+            return str(msg)
+        if out.get("error"):
+            return str(out["error"])
+    return str(out)[:200]
 
 class GitLabPlatform:
     ptype = "gitlab"
@@ -280,6 +342,45 @@ class GitLabPlatform:
         return self._url_with_token("%s/%s.git" % (self.url, owner,
                                                    repo["name"]))
 
+    def prepare_push(self, repo, push_url):
+        """Enable force-push on protected branches.
+
+        A protected branch rejects force-push by default, so a full mirror
+        push dies with "You are not allowed to force push code to a
+        protected branch". The branch protection itself is kept (merge and
+        push access levels unchanged); only allow_force_push is turned on,
+        because that is what mirroring requires.
+        """
+        notes = []
+        project = self._project_id(repo)
+        if not project:
+            return notes
+        rc, out = self._api("/projects/%s/protected_branches" % project)
+        if not isinstance(out, list):
+            return notes
+        for b in out:
+            name = b.get("name")
+            if not name or b.get("allow_force_push"):
+                continue
+            rc2, res = self._api(
+                "/projects/%s/protected_branches/%s" % (project, name),
+                "PATCH", {"allow_force_push": True})
+            if rc2 in (200, 201):
+                notes.append("%s: force-push enabled on '%s'" % (self.name,
+                                                                 name))
+            else:
+                notes.append("%s: could not enable force-push on '%s' (%s)"
+                             % (self.name, name, _api_error(res)))
+        return notes
+
+    def _project_id(self, repo):
+        """numeric project id, or 'owner%2Fpath' for API paths"""
+        path = gitlab_path(repo["name"])
+        owner = self.owner
+        if owner:
+            return urllib.request.quote("%s/%s" % (owner, path), safe="")
+        return None
+
     def token_info(self):
         """expiry + scopes, for the token-expiry warning"""
         if not self.token:
@@ -296,7 +397,7 @@ class GitLabPlatform:
 
     def ensure_repo(self, repo):
         name = repo["name"]
-        path = name.replace(" ", "-")
+        path = gitlab_path(name)
         # lookup by path under owner namespace
         if self.owner:
             rc, out = self._api("/projects/%s%%2F%s"
@@ -322,8 +423,8 @@ class GitLabPlatform:
             for p in out:
                 if _norm(p["name"]) == _norm(name):
                     return self._url_with_token(p["http_url_to_repo"])
-        raise RuntimeError("GitLab create failed: %s"
-                           % (out.get("message") if isinstance(out, dict) else out))
+        raise RuntimeError("GitLab create failed for '%s': %s"
+                           % (path, _api_error(out)))
 
 
 # ------------------------------------------------------- Forgejo / Gitea
@@ -394,6 +495,47 @@ class ForgejoPlatform:
         owner = self.owner or (self.user() or "")
         return self._push_url(owner, repo["name"])
 
+    def prepare_push(self, repo, push_url):
+        """Allow force-push on protected branches (same reason as GitLab)."""
+        notes = []
+        owner = self.owner or (self.user() or "")
+        path = _fs_safe(repo["name"])
+        rc, out = self._api("/repos/%s/%s/branch_protections"
+                            % (owner, path))
+        if not isinstance(out, list):
+            return notes
+        for b in out:
+            name = b.get("branch_name") or b.get("name")
+            if not name:
+                continue
+            body = {"enable_push": True,
+                    "enable_push_whitelist": False,
+                    "enable_force_push": True}
+            rc2, res = self._api(
+                "/repos/%s/%s/branch_protections/%s" % (owner, path, name),
+                "PATCH", body)
+            if rc2 in (200, 201):
+                notes.append("%s: force-push enabled on '%s'" % (self.name,
+                                                                 name))
+            elif rc2 == 404:
+                # older Gitea had no PATCH: delete + recreate
+                self._api("/repos/%s/%s/branch_protections/%s"
+                          % (owner, path, name), "DELETE")
+                rc3, res3 = self._api(
+                    "/repos/%s/%s/branch_protections" % (owner, path),
+                    "POST", {"branch_name": name, "enable_push": True,
+                             "enable_force_push": True})
+                if rc3 in (200, 201):
+                    notes.append("%s: recreated protection on '%s' with "
+                                 "force-push" % (self.name, name))
+                else:
+                    notes.append("%s: could not relax '%s' (%s)"
+                                 % (self.name, name, _api_error(res3)))
+            else:
+                notes.append("%s: could not relax '%s' (%s)"
+                             % (self.name, name, _api_error(res)))
+        return notes
+
     def token_info(self):
         """Forgejo/Gitea access tokens do not expire by default"""
         return {"has_token": bool(self.token), "expires_at": None,
@@ -460,6 +602,10 @@ class LocalPlatform:
     def repo_url(self, repo):
         """expected URL without creating anything (read-only probing)"""
         return os.path.join(self.path, _fs_safe(repo["name"]) + ".git")
+
+    def prepare_push(self, repo, push_url):
+        """a bare folder has no branch protection"""
+        return []
 
     def token_info(self):
         """local folders need no credentials"""
@@ -545,6 +691,9 @@ class BitbucketPlatform:
         """expected URL without creating anything (read-only probing)"""
         return "%s/%s.git" % (self.url, repo["name"])
 
+    def prepare_push(self, repo, push_url):
+        return []
+
     def token_info(self):
         """Bitbucket app-password expiry is not exposed by the API"""
         return {"has_token": bool(self.token), "expires_at": None,
@@ -606,6 +755,9 @@ class GenericPlatform:
     def repo_url(self, repo):
         """generic platforms have no predictable URL"""
         raise RuntimeError("generic platforms cannot probe repos")
+
+    def prepare_push(self, repo, push_url):
+        return []
 
     def token_info(self):
         return {"has_token": bool(self.token), "expires_at": None,

@@ -721,11 +721,31 @@ gitsync uninstall     # removes scheduler + symlink (config & mirrors kept)
 
 ## Troubleshooting
 
+### A sync reports "partial"
+
+Partial means the repo synced to some targets but not all. The notification
+names the repo and the reason. The three common causes are handled
+automatically now:
+
+- **`You are not allowed to force push code to a protected branch`** — the
+  target's branch protection refuses a mirror push. gitsync enables
+  `allow_force_push` on that branch (access levels are left alone) and
+  retries. You will see `force-push enabled on 'master'` in the log.
+- **`Rate limit exceeded`** (GitLab) — the API answered 429. Requests are
+  retried with backoff; a large run may simply take longer.
+- **`GitLab create failed for '<name>': path: can only include ...`** —
+  GitLab's path rules are stricter than GitHub's. Names are sanitised
+  automatically (leading `_`, `-`, `.` are illegal there).
+
+If a repo still fails, `gitsync sync --repos NAME --dry-run` shows the
+source and target state without changing anything.
+
+### Other problems
+
 | Symptom | Fix |
 |---|---|
 | `gitsync: command not found` | `~/.local/bin` not in PATH (with `--user`), or re-run the installer |
 | A platform shows FAIL | `gitsync platforms` for the reason; check token scopes with `gitsync scopes` |
-| `Rate limit exceeded` | wait a minute; lower `workers` |
 | New repo missing on a target | run `gitsync sync` — it creates them automatically |
 | Refs deleted on a target | that's `mode: full` (exact mirror). Use `mode: safe` to keep them |
 | Another sync already running | a run is in progress (timer or manual); wait and retry |
@@ -759,13 +779,14 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (15 assertions)   PASS
+#   unit checks (75 assertions)   PASS
 # CI: all 4 checks passed
 ```
 
-The same checks are also in `.github/workflows/ci.yml` and
-`.gitlab-ci.yml` for hosted CI, and this repo ships a `pre-push` hook that
-runs them before every push (`git push --no-verify` to bypass).
+The same checks are also in `.github/workflows/ci.yml`,
+`.forgejo/workflows/ci.yml` and `.gitlab-ci.yml` for hosted CI, and this repo
+ships a `pre-push` hook that runs them before every push
+(`git push --no-verify` to bypass).
 
 ## Documentation
 

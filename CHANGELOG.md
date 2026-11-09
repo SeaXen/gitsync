@@ -4,6 +4,40 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-11-09
+
+Fixes the three things that made a sync report "partial" on a healthy setup.
+
+### Fixed
+
+- **Protected branches no longer block a mirror push.** GitLab and
+  Forgejo/Gitea refuse `--force` on a protected branch, so a repository
+  that had drifted (or was first pushed with different history) failed
+  with *"You are not allowed to force push code to a protected branch"*
+  and stayed permanently out of sync. The push now detects that specific
+  rejection, asks the adapter to enable force-push on the protected
+  branches (`allow_force_push`, access levels untouched), and retries the
+  same push once. The extra API calls happen only on failure — the happy
+  path is unchanged.
+- **GitLab API rate limits are retried.** A 50-repo run bursts hard, and
+  GitLab.com answers 429 (or 502/503) for some repos; those looked like
+  "GitLab create failed" and were counted as partial. `_http` now backs
+  off and retries 429/500/502/503/504 up to twice, honouring
+  `Retry-After` (capped at 30s).
+- **GitLab project paths starting with `_`, `-` or `.`** were rejected by
+  GitLab with an opaque "create failed" (its path rules are stricter than
+  GitHub's). Names are now sanitised with `gitlab_path()` — leading
+  separators stripped, accents transliterated, `.git`/`.atom` suffixes
+  removed — and API validation errors are flattened into one readable
+  line by `_api_error()` instead of dumping a dict.
+- **Shorter push errors.** A failure now reports the first meaningful
+  `remote:` line instead of a truncated wall of git noise.
+
+### Changed
+
+- 75 unit assertions (was 58), covering path sanitisation, error
+  flattening, protected-branch detection and concise error extraction.
+
 ## [1.2.0] - 2026-11-09
 
 Five new capabilities, plus a fix for a rendering bug that had silently

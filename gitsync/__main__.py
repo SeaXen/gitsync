@@ -968,7 +968,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (58 assertions)", c_units)
+    check("unit checks (75 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1086,6 +1086,30 @@ _c2 = {'routes': [{'name': 'a', 'schedule': 'weekly'},
 assert C.finest_schedule(_c2) == '6h'
 _c3 = {'routes': [{'name': 'a', 'schedule': 'off'}]}
 assert C.finest_schedule(_c3) is None
+
+    # gitlab project-path sanitiser (GitLab rejects a leading _/-/.)
+assert P.gitlab_path('_gstest_src') == 'gstest_src'
+assert P.gitlab_path('-leading') == 'leading'
+assert P.gitlab_path('my repo') == 'my-repo'
+assert P.gitlab_path('ok-name') == 'ok-name'
+assert P.gitlab_path('trailing.git') == 'trailing'
+assert P.gitlab_path('...') == 'repo'
+# readable API errors instead of a raw dict
+assert P._api_error({'message': {'path': ['bad']}}) == 'path: bad'
+assert P._api_error({'message': 'nope'}) == 'nope'
+assert P._api_error({'message': ['a', 'b']}) == 'a; b'
+assert P._api_error('plain') == 'plain'
+# protected-branch detection + concise git errors
+assert SY._protection_error('remote: You are not allowed to force push code to a protected branch') is True
+assert SY._protection_error('some other failure') is False
+assert SY._protection_error('') is False
+assert SY._short_error('remote: nope\\nTo example') == 'nope'
+assert SY._short_error('hint: x\\nremote: real reason') == 'real reason'
+assert SY._short_error('') == ''
+# every adapter exposes the prepare_push hook
+for _cls in (P.GitHubPlatform, P.GitLabPlatform, P.ForgejoPlatform,
+             P.LocalPlatform):
+    assert hasattr(_cls, 'prepare_push')
 
 print('all unit checks passed')
 """
