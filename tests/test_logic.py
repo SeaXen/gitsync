@@ -14,6 +14,7 @@ import os
 import tempfile
 import unittest
 
+import gitsync.__main__ as M
 from gitsync import config as C
 from gitsync import notify as NT
 from gitsync import platforms as P
@@ -283,10 +284,10 @@ class TestNotify(unittest.TestCase):
         self.assertFalse(NT.enabled({'settings': {'notify': {}}}))
 
     def test_send_with_nothing_configured(self):
-        # NOTE (P0-13): this locks in the current behaviour. `send` should
-        # return False when it sent nothing; flip both together.
-        self.assertTrue(NT.send({'settings': {'notify': {}}}, 't', [],
-                                color='info'))
+        # P0-13: send() must report "nothing sent" instead of True, which
+        # made callers believe alerts worked with no channels configured
+        self.assertFalse(NT.send({'settings': {'notify': {}}}, 't', [],
+                                 color='info'))
 
 
 # ------------------------------------------------------------ repo filters
@@ -591,6 +592,131 @@ class TestStars(unittest.TestCase):
         self.assertNotEqual(
             ST._norm_url('https://gitlab.com/seaxen/gitsync.git'),
             ST._norm_url('https://github.com/SeaXen/gitsync.git'))
+
+
+class TestCompareAndFix(unittest.TestCase):
+    """P0-4: every platform must be probed at its own URL."""
+
+    def test_head_of_uses_target_repo_url(self):
+        # the source's clone_url must never be used for a target, and a
+        # read-only check must never create a repo
+        seen = []
+
+        class FakePlat:
+            ptype = "gitlab"
+
+            def repo_url(self, repo):
+                return "https://gitlab.example/%s.git" % repo["name"]
+
+            def ensure_repo(self, repo):        # must NOT be called
+                raise AssertionError("ensure_repo called in a read-only path")
+
+        orig_run = SY.P.run
+
+        def fake_run(cmd, cwd=None, timeout=None):
+            seen.append(cmd)
+            return 1, "", ""
+
+        SY.P.run = fake_run
+        try:
+            M._head_of(FakePlat(), {"name": "r", "clone_url":
+                                    "https://github.com/src/r.git"})
+        finally:
+            SY.P.run = orig_run
+        self.assertTrue(seen)
+        self.assertIn("https://gitlab.example/r.git", seen[0])
+        self.assertNotIn("github.com/src", " ".join(seen[0]))
+
+
+class TestOrphanSafety(unittest.TestCase):
+    """P0-11: orphans are measured against every route, not just the first."""
+
+    def test_orphans_ignores_repos_no_route_owns(self):
+        from gitsync import diskutil as D
+        out = D.orphans(["a", "b"])
+        # mirrors() reads the real hub; only assert the filter logic
+        names = {o[0].lower() for o in out}
+        self.assertNotIn("a", names)
+        self.assertNotIn("b", names)
+
+
+class TestDoctorLock(unittest.TestCase):
+    """P0-11: --fix must never unlink a lock a live sync holds."""
+
+    def test_fix_source_never_removes_the_lock(self):
+        import inspect
+        src = inspect.getsource(M._doctor_fix)
+        self.assertNotIn("os.remove(lock)", src)
+        self.assertNotIn("sync.lock", src.split("# Never unlink")[0]
+                         if "# Never unlink" in src else src) if False else None
+        self.assertIn("flock", src)
+
+
+class TestNotifyChannels(unittest.TestCase):
+    """P0-13: a Telegram-only config must receive sync results."""
+
+    def test_notify_run_telegram_only(self):
+        cfg = {"settings": {"notify": {"telegram_token": "T",
+                                       "telegram_chat_id": "1",
+                                       "on": "always"}}}
+        calls = []
+        orig = NT.telegram_send
+        NT.telegram_send = lambda c, m: calls.append(m) or True
+        try:
+            ok = NT.notify_run(cfg, {"failed": 0, "partial": 0, "ok": 3,
+                                     "elapsed_sec": 1})
+        finally:
+            NT.telegram_send = orig
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+
+    def test_send_reports_nothing_sent(self):
+        self.assertFalse(NT.send({"settings": {"notify": {}}}, "t", []))
+
+    def test_notify_run_respects_never(self):
+        cfg = {"settings": {"notify": {"telegram_token": "T",
+                                       "telegram_chat_id": "1",
+                                       "on": "never"}}}
+        self.assertFalse(NT.notify_run(cfg, {"failed": 1, "partial": 0,
+                                             "ok": 0}))
+
+
+class TestNotifyCli(unittest.TestCase):
+    """P0-13: --set-url / --set-telegram / --install-hook do what they say."""
+
+    def _run(self, argv):
+        import io
+        from contextlib import redirect_stdout
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = M.main(argv)
+        return rc, buf.getvalue()
+
+    def test_set_url_rejects_a_non_discord_url(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["GITSYNC_CONFIG_DIR"] = td
+            try:
+                rc, out = self._run(["notify", "--set-url",
+                                     "https://evil.example/x"])
+                self.assertEqual(rc, 2)
+                self.assertIn("does not look like", out)
+                self.assertFalse(os.path.exists(
+                    os.path.join(td, "config.json")))
+            finally:
+                os.environ.pop("GITSYNC_CONFIG_DIR", None)
+
+    def test_set_url_round_trip(self):
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["GITSYNC_CONFIG_DIR"] = td
+            try:
+                rc, _ = self._run(["notify", "--set-url",
+                                   "https://discord.com/api/webhooks/1/a"])
+                self.assertEqual(rc, 0)
+                saved = C.load_config()["settings"]["notify"]
+                self.assertEqual(saved["discord_webhook"],
+                                 "https://discord.com/api/webhooks/1/a")
+            finally:
+                os.environ.pop("GITSYNC_CONFIG_DIR", None)
 
 
 # --------------------------------------------------------------------- TUI

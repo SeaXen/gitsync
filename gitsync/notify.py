@@ -77,18 +77,29 @@ def telegram_send(cfg, text):
                            "disable_web_page_preview": True})
 
 
-def send(cfg, title, fields, color="ok", content=None):
-    """send to Discord (embed) and/or Telegram (plain text)"""
-    url, on = _settings(cfg)
-    ok_d = True
-    if url:
-        ok_d = _send_discord(url, title, fields, color, content)
+def _channels(cfg):
+    """(discord_url, telegram_token, telegram_chat) - what is configured"""
+    url, _on = _settings(cfg)
     token, chat = _telegram(cfg)
+    return url, token, chat
+
+
+def send(cfg, title, fields, color="ok", content=None):
+    """send to Discord (embed) and/or Telegram (plain text).
+
+    Returns True only when something was actually sent - returning True for
+    a config with no channels made callers believe alerts worked.
+    """
+    url, token, chat = _channels(cfg)
+    if not (url or (token and chat)):
+        return False
+    ok = True
+    if url:
+        ok = _send_discord(url, title, fields, color, content) and ok
     if token and chat:
         lines = [title] + ["%s: %s" % (n, v) for n, v, _ in fields]
-        ok_t = telegram_send(cfg, "\n".join(lines))
-        return ok_d and ok_t
-    return ok_d
+        ok = telegram_send(cfg, "\n".join(lines)) and ok
+    return ok
 
 
 def _send_discord(url, title, fields, color="ok", content=None):
@@ -108,9 +119,15 @@ def _send_discord(url, title, fields, color="ok", content=None):
 
 
 def notify_run(cfg, summary):
-    """called at the end of a sync run; respects the 'on' setting"""
-    url, on = _settings(cfg)
-    if not url or on == "never":
+    """called at the end of a sync run; respects the 'on' setting.
+
+    Uses the same "Discord or Telegram" test as notify_test: the old code
+    returned early when the Discord URL was empty, so a Telegram-only user
+    never received sync results even though `notify --test` had passed.
+    """
+    url, token, chat = _channels(cfg)
+    _u, on = _settings(cfg)
+    if not (url or (token and chat)) or on == "never":
         return False
     failed = summary.get("failed", 0)
     partial = summary.get("partial", 0)

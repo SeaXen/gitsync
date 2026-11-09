@@ -564,7 +564,10 @@ def _head_of(plat, repo):
         if rc == 0 and out.strip():
             return out.strip().splitlines()[0]
         return None
-    url = repo.get("clone_url") or plat.ensure_repo(repo)
+    # the platform's own URL, never the source's clone_url (which made every
+    # target probe the source and report a false "in sync") and never
+    # ensure_repo (a read-only check must not create repositories)
+    url = plat.repo_url(repo)
     rc, out, _ = P.run(["git", "ls-remote", url, "HEAD"], timeout=120)
     return out.split("\t")[0] if out else None
 
@@ -712,20 +715,31 @@ def cmd_disk(args):
     cfg = C.load_config()
 
     # ---- orphan detection (mirrors whose repo is gone upstream) ----
-    src_name = args.route_source
-    if not src_name:
-        routes = C.routes(cfg)
-        src_name = routes[0].get("source") if routes else None
+    # The hub is shared by every route, so "orphan" means: not in the
+    # filtered repo list of ANY enabled route. Comparing against the first
+    # route's source alone marked mirrors that belong to another route (or
+    # that a route's include/exclude glob keeps) as orphaned, and
+    # --prune-orphans then deleted live data.
     orphans = []
-    if src_name:
-        sp = C.platform(cfg, src_name)
-        if sp and sp.get("enabled"):
-            try:
-                live = [r["name"] for r in P.make(src_name, sp).list_repos()]
-                orphans = D.orphans(live)
-            except Exception as e:
-                print("cannot list %s to check for orphans: %s"
-                      % (src_name, e))
+    live_names = set()
+    listed = False
+    for route in C.routes(cfg):
+        if route.get("enabled") is False:
+            continue
+        sname = route.get("source")
+        sp = C.platform(cfg, sname)
+        if not sp or not sp.get("enabled"):
+            continue
+        try:
+            repos = P.make(sname, sp).list_repos()
+        except Exception as e:
+            print("cannot list %s to check for orphans: %s" % (sname, e))
+            continue
+        listed = True
+        for r in SYNC._filter_repos(repos, route):
+            live_names.add(r["name"].lower())
+    if listed:
+        orphans = D.orphans(live_names)
 
     ms = D.mirrors()
     total = sum(m[2] for m in ms)
@@ -753,7 +767,7 @@ def cmd_disk(args):
         print("  total size   : %s" % D.human(sz))
 
     if args.orphans:
-        print("\norphaned mirrors (repo gone from %s):" % src_name)
+        print("\norphaned mirrors (in no enabled route's repo list):")
         if not orphans:
             print("  none — hub matches the source")
         for name, path, size in orphans:
@@ -780,6 +794,16 @@ def cmd_disk(args):
                   % (name, D.human(size), age))
 
     if args.gc:
+        # a gc rewrites the same objects a sync is pushing: take the lock
+        import fcntl
+        _lock = os.path.join(C.DATA_DIR, "sync.lock")
+        C.ensure_dirs()
+        _fh = open(_lock, "w")
+        try:
+            fcntl.flock(_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("a sync is running - not gc-ing")
+            return 2
         older = args.older_than
         todo = ms
         if older:
@@ -1009,7 +1033,9 @@ def cmd_doctor(args):
     print("  mirror hub    : %d mirrors (%s)" % (n_mirrors, C.MIRROR_DIR))
     rc, out, _ = sh(["df", "-h", C.DATA_DIR],
                     timeout=30)
-    parts = (out or "").split()
+    # no shell, so skip the header line ourselves
+    lines = [l for l in (out or "").splitlines() if l.strip()]
+    parts = (lines[-1].split() if lines else [])
     if len(parts) > 4:
         print("  disk          : %s free of %s (%s used)"
               % (parts[3], parts[1], parts[4]))
@@ -1051,20 +1077,32 @@ def _doctor_fix():
         if not entry.endswith(".git"):
             continue
         path = os.path.join(hub, entry)
-        # a bare mirror with no refs is a failed clone -> remove it
-        rc, out, _ = sh(["git", "for-each-ref"], cwd=path, timeout=30)
-        if rc != 0 or not out.strip():
+        # a bare mirror with no refs is a failed clone -> remove it. An
+        # empty-but-valid repo (HEAD file, zero refs) is a real empty repo,
+        # not a failure - keep it.
+        rc, out, _ = sh(["git", "rev-parse", "--is-bare-repository"],
+                        cwd=path, timeout=30)
+        if rc != 0:
             try:
                 shutil.rmtree(path)
                 fixed.append("removed broken mirror: %s" % entry)
             except OSError as e:
                 fixed.append("could not remove %s: %s" % (entry, e))
-    # stale sync lock
+    # Never unlink sync.lock: a live sync holds an flock on that inode, so
+    # deleting it lets the next sync lock a fresh file and two syncs push
+    # the same repo. A dead holder is detected by trying the lock, not by
+    # removing the file.
     lock = os.path.join(C.DATA_DIR, "sync.lock")
     if os.path.exists(lock):
+        import fcntl
         try:
-            os.remove(lock)
-            fixed.append("removed stale sync lock")
+            fh = open(lock, "w")
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                fixed.append("sync lock was stale (no live sync)")
+            except OSError:
+                fixed.append("a sync is running - lock left alone")
         except OSError:
             pass
     return fixed
@@ -1104,10 +1142,57 @@ def cmd_update(args):
     return rc
 
 
+HOOK_TEXT = """#!/usr/bin/env bash
+# gitsync pre-push hook - runs the full check suite before every push.
+# Installed by: gitsync ci --install-hook
+# Skip once with: git push --no-verify
+set -e
+APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+export PYTHONPATH="$APP_DIR"
+echo "pre-push: running gitsync ci checks..."
+python3 -m gitsync ci || {
+    echo ""
+    echo "pre-push: checks FAILED - push aborted (fix, or bypass with --no-verify)"
+    exit 1
+}
+echo "pre-push: all checks passed - pushing"
+"""
+
+
+def repo_root_of(path):
+    """the repository root that contains gitsync/ (works installed or not)"""
+    d = os.path.dirname(os.path.dirname(os.path.abspath(path)))
+    return d if os.path.isdir(os.path.join(d, "gitsync")) else os.getcwd()
+
+
+def _install_hook(repo_root):
+    """write .git/hooks/pre-push. Never overwrites an existing one."""
+    hooks = os.path.join(repo_root, ".git", "hooks")
+    if not os.path.isdir(hooks):
+        return "not a git repository: %s" % repo_root
+    path = os.path.join(hooks, "pre-push")
+    if os.path.exists(path):
+        return "a pre-push hook already exists: %s" % path
+    with open(path, "w") as f:
+        f.write(HOOK_TEXT)
+    os.chmod(path, 0o755)
+    return None
+
+
 def cmd_ci(args):
     """run the full check suite locally (same checks as the CI workflows)"""
     import py_compile
     import tempfile
+    if getattr(args, "install_hook", False):
+        err = _install_hook(repo_root_of(__file__))
+        if err:
+            print("hook not installed: %s" % err)
+            return 2
+        print("installed: %s" % os.path.join(repo_root_of(__file__),
+                                             ".git", "hooks", "pre-push"))
+        print("every `git push` now runs `gitsync ci` first "
+              "(bypass once with --no-verify)")
+        return 0
 
     app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     repo_root = os.path.dirname(app_dir)
@@ -1272,18 +1357,49 @@ def cmd_ci(args):
     return 0
 
 
+DISCORD_PREFIXES = ("https://discord.com/api/webhooks/",
+                    "https://discordapp.com/api/webhooks/")
+
+
 def cmd_notify(args):
     cfg = C.load_config()
     if args.test:
         ok, msg = NT.notify_test(cfg)
-        print("discord notification: %s" % msg)
+        print("notification test: %s" % msg)
         return 0 if ok else 1
+    if getattr(args, "set_url", None):
+        url = args.set_url.strip()
+        if not url.startswith(DISCORD_PREFIXES):
+            print("that does not look like a Discord webhook "
+                  "(expected %s...)" % DISCORD_PREFIXES[0])
+            return 2
+        cfg.setdefault("settings", {}).setdefault("notify", {})
+        cfg["settings"]["notify"]["discord_webhook"] = url
+        C.save_config(cfg)
+        print("discord webhook saved")
+        return 0
+    if getattr(args, "set_telegram", None):
+        tok = args.set_telegram.strip()
+        chat = (getattr(args, "chat_id", None) or "").strip()
+        if not tok or not chat:
+            print("--set-telegram needs --chat-id")
+            return 2
+        cfg.setdefault("settings", {}).setdefault("notify", {})
+        cfg["settings"]["notify"]["telegram_token"] = tok
+        cfg["settings"]["notify"]["telegram_chat_id"] = chat
+        C.save_config(cfg)
+        print("telegram credentials saved")
+        return 0
     url, on = NT._settings(cfg)
+    tok, chat = NT._telegram(cfg)
     print("discord webhook : %s" % ("configured" if url else "NOT configured"))
+    print("telegram        : %s" % ("configured" if (tok and chat)
+                                    else "NOT configured"))
     print("notify on       : %s" % on)
-    if not url:
-        print("\nset it with:")
+    if not url and not (tok and chat):
+        print("\nset one with:")
         print("  gitsync notify --set-url https://discord.com/api/webhooks/...")
+        print("  gitsync notify --set-telegram BOTTOKEN --chat-id 12345")
     return 0
 
 
@@ -1315,7 +1431,12 @@ def cmd_fix(args):
         repos = SYNC._filter_repos(repos, route)
         print("route %s: checking %d repos against %s..."
               % (route.get("name"), len(repos), ", ".join(targets)))
-        mode = C.setting(cfg, "mode", "full")
+        # the route's own mode and conflict policy, not just the globals
+        mode = route.get("mode") or C.setting(cfg, "mode", "full")
+        mesh = route.get("direction") == "mesh"
+        conflict = route.get("mesh_conflict") or \
+            C.setting(cfg, "mesh_conflict", "newest")
+        peers = SYNC.route_peers(cfg, route) if mesh else {}
         for repo in repos:
             checked += 1
             try:
@@ -1329,8 +1450,12 @@ def cmd_fix(args):
                     continue
                 print("  fixing %-28s -> %s" % (repo["name"],
                                                 ", ".join(drifted)))
-                status, detail, errors = SYNC.sync_repo(repo, source, targets,
-                                                        mode)
+                if mesh:
+                    status, detail, errors = SYNC.mesh_sync_repo(
+                        repo, peers, conflict)
+                else:
+                    status, detail, errors = SYNC.sync_repo(repo, source,
+                                                            targets, mode)
                 if status in ("ok", "partial"):
                     fixed += 1
                 else:
@@ -1564,9 +1689,14 @@ def main(argv=None):
                     help="install a pre-push hook in this repo")
     sp.set_defaults(func=cmd_ci)
 
-    sp = sub.add_parser("notify", help="Discord notification settings")
+    sp = sub.add_parser("notify", help="Discord / Telegram notification settings")
     sp.add_argument("--test", action="store_true", help="send a test message")
-    sp.add_argument("--set-url", help="set the Discord webhook URL")
+    sp.add_argument("--set-url", dest="set_url",
+                    help="save a Discord webhook URL")
+    sp.add_argument("--set-telegram", dest="set_telegram",
+                    help="save a Telegram bot token (needs --chat-id)")
+    sp.add_argument("--chat-id", dest="chat_id",
+                    help="Telegram chat id for --set-telegram")
     sp.set_defaults(func=cmd_notify)
 
     sp = sub.add_parser("fix", help="detect drift and re-sync mismatched repos")
