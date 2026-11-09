@@ -201,8 +201,19 @@ def uninstall_webhooks():
 
 
 def webhooks_active():
-    rc, out, _ = _sh(["systemctl", "is-active", WEBHOOK_SERVICE])
-    return (out or "").strip() == "active"
+    """is the webhook receiver service running?
+
+    _sh() returns a CompletedProcess (it is also used where only the return
+    code matters), so read .returncode/.stdout rather than unpacking it —
+    the old tuple unpack raised "cannot unpack non-iterable
+    CompletedProcess" the moment anything asked.
+    """
+    try:
+        r = _sh(["systemctl", "is-active", WEBHOOK_SERVICE])
+        return ((r.stdout or "").strip() == "active"
+                and getattr(r, "returncode", 1) == 0)
+    except Exception:
+        return False
 
 def status():
     """human-readable scheduler status"""

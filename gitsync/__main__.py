@@ -59,8 +59,19 @@ def cmd_sync(args):
         routes = C.routes(cfg)
         if args.route:
             routes = [r for r in routes if r.get("name") == args.route]
-        for r in routes:
-            r["targets"] = [t for t in r.get("targets", []) if t == args.to]
+        # a mesh route derives its peers from its targets, so trimming them
+        # would silently turn "sync everything" into a one-peer run (or into
+        # nothing at all, when the requested target was paused)
+        mesh = [r.get("name") for r in routes
+                if r.get("direction") == "mesh"]
+        if mesh:
+            print("--to does not apply to mesh route(s): %s" % ", ".join(mesh))
+            print("  a mesh always syncs all of its peers; use --route to")
+            print("  pick a route, or pause a target to keep one out")
+        else:
+            for r in routes:
+                r["targets"] = [t for t in r.get("targets", [])
+                                if t == args.to]
         cfg["routes"] = routes
         if not any(r.get("targets") for r in routes):
             print("no route targets '%s'" % args.to)
@@ -437,6 +448,15 @@ def cmd_routes(args):
             print("    paused targets: %s  (resume: gitsync routes resume "
                   "%s %s)" % (", ".join(sorted(paused_t)), r.get("name"),
                               ",".join(sorted(paused_t))))
+        over = []
+        if r.get("workers"):
+            over.append("workers=%s" % r["workers"])
+        if r.get("mode"):
+            over.append("mode=%s" % r["mode"])
+        if r.get("mesh_conflict"):
+            over.append("mesh_conflict=%s" % r["mesh_conflict"])
+        if over:
+            print("    overrides: %s" % ", ".join(over))
     if not C.routes(cfg):
         print("(no routes - add one: gitsync routes add main github gitlab)")
     else:
@@ -626,6 +646,17 @@ def cmd_mirror(args):
     if not targets:
         print("no targets - add one with: gitsync platforms add")
         return 2
+    # a mesh route resolves per ref (newest wins), so running the one-way
+    # engine here could overwrite a newer commit living on another peer
+    mesh = route.get("direction") == "mesh"
+    if mesh:
+        conflict = route.get("mesh_conflict") or \
+            C.setting(cfg, "mesh_conflict", "newest")
+        peers = {n: P.make(n, C.platform(cfg, n))
+                 for n in SY.route_peers(cfg, route)}
+        if args.to:
+            keep = {route.get("source"), args.to}
+            peers = {n: p for n, p in peers.items() if n in keep}
     names = [r for r in args.repos if r.strip()]
     try:
         available = source.list_repos()
@@ -644,8 +675,12 @@ def cmd_mirror(args):
             print("%s: not found on %s" % (name, src_name))
             failed += 1
             continue
-        status, detail, errors = SY.sync_repo(
-            repo, source, targets, C.setting(cfg, "mode", "full"))
+        if mesh:
+            status, detail, errors = SY.mesh_sync_repo(repo, peers, conflict)
+        else:
+            status, detail, errors = SY.sync_repo(
+                repo, source, targets,
+                route.get("mode") or C.setting(cfg, "mode", "full"))
         print("%s: %s %s" % (name, status, detail))
         if status in ("ok", "partial"):
             ok += 1
@@ -1067,7 +1102,7 @@ def cmd_ci(args):
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
-    check("unit checks (83 assertions)", c_units)
+    check("unit checks (99 assertions)", c_units)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1231,6 +1266,38 @@ assert SY.active_targets(_cfg, _r) == {}
 assert set(SY.route_peers(_cfg, _r)) == {'a'}
 # CLI error text: last meaningful line only
 assert P._short_text('line one\\n\\nthe real reason') == 'the real reason'
+
+# ---- mesh conflict policy: "skip" refuses to overwrite a disagreement ----
+_c = {'branch': [(10, 'sha_old'), (20, 'sha_new')]}
+assert SY._choose(_c, 'newest') == ({'branch': (20, 'sha_new')}, [])
+assert SY._choose(_c, 'skip') == ({}, ['branch'])
+# every peer agrees -> nothing is skipped, even under "skip"
+_ok = {'branch': [(10, 'same'), (30, 'same')]}
+assert SY._choose(_ok, 'skip') == ({'branch': (30, 'same')}, [])
+assert SY._choose({'b': [(1, 'x')]}, 'newest')[0]['b'] == (1, 'x')
+# last_route_run() reads the per-route timestamp file
+assert SY.last_route_run('no-such-route') is None
+# TUI progress parsing: "[12/54] OK   repo -> targets" -> (12, 54, repo)
+tui.state["sync_lines"] = ["=== route 'x' ===", "  github: 3 repos",
+                           "  [1/3] OK   nine-router -> a,b"]
+assert tui.sync_progress() == (1, 3, 'nine-router')
+tui.state["sync_lines"].append("  [2/3] OK   gitsync -> a,b")
+assert tui.sync_progress() == (2, 3, 'gitsync')
+assert tui.sync_progress.__doc__
+# merged-ref counter for the end-of-sync flash
+assert tui._merged_refs(["  x (3 refs merged)", "  y (1 refs merged)"]) == 4
+assert tui._merged_refs(["  x"]) == 0
+assert tui._merged_refs([]) == 0
+# tab bar hit-testing: the same arithmetic draw() uses
+assert tui._tab_at(0, 120) is None
+assert tui._tab_at(28, 120) == 0
+assert tui._tab_at(57, 120) == 2
+assert tui._tab_at(200, 120) is None
+# modal footer prefers a fresh flash over the static hint
+tui.state['message'] = ('paused: backup',
+                       __import__('time').time() + 5)
+assert tui.state['message'][0] == 'paused: backup'
+tui.state['message'] = ('x' * 0, 0)
 
 print('all unit checks passed')
 """

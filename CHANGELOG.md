@@ -4,6 +4,103 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-11-09
+
+A review pass over the TUI plus the guardrails a mesh needs now that it can
+write to every peer.
+
+### Fixed
+
+- **The dashboard hammered the network.** `_health_strip()` ran
+  `TK.check()` (an HTTP round-trip per platform) and `diskutil.mirrors()`
+  (a full walk of the hub) on *every* frame, and the dashboard redraws once
+  a second for the clock — measured at **474 ms per frame and ~240 API
+  calls a minute** while the dashboard sat open. Both now run in a
+  background thread on a 30 s timer; a frame costs 1.5 ms.
+- **The sync progress bar was dead code.** It read `SYNC.progress` in the
+  TUI's own process, but the sync runs in a child process, so it always
+  showed `starting...` / `in flight: ...`. It now parses the child's own
+  `[12/54] OK   repo` output and shows a real bar plus the current repo.
+- **`sync --to X` silently crippled a mesh route.** `--to` rewrites a
+  route's targets, which on a mesh dropped it to one peer (reproduced:
+  `--to backup` → *"mesh needs at least two live peers — skipped"*). It
+  now refuses with an explanation instead of quietly doing nothing.
+- **`gitsync mirror NAME` bypassed the mesh.** It always ran the one-way
+  engine, so on a mesh route it could overwrite a newer commit living on
+  another peer. It now runs `mesh_sync_repo` for mesh routes.
+- **The webhook receiver panel crashed the TUI.**
+  `scheduler.webhooks_active()` unpacked a `CompletedProcess` as a tuple
+  (*"cannot unpack non-iterable CompletedProcess"*); it had only ever been
+  called inside a bare `try/except`. Now fixed and reachable from the TUI.
+- **The pause screen lost the cursor.** With more rows than the screen it
+  rendered `rows[:h-4]`, so moving the highlight down past the window made
+  it vanish (reproduced: 11 rows on a 14-line terminal). The list now
+  windows around the cursor and shows `N-M of M`.
+- **The repo browser had no cursor.** Arrows scrolled the list and the top
+  row was the implicit, unmarked selection. There is now a highlighted
+  cursor with a `N-M of M` counter, and Space selects what it points at.
+- **`flash()` was invisible in every modal screen** — it only writes
+  `state["message"]`, which `draw()` renders. Pausing a target, "nothing
+  selected" and "webhook saved" all vanished. Modals now share a footer
+  that shows a fresh message.
+- **The compact (mobile) dashboard printed `?`** for the last run's counts
+  because it read `synced_ok` / `github_repos`, keys that do not exist in
+  `records.json`. It now reads `ok` / `partial` / `repos`, and reports
+  partial runs.
+- **`L` (full log) opened at the oldest line** — `log_view()` computed a
+  scroll offset that `_scroll_view()` ignored, so a 2900-line log needed
+  ~30 PgDn presses to reach today. It opens 100 lines from the end, and
+  `G`/`End`/`Home` jump.
+- **The dashboard hid routes.** The route line was one truncated string;
+  with five routes the last two were invisible. It now keeps as many as
+  fit and appends `+N more (3:Routes)`.
+- **The Settings tab showed stale values** after a change made in Options
+  or by hand, because it read a snapshot refreshed only with the platform
+  counts. It now reads the config file.
+- **`routes` list and the TUI showed targets whose platform no longer
+  exists (or is disabled) as ordinary pausable rows.** The pause screen now
+  labels them `(platform disabled)`.
+
+### Added
+
+- **Mesh conflict policy.** `mesh_conflict: newest` (default, unchanged)
+  resolves a disagreement by date. `mesh_conflict: skip` leaves any ref the
+  peers disagree about exactly as it is and reports
+  `1 conflict(s) skipped: <branch>`, so a mesh can never quietly overwrite
+  one platform's commit with another's. Skipped refs are excluded from the
+  push as well as from the prune — otherwise the hub's stale copy would
+  still have travelled. Settable globally (`O` → Mesh conflicts) or per
+  route (Routes → `P` → `O`).
+- **Dry run from the TUI.** `D` previews a whole run; inside the pause
+  screen `D` previews just that route. Nothing is modified.
+- **Per-route overrides.** A route can carry its own `workers` and `mode`,
+  and (for mesh) `mesh_conflict`; all default to the global value
+  ("inherit"). Editable in Routes → `P` → `O`, shown by `gitsync routes`.
+- **Pacing.** `pace` (seconds between repos) slows a run to spare laptop
+  heat and disk throttling. Settable in `O`, logged as
+  `pacing: 1.0s between repos`.
+- **Run one route from the TUI.** `S` inside the pause screen syncs just
+  that route, with live output.
+- **Route filters without the CLI.** `F` in the pause screen edits a
+  route's include/exclude globs.
+- **Webhook receiver panel.** `N` → `W` shows the secret, whether the
+  receiver is live, the exact payload URL to paste into GitHub/GitLab/
+  Forgejo, and installs or stops the systemd service.
+- **First-run checklist** on the dashboard when no routes are configured.
+- **Per-route last run** on the Routes tab: how long ago that route ran and
+  whether the newest record failed for it (routes that never ran say so
+  instead of a false "ok").
+- **Token warning window** (`token_warn_days`) exposed in Options.
+- **Mouse support:** click a tab in the tab bar, or a row in the repo
+  browser and the pause screen. Needs a terminal that reports clicks
+  (inside tmux: `mouse on`).
+
+### Changed
+
+- 99 unit assertions (was 83), identical in all three CI files.
+- `snapshot()` (piped `gitsync tui`) now shows `[mesh]` / `[PAUSED]`
+  markers like `routes`, `status` and `doctor`.
+
 ## [1.3.0] - 2026-11-09
 
 Two features: sync in **both directions**, and pause any part of a route.

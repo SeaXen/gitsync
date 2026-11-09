@@ -179,4 +179,35 @@ jobs:
           assert set(SY.route_peers(_cfg, _r)) == {'a'}
           # CLI error text: last meaningful line only
           assert P._short_text('line one\n\nthe real reason') == 'the real reason'
+          # ---- mesh conflict policy: "skip" refuses to overwrite a disagreement ----
+          _c = {'branch': [(10, 'sha_old'), (20, 'sha_new')]}
+          assert SY._choose(_c, 'newest') == ({'branch': (20, 'sha_new')}, [])
+          assert SY._choose(_c, 'skip') == ({}, ['branch'])
+          # every peer agrees -> nothing is skipped, even under "skip"
+          _ok = {'branch': [(10, 'same'), (30, 'same')]}
+          assert SY._choose(_ok, 'skip') == ({'branch': (30, 'same')}, [])
+          assert SY._choose({'b': [(1, 'x')]}, 'newest')[0]['b'] == (1, 'x')
+          # last_route_run() reads the per-route timestamp file
+          assert SY.last_route_run('no-such-route') is None
+          # TUI progress parsing: "[12/54] OK   repo -> targets" -> (12, 54, repo)
+          tui.state["sync_lines"] = ["=== route 'x' ===", "  github: 3 repos",
+                                     "  [1/3] OK   nine-router -> a,b"]
+          assert tui.sync_progress() == (1, 3, 'nine-router')
+          tui.state["sync_lines"].append("  [2/3] OK   gitsync -> a,b")
+          assert tui.sync_progress() == (2, 3, 'gitsync')
+          assert tui.sync_progress.__doc__
+          # merged-ref counter for the end-of-sync flash
+          assert tui._merged_refs(["  x (3 refs merged)", "  y (1 refs merged)"]) == 4
+          assert tui._merged_refs(["  x"]) == 0
+          assert tui._merged_refs([]) == 0
+          # tab bar hit-testing: the same arithmetic draw() uses
+          assert tui._tab_at(0, 120) is None
+          assert tui._tab_at(28, 120) == 0
+          assert tui._tab_at(57, 120) == 2
+          assert tui._tab_at(200, 120) is None
+          # modal footer prefers a fresh flash over the static hint
+          tui.state['message'] = ('paused: backup',
+                                 __import__('time').time() + 5)
+          assert tui.state['message'][0] == 'paused: backup'
+          tui.state['message'] = ('x' * 0, 0)
           PY

@@ -93,6 +93,8 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **Any direction** | `github → gitlab`, `gitlab → forgejo`, `folder → github`, `bitbucket → everything`… |
 | **Two-way (mesh)** | one route where every peer is source and target: edit on GitLab, it lands on GitHub, Forgejo and the local hub |
 | **Pause anything** | pause one target or a whole route from the TUI (`P`) or CLI — the timer keeps running the rest |
+| **Conflict-safe mesh** | a mesh can be told to *report* a disagreement instead of overwriting it (`mesh_conflict: skip`) |
+| **Dry run anywhere** | `D` in the TUI previews a whole run, or one route, without touching anything |
 | **Same-site too** | `github → github`, `gitlab → gitlab` — several accounts per site, side by side |
 | **One-click install** | download + install + wizard + scheduler + first sync in one command |
 | **Token guidance** | the wizard shows exactly which scopes each platform needs before asking |
@@ -163,6 +165,8 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync routes pause NAME [TARGET]` | pause a whole route, or just one target |
 | `gitsync routes resume NAME [TARGET]` | resume it (targets catch up on the next run) |
 | `gitsync routes remove NAME` | remove a route |
+| `gitsync sync --to backup` | push to **one target only** (not for mesh routes) |
+| `gitsync webhooks --install` | run the receiver as a service (URL shown in the TUI) |
 | `gitsync compare` | **drift check** — compare HEADs across platforms |
 | `gitsync status` | platforms, routes, scheduler, last run |
 | `gitsync platforms` | list accounts + test every connection |
@@ -259,7 +263,26 @@ How conflicts are resolved:
 
 If two people edit the same branch on two platforms at the same time, the
 newer commit is kept and the older one is overwritten — a mesh is not a merge
-engine. For safety, pause a peer (below) while you reconcile by hand.
+engine.
+
+When you would rather it refused, set the conflict policy to `skip`:
+
+```bash
+gitsync routes add all github,gitlab,forgejo,backup
+# then, in the TUI: Routes -> P -> O -> Mesh conflicts -> skip
+# or by hand:  "mesh_conflict": "skip"   in the route
+```
+
+A run then leaves any branch or tag the peers disagree about **exactly as it
+is on every platform** and reports it, instead of picking a winner:
+
+```
+[1/1] OK   my-project -> github,gitlab,forgejo,backup (0 refs merged),
+      1 conflict(s) skipped: release-2.0
+```
+
+Reconcile by hand, and the next run converges. `newest` (the default) is the
+original behaviour.
 
 ---
 
@@ -485,12 +508,45 @@ next sync if the repo reappears).
 | `R` | refresh platform connections |
 | `P` (Routes tab) | **pause / resume** a route or one of its targets |
 | `P` (other tabs) | refresh platform connections |
+| `D` | **dry run** — preview a whole run, or one route from the pause screen |
+| `S` (pause screen) | run **just that route** now |
+| `F` (pause screen) | edit that route's include/exclude filters |
+| `O` (pause screen) | per-route workers / mode / mesh conflict |
+| `W` (notifications) | webhook receiver: secret, URL, install/stop |
+| `G` / `End` / `Home` | jump to the bottom / top of the log viewer |
+| mouse | click a tab, or a row in the repo browser / pause screen |
 | `1`–`6` | switch tabs: Dashboard / Platforms / Routes / Log / History / Settings |
 | `/` | search-filter the log or history |
 | `Q` | quit (Esc = back inside menus) |
 
 **Adaptive:** switches to a compact single-column layout on phones and narrow
 terminals (≥70×18 → full dashboard; smaller → compact; <34×10 → rotate hint).
+
+---
+
+## Per-route options and pacing
+
+Every route can override the global settings (Routes tab → `P` → `O`):
+
+| Setting | Values | Why |
+|---|---|---|
+| Parallel workers | inherit, 1, 2, 4, 8 | run one route single-threaded against a rate-limited host |
+| Mirror mode | inherit, full, safe | `full` prunes deleted refs, `safe` keeps them |
+| Mesh conflicts | inherit, newest, skip | see [Two-way sync](#two-way-sync-mesh) |
+
+Globally, `O` (options) also holds:
+
+| Setting | Values | Why |
+|---|---|---|
+| Pause between repos | 0, 1, 2, 5, 10 s | slows a run to spare laptop heat / disk throttling |
+| Mesh conflicts | newest, skip | the default for routes that do not override it |
+| Token warning | 7, 14, 30, 60, 90 days | how early a credential warns before expiring |
+
+A pace of 1 s over 54 repos adds about a minute to a run and is logged:
+
+```
+  pacing: 1.0s between repos
+```
 
 ---
 
@@ -851,7 +907,7 @@ gitsync ci
 #   python syntax (gitsync/*.py)  PASS
 #   shell syntax (installers)     PASS
 #   CLI smoke tests               PASS
-#   unit checks (83 assertions)   PASS
+#   unit checks (99 assertions)   PASS
 # CI: all 4 checks passed
 ```
 

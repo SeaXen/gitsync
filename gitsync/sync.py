@@ -95,11 +95,20 @@ def sync_repo(repo, source, targets, mode):
 PUSH_REFS = ["+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
 
 
-def _push_target(tname, tplat, repo, hub, mode):
-    """push the hub to one target. Returns None on success, else an error."""
+def _push_target(tname, tplat, repo, hub, mode, refspecs=None):
+    """push the hub to one target. Returns None on success, else an error.
+
+    refspecs pins exactly which refs travel (used by a mesh that is skipping
+    a conflicted branch: the wildcard push would otherwise carry the hub's
+    stale copy of it and overwrite the newer commit on the peer).
+    """
     try:
         push_url = tplat.ensure_repo(repo)
-        if tplat.ptype in ("forgejo", "gitea"):
+        if refspecs is not None:
+            if not refspecs:
+                return None               # nothing is safe to push
+            cmd = ["git", "push", "--force", push_url] + refspecs
+        elif tplat.ptype in ("forgejo", "gitea"):
             # GitHub's refs/pull/* namespace collides with Forgejo's own
             # PR storage and its pre-receive hook rejects the whole push
             cmd = ["git", "push", "--force", push_url] + PUSH_REFS
@@ -223,7 +232,7 @@ def _drop_absent(hub, space, keep):
     return dropped
 
 
-def mesh_sync_repo(repo, peers):
+def mesh_sync_repo(repo, peers, conflict="newest"):
     """all-direction sync: newest commit wins per branch and per tag.
 
     Peers' refs are fetched into a private namespace in the hub, the hub
@@ -231,6 +240,12 @@ def mesh_sync_repo(repo, peers):
     to every peer. Nothing is deleted on a peer unless no peer has the ref
     any more (union semantics), so a mesh never resurrects a branch that was
     intentionally deleted everywhere.
+
+    conflict="newest" (default) resolves a disagreement by date, which is
+    what makes "edit it on GitLab, see it on GitHub" work. conflict="skip"
+    instead leaves any ref the peers disagree about exactly as it is and
+    reports it, so a mesh can never quietly overwrite one platform's commit
+    with another's — reconcile by hand, then let the next run converge.
     """
     name = repo["name"]
     hub = mirror_path(name)
@@ -283,8 +298,9 @@ def mesh_sync_repo(repo, peers):
         for t, cand in pt.items():
             cand_tags.setdefault(t, []).append(cand)
 
-    chosen_heads = {b: _newest(c) for b, c in cand_heads.items()}
-    chosen_tags = {t: _newest(c) for t, c in cand_tags.items()}
+    chosen_heads, skip_heads = _choose(cand_heads, conflict)
+    chosen_tags, skip_tags = _choose(cand_tags, conflict)
+    skipped = skip_heads + skip_tags
 
     updated = 0
     for b, (_d, sha) in chosen_heads.items():
@@ -293,8 +309,9 @@ def mesh_sync_repo(repo, peers):
     for t, (_d, sha) in chosen_tags.items():
         if _set_ref(hub, "refs/tags/" + t, sha):
             updated += 1
-    _drop_absent(hub, "heads", chosen_heads)
-    _drop_absent(hub, "tags", chosen_tags)
+    # a skipped ref must not be pruned either - leaving it alone is the point
+    _drop_absent(hub, "heads", list(chosen_heads) + skip_heads)
+    _drop_absent(hub, "tags", list(chosen_tags) + skip_tags)
 
     # 3. keep the hub's HEAD on a branch that actually exists
     rc, cur, _ = P.run(["git", "symbolic-ref", "HEAD"], cwd=hub, timeout=30)
@@ -307,9 +324,17 @@ def mesh_sync_repo(repo, peers):
                 break
 
     # 4. push the merged hub back to every peer
+    refspecs = None
+    if skipped:
+        # a skipped ref is left exactly as it is on every peer, so it must
+        # not travel in the push either
+        refspecs = (["+refs/heads/%s:refs/heads/%s" % (b, b)
+                     for b in chosen_heads]
+                    + ["+refs/tags/%s:refs/tags/%s" % (t, t)
+                       for t in chosen_tags])
     pushed = []
     for pname, plat in peers.items():
-        err = _push_target(pname, plat, repo, hub, "safe")
+        err = _push_target(pname, plat, repo, hub, "safe", refspecs)
         if err:
             errors.append(err)
         else:
@@ -319,10 +344,29 @@ def mesh_sync_repo(repo, peers):
         return "push-failed", "; ".join(errors), errors
     if errors:
         return "partial", "; ".join(errors), errors
-    return "ok", "%s (%d refs merged)" % (",".join(pushed), updated), []
+    detail = "%s (%d refs merged)" % (",".join(pushed), updated)
+    if skipped:
+        detail += ", %d conflict(s) skipped: %s" % (
+            len(skipped), ", ".join(sorted(skipped)[:4]))
+    return "ok", detail, []
 
 
-def mesh_plan_repo(repo, peers):
+def _choose(cands, conflict):
+    """({ref: (date, sha)}, [skipped refs]) for one namespace
+
+    "newest" takes the newest candidate. "skip" keeps only refs every peer
+    agrees on, and reports the rest instead of overwriting anyone.
+    """
+    out, skipped = {}, []
+    for ref, options in cands.items():
+        if conflict == "skip" and len({s for _d, s in options}) > 1:
+            skipped.append(ref)
+            continue
+        out[ref] = _newest(options)
+    return out, skipped
+
+
+def mesh_plan_repo(repo, peers, conflict="newest"):
     """read-only plan for a mesh route: do the peers agree?"""
     heads = {}
     for pname, plat in peers.items():
@@ -342,6 +386,9 @@ def mesh_plan_repo(repo, peers):
         return ["all %d peers agree (%s)" % (len(heads),
                                              next(iter(distinct))[:8])], "ok"
     detail = ", ".join("%s %s" % (p, h[:8]) for p, h in heads.items())
+    if conflict == "skip":
+        return ["peers disagree - would SKIP (newest wins is off): %s"
+                % detail], "update"
     return ["would merge: %s" % detail], "update"
 
 
@@ -498,6 +545,11 @@ def route_due(route, cfg, now=None):
     return False, "not due for %.1fh" % (hours - elapsed_h)
 
 
+def last_route_run(name):
+    """unix time this route last ran, or None"""
+    return _load_route_state().get(name)
+
+
 def mark_route_run(route, now=None):
     import time as _t
     st = _load_route_state()
@@ -571,9 +623,8 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
     _start = time.time()
     reset_progress()
     cfg = cfg or C.load_config()
-    workers = int(C.setting(cfg, "workers", 4) or 4)
-    mode = C.setting(cfg, "mode", "full")
     include_forks = bool(C.setting(cfg, "include_forks", False))
+    pace = float(C.setting(cfg, "pace", 0) or 0)
 
     selected = C.routes(cfg)
     if route_name:
@@ -625,6 +676,14 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                 log("route '%s': no enabled targets — skipped" % rname)
                 continue
 
+        # a route may override the global worker count, mirror mode and
+        # (for mesh) the conflict policy; the global values stay defaults
+        workers = int(route.get("workers")
+                      or C.setting(cfg, "workers", 4) or 4)
+        mode = route.get("mode") or C.setting(cfg, "mode", "full")
+        conflict = route.get("mesh_conflict") or \
+            C.setting(cfg, "mesh_conflict", "newest")
+
         mark_route_run(route)
         if mesh:
             log("=== route '%s': mesh %s (workers=%d%s) ==="
@@ -659,13 +718,15 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             try:
                 if dry_run:
                     if mesh:
-                        actions, verdict = mesh_plan_repo(repo, peers)
+                        actions, verdict = mesh_plan_repo(repo, peers,
+                                                          conflict)
                     else:
                         actions, verdict = _plan_repo(repo, source, targets,
                                                      mode)
                     status, detail, errors = verdict, "", actions
                 elif mesh:
-                    status, detail, errors = mesh_sync_repo(repo, peers)
+                    status, detail, errors = mesh_sync_repo(repo, peers,
+                                                           conflict)
                 else:
                     status, detail, errors = sync_repo(repo, source, targets,
                                                        mode)
@@ -691,8 +752,17 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                     % (idx, len(repos), repo["name"], detail))
             return repo, status, errors
 
+        if pace:
+            log("  pacing: %.1fs between repos" % pace)
+
+        def _paced_work(r):
+            out = work(r)
+            if pace:
+                time.sleep(pace)
+            return out
+
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = [ex.submit(work, r) for r in repos]
+            futs = [ex.submit(_paced_work, r) for r in repos]
             for f in as_completed(futs):
                 try:
                     repo, status, errors = f.result()

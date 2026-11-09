@@ -10,6 +10,7 @@ Keys:  S sync now | E repos (browse + selective sync) | / search |
 import curses
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -131,17 +132,21 @@ def read_full_log():
         state["full_log"] = []
 
 
-def run_sync():
+def run_sync(dry_run=False):
     if state["syncing"]:
         flash("a sync is already running")
         return
     state["syncing"] = True
-    state["sync_lines"] = ["--- sync started %s ---"
-                           % datetime.now().strftime("%H:%M:%S")]
+    label = "DRY RUN" if dry_run else "sync"
+    state["sync_lines"] = ["--- %s started %s ---"
+                           % (label, datetime.now().strftime("%H:%M:%S"))]
 
     def worker():
         try:
-            p = subprocess.Popen(["python3", "-m", "gitsync", "sync"],
+            cmd = ["python3", "-m", "gitsync", "sync"]
+            if dry_run:
+                cmd.append("--dry-run")
+            p = subprocess.Popen(cmd,
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True,
                                  env=dict(os.environ,
@@ -160,8 +165,46 @@ def run_sync():
             read_log_tail()
             state["records"] = SYNC.last_records(10)
             state["dirty"] = True
+            merged = _merged_refs(state["sync_lines"])
+            if merged:
+                flash("sync merged %d ref(s) across peers" % merged, 8)
             threading.Thread(target=refresh_platforms, daemon=True).start()
+            threading.Thread(target=refresh_health, daemon=True).start()
     threading.Thread(target=worker, daemon=True).start()
+
+
+_REPO_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]\s+(\S+)\s+(\S+)")
+
+
+def sync_progress():
+    """(done, total, current_repo) read from the child sync's own output.
+
+    The sync runs in a subprocess, so SYNC.progress in *this* process is
+    always empty — the bar used to show "starting..." forever. The child
+    prints "[12/54] OK   repo -> targets", which is just as good a feed.
+    """
+    done = total = 0
+    current = ""
+    for line in state.get("sync_lines") or []:
+        m = _REPO_RE.search(line)
+        if not m:
+            continue
+        d, t = int(m.group(1)), int(m.group(2))
+        if t:
+            total = t
+        done = max(done, d)
+        current = m.group(4)
+    return done, total, current
+
+
+def _merged_refs(lines):
+    """total refs a mesh run merged, for the end-of-sync flash"""
+    total = 0
+    for line in lines or []:
+        m = re.search(r"\((\d+) refs merged\)", line)
+        if m:
+            total += int(m.group(1))
+    return total
 
 
 def _app_dir():
@@ -269,6 +312,18 @@ def options_screen(stdscr):
          "failure | success | always | never", lambda: cycle(
              cfg, "notify:on", ["failure", "success", "always", "never"],
              "notify on")),
+        ("Pause between repos: %ss" % (C.setting(cfg, "pace", 0) or 0),
+         "0 = flat out; slows a run to spare heat/disk",
+         lambda: cycle(cfg, "pace", [0, 1, 2, 5, 10], "pace")),
+        ("Mesh conflicts: %s" % C.setting(cfg, "mesh_conflict", "newest"),
+         "newest = overwrite; skip = leave and report",
+         lambda: cycle(cfg, "mesh_conflict", ["newest", "skip"],
+                       "mesh conflicts")),
+        ("Token warning: %s days" % (C.setting(cfg, "token_warn_days", 30)
+                                     or 30),
+         "warn this long before a credential expires",
+         lambda: cycle(cfg, "token_warn_days", [7, 14, 30, 60, 90],
+                       "token warning")),
     ]
     menu(stdscr, "OPTIONS", items, note="saved to %s" % C.CONFIG_FILE)
 
@@ -389,9 +444,9 @@ def notifications_screen(stdscr):
                  dim)
         safe_add(stdscr, 10, 1, "(%s) - never in the code" % C.CONFIG_FILE,
                  dim)
-        safe_add(stdscr, h - 1, 0,
-                 " [D]iscord  [T]elegram  [M]ode  [Enter]test  [B]ack "
-                 .center(w - 1)[:w - 1], curses.A_REVERSE)
+        modal_footer(stdscr, h, w,
+                     " [D]iscord  [T]elegram  [M]ode  [W]ebhook  "
+                     "[Enter]test  [B]ack ")
         commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
@@ -421,9 +476,75 @@ def notifications_screen(stdscr):
                 if cur in order else "failure"
             C.save_config(cfg)
             flash("notify on: %s" % cfg["settings"]["notify"]["on"])
+        elif ch in (ord("w"), ord("W")):
+            _webhooks_screen(stdscr, cfg)
         elif ch in (10, 13, curses.KEY_ENTER):
             ok, msg = NT.notify_test(cfg)
             flash("test: %s" % msg, 6)
+
+
+def _webhooks_screen(stdscr, cfg):
+    """start/stop the webhook receiver and show the URL to paste upstream"""
+    while True:
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0, " WEBHOOK RECEIVER ".center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        secret = WH.get_secret()
+        live = S.webhooks_active()
+        url = ("http://<this-host>:%d/hook/%s" % (WH.DEFAULT_PORT, secret)
+               if secret else
+               "run [I]nstall first - it generates the secret and the URL")
+        rows = [
+            ("secret      : %s" % ("set" if secret else "not set"),
+             curses.color_pair(2) if secret else curses.A_DIM),
+            ("receiver    : %s" % ("live" if live else "not running"),
+             curses.color_pair(2) if live else curses.A_DIM),
+            ("", 0),
+            ("A push event on any platform then triggers a sync instantly,", 0),
+            ("instead of waiting for the hourly timer.", 0),
+            ("", 0),
+            ("payload URL to paste into GitHub / GitLab / Forgejo:", 0),
+            ("  %s" % url, curses.A_BOLD),
+            ("", 0),
+            ("Content type : application/json", 0),
+            ("Events       : push (and tag push where supported)", 0),
+        ]
+        for i, (text, attr) in enumerate(rows):
+            if 2 + i >= h - 1:
+                break
+            safe_add(stdscr, 2 + i, 1, text[:w - 2], attr)
+        modal_footer(stdscr, h, w,
+                     " [I]nstall service  [X]stop service  [R]efresh  "
+                     "[B]ack ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        elif ch in (ord("r"), ord("R")):
+            continue
+        elif ch in (ord("i"), ord("I")):
+            _suspend_run(stdscr, ["python3", "-m", "gitsync", "webhooks",
+                                  "--install"])
+        elif ch in (ord("x"), ord("X")):
+            _suspend_run(stdscr, ["python3", "-m", "gitsync", "webhooks",
+                                  "--uninstall"])
+
+
+def _suspend_run(stdscr, cmd):
+    """drop to the shell for a command that needs the whole terminal"""
+    curses.def_prog_mode()
+    curses.endwin()
+    try:
+        subprocess.run(cmd, env=dict(os.environ, PYTHONPATH=_app_dir()))
+        input("\npress Enter to return...")
+    except Exception as e:
+        print("failed: %s" % e)
+        input("\npress Enter to return...")
+    finally:
+        curses.reset_prog_mode()
+        curses.curs_set(0)
+        state["dirty"] = True
 
 
 def load_repos():
@@ -467,10 +588,12 @@ def repos_screen(stdscr):
     if not state["repo_loaded"]:
         load_repos()
     query = ""
-    scroll = state["repo_scroll"]
+    cur = state["repo_scroll"]
+    top = 0
     while True:
         q = query.lower()
         items = [r for r in state["repo_list"] if q in r[0].lower()]
+        cur = max(0, min(cur, len(items) - 1)) if items else 0
         stdscr.erase()
         h, w = stdscr.getmaxyx()
         n_sel = len(state["repo_sel"])
@@ -484,44 +607,68 @@ def repos_screen(stdscr):
                      (" filter: %s (%d match) "
                       % (query, len(items)))[:w - 1], curses.A_DIM)
         rows = max(1, h - 4)
-        scroll = max(0, min(scroll, max(0, len(items) - 1)))
-        view = items[scroll:scroll + rows]
+        # keep the cursor inside the window: the list used to scroll with
+        # the arrows and the top row was the implicit, unmarked selection
+        if cur < top:
+            top = cur
+        elif cur - top >= rows:
+            top = cur - rows + 1
+        view = items[top:top + rows]
         for i, (name, priv, fork) in enumerate(view):
             mark = "[x]" if name in state["repo_sel"] else "[ ]"
             attr = curses.color_pair(2) if name in state["repo_sel"] else 0
+            if (top + i) == cur:
+                attr |= curses.A_REVERSE
             line = " %s %-30s %s%s" % (mark, name[:30],
                                        "priv" if priv else "pub ",
                                        " fork" if fork else "")
             safe_add(stdscr, 2 + i, 0, line[:w - 1], attr)
         if not view:
             safe_add(stdscr, 2, 0, " (no matching repos)", curses.A_DIM)
-        safe_add(stdscr, h - 1, 0,
-                 (" space=select  a=all  n=none  /=filter  S=sync all targets"
-                  "  L=local only  B=back ").center(w - 1)[:w - 1],
-                 curses.A_REVERSE)
+        if len(items) > rows:
+            safe_add(stdscr, 1, 0, (" %d-%d of %d " % (top + 1,
+                                                       min(top + rows,
+                                                           len(items)),
+                                                       len(items)))[:w - 1],
+                     curses.A_DIM)
+        modal_footer(stdscr, h, w,
+                     " space=select  a=all  n=none  /=filter  S=sync all "
+                     "targets  L=local only  B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == curses.KEY_MOUSE:
+            try:
+                _eid, _mx, my, _bz, bstate = curses.getmouse()
+            except Exception:
+                bstate = 0
+            if bstate & curses.BUTTON1_CLICKED and 2 <= my < 2 + rows:
+                cur = top + (my - 2)
+            continue
         if ch == 27:                      # Esc: clear filter first, then exit
             if query:
                 query = ""
-                scroll = 0
+                cur = top = 0
                 continue
-            state["repo_scroll"] = scroll
+            state["repo_scroll"] = cur
             return
         if ch in (ord("b"), ord("B")):
-            state["repo_scroll"] = scroll
+            state["repo_scroll"] = cur
             return
         elif ch == curses.KEY_UP:
-            scroll = max(0, scroll - 1)
+            cur = max(0, cur - 1)
         elif ch == curses.KEY_DOWN:
-            scroll = min(max(0, len(items) - 1), scroll + 1)
+            cur = min(max(0, len(items) - 1), cur + 1)
         elif ch == curses.KEY_PPAGE:
-            scroll = max(0, scroll - rows)
+            cur = max(0, cur - rows)
         elif ch == curses.KEY_NPAGE:
-            scroll = min(max(0, len(items) - 1), scroll + rows)
+            cur = min(max(0, len(items) - 1), cur + rows)
+        elif ch in (curses.KEY_END, ord("g"), ord("G")):
+            cur = len(items) - 1 if items else 0
+        elif ch == curses.KEY_HOME:
+            cur = 0
         elif ch == ord(" "):
-            if view:
-                name = view[0][0]
+            if items:
+                name = items[cur][0]
                 if name in state["repo_sel"]:
                     state["repo_sel"].discard(name)
                 else:
@@ -532,7 +679,7 @@ def repos_screen(stdscr):
             state["repo_sel"] = set()
         elif ch == ord("/"):
             query = prompt_line(stdscr, " filter: ")
-            scroll = 0
+            cur = top = 0
         elif ch in (ord("s"), ord("S"), ord("l"), ord("L")):
             if not state["repo_sel"]:
                 flash("nothing selected - press space on a repo", 5)
@@ -545,7 +692,7 @@ def repos_screen(stdscr):
                     flash("no local-disk target in this route", 6)
                     continue
                 cmd += ["--to", local]         # local hub only
-            state["repo_scroll"] = scroll
+            state["repo_scroll"] = cur
             curses.def_prog_mode()
             curses.endwin()
             try:
@@ -559,10 +706,10 @@ def repos_screen(stdscr):
             query = ""
 
 
-def prompt_line(stdscr, label):
+def prompt_line(stdscr, label, initial=""):
     """one-line text input at the bottom of the screen"""
     curses.curs_set(1)
-    buf = ""
+    buf = initial or ""
     while True:
         h, w = stdscr.getmaxyx()
         safe_add(stdscr, h - 1, 0, (label + buf + "_").ljust(w - 1)[:w - 1],
@@ -618,13 +765,30 @@ def _sparkline(values):
 
 def log_view(stdscr):
     read_full_log()
-    state["scroll"] = max(0, len(state["full_log"]) - 100)
-    _scroll_view(stdscr, " FULL LOG ", state["full_log"])
+    lines = state["full_log"]
+    # open near the newest lines: a 2900-line log otherwise starts at the
+    # first run from days ago and needs ~30 PgDn presses to reach today
+    _scroll_view(stdscr, " FULL LOG ", lines,
+                 start=max(0, len(lines) - 100))
 
 
-def _scroll_view(stdscr, title, lines):
+def modal_footer(stdscr, h, w, hint):
+    """footer for modal screens: a fresh flash() message wins over the hint.
+
+    flash() only writes state["message"], which draw() renders — so inside a
+    modal the user saw no confirmation at all (pausing a target, "nothing
+    selected", "webhook saved" all vanished).
+    """
+    text = hint
+    msg, until = state.get("message", ("", 0))
+    if msg and time.time() < until:
+        text = " %s " % msg
+    safe_add(stdscr, h - 1, 0, text.center(w - 1)[:w - 1], curses.A_REVERSE)
+
+
+def _scroll_view(stdscr, title, lines, start=0):
     """generic scrollable, searchable text view (log / history / accounts)"""
-    scroll = 0
+    scroll = max(0, start)
     while True:
         # apply the active search filter
         q = state["search"].lower()
@@ -647,9 +811,9 @@ def _scroll_view(stdscr, title, lines):
             safe_add(stdscr, 1 + i, 0, line[:w - 1], attr)
         if not view:
             safe_add(stdscr, 1, 0, " (no matching lines)", curses.A_DIM)
-        safe_add(stdscr, h - 1, 0,
-                 " up/dn=scroll PgUp/PgDn=page /=filter Esc=clear B=back "
-                 .center(w - 1)[:w - 1], curses.A_REVERSE)
+        modal_footer(stdscr, h, w,
+                     " up/dn=scroll PgUp/PgDn=page G/End=bottom "
+                     "Home=top /=filter Esc=clear B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
         if ch in (ord("b"), ord("B"), 27):
@@ -665,6 +829,10 @@ def _scroll_view(stdscr, title, lines):
             scroll = max(0, scroll - (h - 3))
         elif ch == curses.KEY_NPAGE:
             scroll = min(max(0, len(shown) - 1), scroll + (h - 3))
+        elif ch in (curses.KEY_END, ord("g"), ord("G")):
+            scroll = max(0, len(shown) - 1)
+        elif ch == curses.KEY_HOME:
+            scroll = 0
 
 
 CLOCK_X = 1          # column of the clock inside the status line
@@ -708,6 +876,21 @@ def update_clock(stdscr):
     Redrawing everything is a slightly larger diff and always correct.
     """
     state["dirty"] = True
+
+
+def _tab_at(x, w):
+    """which tab (0-based) a screen column belongs to, or None"""
+    parts = ["%d:%s" % (i, n) for i, n in enumerate(TABS, 1)]
+    text = " " + "  ".join(parts) + " "
+    start = max(0, (w - len(text)) // 2)
+    if x < start:
+        return None
+    pos = start
+    for i, p in enumerate(parts):
+        if pos <= x < pos + len(p):
+            return i
+        pos += len(p) + 2
+    return None
 
 
 def tab_bar(w):
@@ -754,11 +937,11 @@ def draw(stdscr):
     # tab bar + footer
     safe_add(stdscr, 2, 0, (" " + tab_bar(w) + " ").center(w - 1)[:w - 1],
              curses.A_REVERSE)
-    foot = (" [1-6]tabs  [S]ync  [L]og  [C]ron  [O]pt  [A]cc  [N]otify  "
-            "[E]repos  [W]izard  [R]efresh  [Q]uit ")
+    foot = (" [1-6]tabs  [S]ync  [D]ry-run  [L]og  [C]ron  [O]pt  "
+            "[A]cc  [N]otify  [E]repos  [W]izard  [R]efresh  [Q]uit ")
     if tab == 2:
-        foot = (" [1-6]tabs  [S]ync  [P]ause/resume target  [C]ron  "
-                "[O]pt  [R]efresh  [Q]uit ")
+        foot = (" [1-6]tabs  [S]ync  [P]ause/resume  [O]ptions  "
+                "[R]efresh  [Q]uit ")
     if state["search_mode"]:
         foot = " filter: %s_   (Enter = apply, Esc = clear) " % state["search"]
     elif state["search"]:
@@ -817,6 +1000,31 @@ def draw_platforms(stdscr, h, w, G, R, dim):
              dim)
 
 
+def _route_last(name):
+    """'last run' digest for one route: failures from the newest record plus
+    when this route itself last ran (route_state.json), so a route that was
+    not part of the last run says 'never' rather than a false 'ok'."""
+    bits = []
+    try:
+        last = SYNC.last_route_run(name)
+    except Exception:
+        last = None
+    if last is None:
+        bits.append("never run")
+    else:
+        age = (time.time() - last) / 60.0
+        bits.append("ran %s ago" % ("%dm" % age if age < 1440
+                                    else "%.1fd" % (age / 1440.0)))
+    recs = SYNC.last_records(1)
+    if recs:
+        fails = [f for f in (recs[-1].get("failures") or [])
+                 if f.get("route") == name]
+        if fails:
+            bits.append("%d failed (%s)" % (len(fails),
+                                            fails[0].get("repo", "?")[:16]))
+    return "last run: " + ", ".join(bits)
+
+
 def draw_routes(stdscr, h, w, G, R, dim):
     rows = []
     cfg = C.load_config()
@@ -840,9 +1048,14 @@ def draw_routes(stdscr, h, w, G, R, dim):
         attr = dim if not route_on else curses.A_BOLD
         rows.append(("%s:  %s   [%s, %s, %s]" % (name, arrow, meta, sched,
                                                  when), attr))
+        extra = []
+        last = _route_last(name)
+        if last:
+            extra.append(last)
         if inc or exc:
-            rows.append(("    filters: include=%s exclude=%s"
-                         % (inc or "-", exc or "-"), dim))
+            extra.append("include=%s exclude=%s" % (inc or "-", exc or "-"))
+        if extra:
+            rows.append(("    " + "  |  ".join(extra), dim))
     if not rows:
         rows.append(("(no routes — add one: gitsync routes add main github "
                      "gitlab,forgejo)", dim))
@@ -853,33 +1066,262 @@ def draw_routes(stdscr, h, w, G, R, dim):
 
 
 
+def _route_targets_row(r):
+    """the pause screen's rows for one route: the route, then its targets"""
+    paused = set(r.get("paused_targets") or [])
+    on = r.get("enabled") is not False
+    mesh = r.get("direction") == "mesh"
+    rows = [{
+        "label": "%s%s" % (r.get("name"), "  [mesh]" if mesh else ""),
+        "sub": "%s -> %s" % (r.get("source"),
+                             ", ".join(r.get("targets", [])) or "(none)"),
+        "on": on, "kind": "route", "route": r, "target": None}]
+    for t in r.get("targets", []):
+        plat = C.platform(C.load_config(), t)
+        rows.append({
+            "label": "    %s" % t,
+            "sub": "target of %s%s" % (
+                r.get("name"),
+                "" if (plat and plat.get("enabled", True))
+                else "  (platform disabled)"),
+            "on": (on and t not in paused),
+            "kind": "target", "route": r, "target": t})
+    return rows
+
+
+def _toggle_route_row(row):
+    """apply one pause/resume toggle and save; returns the flash text"""
+    cfg = C.load_config()
+    name = row["route"].get("name")
+    target = None
+    for r in cfg.get("routes", []):
+        if r.get("name") == name:
+            target = r
+            break
+    if target is None:
+        return None
+    if row["kind"] == "route":
+        target["enabled"] = not (target.get("enabled") is not False)
+        if target["enabled"]:
+            # resuming the whole route also clears per-target pauses
+            target.pop("paused_targets", None)
+        msg = "%s: %s" % (name, "resumed" if target["enabled"]
+                          else "paused (whole route)")
+    else:
+        t = row["target"]
+        paused = [x for x in (target.get("paused_targets") or [])]
+        if t in paused:
+            paused.remove(t)
+            msg = "%s / %s: resumed" % (name, t)
+        else:
+            paused.append(t)
+            msg = "%s / %s: paused" % (name, t)
+        if paused:
+            target["paused_targets"] = sorted(paused)
+        else:
+            target.pop("paused_targets", None)
+    C.save_config(cfg)
+    _reload_routes()
+    return msg
+
+
+def _reload_routes():
+    """re-read routes from disk into TUI state (after any config edit)"""
+    cfg = C.load_config()
+    state["routes"] = [(r.get("name"), r.get("source"),
+                        list(r.get("targets", [])),
+                        r.get("include") or [], r.get("exclude") or [],
+                        r.get("direction") or "one-way",
+                        list(r.get("paused_targets") or []),
+                        r.get("enabled") is not False)
+                       for r in C.routes(cfg)]
+    state["route_sched"] = {r.get("name"): r.get("schedule")
+                            for r in C.routes(cfg)}
+    state["settings"] = dict(cfg.get("settings", {}))
+    state["dirty"] = True
+
+
+def _run_route(name, dry_run=False):
+    """run one route now, in a child process, with live output in the TUI"""
+    if state["syncing"]:
+        flash("a sync is already running")
+        return
+    state["syncing"] = True
+    state["sync_lines"] = ["--- route '%s'%s started %s ---"
+                           % (name, " (dry run)" if dry_run else "",
+                              datetime.now().strftime("%H:%M:%S"))]
+
+    def worker():
+        try:
+            cmd = ["python3", "-m", "gitsync", "sync", "--route", name]
+            if dry_run:
+                cmd.append("--dry-run")
+            p = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, env=dict(os.environ, PYTHONPATH=_app_dir()))
+            for line in p.stdout:
+                state["sync_lines"].append(line.rstrip())
+                state["dirty"] = True
+            p.wait()
+            state["sync_lines"].append("--- finished (rc=%d) %s ---"
+                                       % (p.returncode,
+                                          datetime.now().strftime("%H:%M:%S")))
+            merged = _merged_refs(state["sync_lines"])
+            if merged:
+                flash("%s: merged %d ref(s) across peers" % (name, merged), 8)
+        except Exception as e:
+            state["sync_lines"].append("--- error: %s ---" % e)
+        finally:
+            state["syncing"] = False
+            read_log_tail()
+            state["records"] = SYNC.last_records(10)
+            state["dirty"] = True
+            threading.Thread(target=refresh_platforms, daemon=True).start()
+            threading.Thread(target=refresh_health, daemon=True).start()
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _edit_route_filters(stdscr, route):
+    """edit a route's include/exclude globs without leaving the TUI"""
+    inc = ",".join(route.get("include") or [])
+    exc = ",".join(route.get("exclude") or [])
+    inc = prompt_line(stdscr, " include globs (blank = all): ", inc)
+    exc = prompt_line(stdscr, " exclude globs (blank = none): ", exc)
+    cfg = C.load_config()
+    for r in cfg.get("routes", []):
+        if r.get("name") == route.get("name"):
+            r["include"] = [p.strip() for p in inc.split(",") if p.strip()]
+            r["exclude"] = [p.strip() for p in exc.split(",") if p.strip()]
+            break
+    C.save_config(cfg)
+    _reload_routes()
+    flash("%s: filters saved" % route.get("name"), 5)
+
+
+def _route_options_screen(stdscr, route):
+    """per-route overrides: workers, mirror mode, mesh conflict policy.
+
+    Everything defaults to the global setting ("inherit"), so one route can
+    run single-threaded against a rate-limited host, keep deleted refs, or
+    refuse to overwrite a peer's newer commit.
+    """
+    name = route.get("name")
+    idx = 0
+    while True:
+        cfg = C.load_config()
+        cur = next((r for r in cfg.get("routes", [])
+                    if r.get("name") == name), None)
+        if cur is None:
+            return
+        mesh = cur.get("direction") == "mesh"
+        gw = C.setting(cfg, "workers", 4)
+        gm = C.setting(cfg, "mode", "full")
+        gc = C.setting(cfg, "mesh_conflict", "newest")
+        rows = [
+            ("Parallel workers",
+             "%s (global %s)" % (cur.get("workers") or "inherit", gw),
+             "inherit | 1 | 2 | 4 | 8"),
+            ("Mirror mode",
+             "%s (global %s)" % (cur.get("mode") or "inherit", gm),
+             "inherit | full = prunes | safe = keeps"),
+        ]
+        if mesh:
+            rows.append(("Mesh conflicts",
+                         "%s (global %s)" % (cur.get("mesh_conflict")
+                                             or "inherit", gc),
+                         "inherit | newest = overwrite | skip = report only"))
+        rows.append(("Schedule", C.route_schedule(cfg, cur),
+                     "gitsync route-schedule %s hourly|daily|off" % name))
+        idx = max(0, min(idx, len(rows) - 1))
+
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0,
+                 (" ROUTE OPTIONS - %s " % name).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 0,
+                 " Enter cycles the highlighted value ".ljust(w - 1)[:w - 1],
+                 curses.A_DIM)
+        for i, (label, value, hint) in enumerate(rows):
+            if 3 + i >= h - 2:
+                break
+            attr = curses.A_REVERSE if i == idx else 0
+            safe_add(stdscr, 3 + i, 0,
+                     ("  %-18s %-24s %s" % (label, value, hint))[:w - 1],
+                     attr)
+        modal_footer(stdscr, h, w, " up/dn=move  Enter=cycle  B=back ")
+        commit_screen(stdscr)
+
+        ch = stdscr.getch()
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        elif ch in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            idx = min(len(rows) - 1, idx + 1)
+        elif ch in (10, 13, curses.KEY_ENTER):
+            _cycle_route_option(cfg, cur, rows[idx][0])
+
+
+def _cycle_route_option(cfg, route, label):
+    """cycle one per-route override, wrapping back to 'inherit'"""
+    name = route.get("name")
+    target = next((r for r in cfg.get("routes", [])
+                   if r.get("name") == name), None)
+    if target is None:
+        return
+    if label == "Parallel workers":
+        vals = ["inherit", 1, 2, 4, 8]
+        cur = target.get("workers") or "inherit"
+        nxt = vals[(vals.index(cur) + 1) % len(vals)] \
+            if cur in vals else vals[0]
+        if nxt == "inherit":
+            target.pop("workers", None)
+        else:
+            target["workers"] = nxt
+        msg = "workers -> %s" % nxt
+    elif label == "Mirror mode":
+        vals = ["inherit", "full", "safe"]
+        cur = target.get("mode") or "inherit"
+        nxt = vals[(vals.index(cur) + 1) % len(vals)] \
+            if cur in vals else vals[0]
+        if nxt == "inherit":
+            target.pop("mode", None)
+        else:
+            target["mode"] = nxt
+        msg = "mirror mode -> %s" % nxt
+    elif label == "Mesh conflicts":
+        vals = ["inherit", "newest", "skip"]
+        cur = target.get("mesh_conflict") or "inherit"
+        nxt = vals[(vals.index(cur) + 1) % len(vals)] \
+            if cur in vals else vals[0]
+        if nxt == "inherit":
+            target.pop("mesh_conflict", None)
+        else:
+            target["mesh_conflict"] = nxt
+        msg = "mesh conflicts -> %s" % nxt
+    else:
+        flash("use: gitsync route-schedule %s hourly|daily|off" % name, 8)
+        return
+    C.save_config(cfg)
+    _reload_routes()
+    flash(msg, 4)
+
+
 def routes_screen(stdscr):
     """pause/resume a whole route or one of its targets, live.
 
     Space/Enter toggles the highlighted row and saves immediately, so a
     target can be paused without editing config.json or stopping the timer.
+    S runs this one route, F edits its include/exclude filters.
     """
     idx = 0
+    top = 0
     while True:
         cfg = C.load_config()
         rows = []
         for r in C.routes(cfg):
-            paused = set(r.get("paused_targets") or [])
-            on = r.get("enabled") is not False
-            mesh = r.get("direction") == "mesh"
-            rows.append({
-                "label": "%s%s" % (r.get("name"),
-                                   "  [mesh]" if mesh else ""),
-                "sub": "%s -> %s" % (
-                    r.get("source"),
-                    ", ".join(r.get("targets", [])) or "(none)"),
-                "on": on, "kind": "route", "route": r, "target": None})
-            for t in r.get("targets", []):
-                rows.append({
-                    "label": "    %s" % t,
-                    "sub": "target of %s" % r.get("name"),
-                    "on": (on and t not in paused),
-                    "kind": "target", "route": r, "target": t})
+            rows += _route_targets_row(r)
         idx = max(0, min(idx, len(rows) - 1)) if rows else 0
 
         stdscr.erase()
@@ -890,10 +1332,17 @@ def routes_screen(stdscr):
         safe_add(stdscr, 1, 0,
                  " paused items are skipped by every run, including the timer "
                  .ljust(w - 1)[:w - 1], curses.A_DIM)
-        shown = rows[:max(1, h - 4)]
-        for i, row in enumerate(shown):
-            attr = curses.A_REVERSE if i == idx else 0
-            if not row["on"] and i != idx:
+        avail = max(1, h - 5)
+        # window the list around the cursor: with several routes the old
+        # rows[:h-4] slice let the highlight scroll off the screen entirely
+        top = max(0, min(top, idx))
+        if idx - top >= avail:
+            top = idx - avail + 1
+        if idx < top:
+            top = idx
+        for i, row in enumerate(rows[top:top + avail]):
+            attr = curses.A_REVERSE if (top + i) == idx else 0
+            if not row["on"] and (top + i) != idx:
                 attr |= curses.A_DIM
             box = "[x]" if row["on"] else "[ ]"
             line = " %s %-24s %-34s %s" % (
@@ -902,59 +1351,54 @@ def routes_screen(stdscr):
             safe_add(stdscr, 3 + i, 0, line[:w - 1], attr)
         if not rows:
             safe_add(stdscr, 3, 0, " (no routes configured)", curses.A_DIM)
-        safe_add(stdscr, h - 1, 0,
-                 " space/Enter=toggle  up/dn=move  B=back "
-                 .center(w - 1)[:w - 1], curses.A_REVERSE)
+        if len(rows) > avail:
+            safe_add(stdscr, 2, 0, " %d-%d of %d " % (top + 1,
+                                                      min(top + avail,
+                                                          len(rows)),
+                                                      len(rows)),
+                     curses.A_DIM)
+        modal_footer(stdscr, h, w,
+                     " space/Enter=toggle  S=run  D= dry-run  O=options  "
+                     "F=filters  up/dn=move  B=back ")
         commit_screen(stdscr)
 
         ch = stdscr.getch()
+        if ch == curses.KEY_MOUSE:
+            try:
+                _eid, _mx, my, _bz, bstate = curses.getmouse()
+            except Exception:
+                bstate = 0
+            if bstate & curses.BUTTON1_CLICKED and 3 <= my < 3 + avail:
+                idx = top + (my - 3)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (curses.KEY_UP, ord("k")):
             idx = max(0, idx - 1)
         elif ch in (curses.KEY_DOWN, ord("j")):
             idx = min(len(rows) - 1, idx + 1) if rows else 0
+        elif ch in (curses.KEY_PPAGE,):
+            idx = max(0, idx - avail)
+        elif ch in (curses.KEY_NPAGE,):
+            idx = min(len(rows) - 1, idx + avail) if rows else 0
+        elif ch in (curses.KEY_END, ord("g"), ord("G")):
+            idx = len(rows) - 1 if rows else 0
+        elif ch == curses.KEY_HOME:
+            idx = 0
+        elif ch in (ord("s"), ord("S")) and rows:
+            _run_route(rows[idx]["route"].get("name"))
+        elif ch in (ord("d"), ord("D")) and rows:
+            _run_route(rows[idx]["route"].get("name"), dry_run=True)
+        elif ch in (ord("o"), ord("O")) and rows:
+            _route_options_screen(stdscr, rows[idx]["route"])
+        elif ch in (ord("f"), ord("F")) and rows:
+            _edit_route_filters(stdscr, rows[idx]["route"])
         elif ch in (ord(" "), 10, 13, curses.KEY_ENTER):
             if not rows:
                 continue
-            row = rows[idx]
-            cfg = C.load_config()
-            name = row["route"].get("name")
-            target = row["route"]
-            for r in cfg.get("routes", []):
-                if r.get("name") == name:
-                    target = r
-                    break
-            else:
-                continue
-            if row["kind"] == "route":
-                target["enabled"] = not (target.get("enabled") is not False)
-                if target["enabled"]:
-                    target.pop("paused_targets", None)
-                flash("%s: %s" % (name, "resumed" if target["enabled"]
-                                  else "paused (whole route)"))
-            else:
-                paused = [t for t in (target.get("paused_targets") or [])]
-                if row["target"] in paused:
-                    paused.remove(row["target"])
-                    flash("%s / %s: resumed" % (name, row["target"]))
-                else:
-                    paused.append(row["target"])
-                    flash("%s / %s: paused" % (name, row["target"]))
-                if paused:
-                    target["paused_targets"] = sorted(paused)
-                else:
-                    target.pop("paused_targets", None)
-            C.save_config(cfg)
-            state["routes"] = [(r.get("name"), r.get("source"),
-                                list(r.get("targets", [])),
-                                r.get("include") or [],
-                                r.get("exclude") or [],
-                                r.get("direction") or "one-way",
-                                list(r.get("paused_targets") or []),
-                                r.get("enabled") is not False)
-                               for r in C.routes(cfg)]
-            state["dirty"] = True
+            msg = _toggle_route_row(rows[idx])
+            if msg:
+                flash(msg, 5)
 
 
 def draw_log_tab(stdscr, h, w, R, G):
@@ -1000,7 +1444,10 @@ def draw_history_tab(stdscr, h, w):
 
 
 def draw_settings(stdscr, h, w, dim):
-    st = state["settings"]
+    # read the file rather than state["settings"]: that snapshot only moves
+    # when the platform refresh runs, so a change made in Options (or by
+    # hand) looked like it had not been saved
+    st = C.load_config().get("settings", {}) or {}
     notify = st.get("notify", {}) or {}
     rows = [
         ("Parallel workers   : %s" % st.get("workers", 4), 0),
@@ -1012,6 +1459,10 @@ def draw_settings(stdscr, h, w, dim):
         ("Telegram bot       : %s"
          % ("configured" if notify.get("telegram_token") else "not set"), 0),
         ("Notify on          : %s" % notify.get("on", "failure"), 0),
+        ("Pause between repos : %ss" % (st.get("pace", 0) or 0), 0),
+        ("Mesh conflicts     : %s" % st.get("mesh_conflict", "newest"), 0),
+        ("Token warning      : %s days" % (st.get("token_warn_days", 30)
+                                           or 30), 0),
         ("Scheduler          : %s" % cached_status(), 0),
         ("Config file        : %s" % C.CONFIG_FILE, dim),
         ("Mirror hub         : %s" % C.MIRROR_DIR, dim),
@@ -1025,43 +1476,84 @@ def draw_settings(stdscr, h, w, dim):
         safe_add(stdscr, 4 + i, 1, text[:w - 2], attr)
 
 
-def _health_strip(stdscr, row, w, G, Y, R, dim):
-    """one line: token health + hub disk + webhook receiver state"""
-    if row >= stdscr.getmaxyx()[0] - 2:
+HEALTH_TTL = 30          # seconds between health refreshes (network + disk walk)
+
+_health = {"tok_txt": "tokens: checking...", "tok_attr": 0,
+           "disk_txt": "hub: checking...", "disk_attr": 0,
+           "wh_txt": "webhooks: checking...", "wh_attr": 0,
+           "at": 0.0}
+_health_lock = threading.Lock()
+_health_busy = threading.Lock()
+
+
+def refresh_health(force=False):
+    """token expiry + hub size + webhook state, off the draw path.
+
+    This used to run inside _health_strip(), i.e. on every dashboard frame —
+    and the dashboard redraws once a second for the clock. TK.check() is a
+    network round-trip per platform and diskutil.mirrors() walks the whole
+    hub, so an open dashboard issued ~240 API calls a minute and spent
+    ~0.5s per frame in the health line. It now runs in a thread on a timer.
+    """
+    if not _health_busy.acquire(blocking=False):
         return
     try:
-        cfg = C.load_config()
-        tok = TK.check(cfg)
-        tok_txt = TK.summary(tok)
-        tok_attr = G if not TK.bad(tok) else (
-            R if any(t["level"] in ("expired", "critical") for t in tok) else Y)
-    except Exception:
-        tok_txt, tok_attr = "tokens: unknown", dim
+        with _health_lock:
+            if not force and time.time() - _health["at"] < HEALTH_TTL:
+                return
+            _health["at"] = time.time()     # advance first: never stack
+        try:
+            cfg = C.load_config()
+            tok = TK.check(cfg)
+            tok_txt = TK.summary(tok)
+            tok_attr = curses.color_pair(2) if not TK.bad(tok) else (
+                curses.color_pair(4)
+                if any(t["level"] in ("expired", "critical") for t in tok)
+                else curses.color_pair(3))
+        except Exception:
+            tok_txt, tok_attr = "tokens: unknown", 0
 
-    disk_txt, disk_attr = "disk: ?", dim
-    try:
-        from . import diskutil as D
-        ms = D.mirrors()
-        free, tot = D.fs_free(C.MIRROR_DIR)
-        pct = (100.0 * (tot - free) / tot) if tot else 0
-        disk_txt = "hub: %d mirrors, %s, disk %s%% full" % (
-            len(ms), D.human(sum(m[2] for m in ms)), int(pct))
-        disk_attr = R if pct > 90 else (Y if pct > 75 else G)
-    except Exception:
-        pass
+        disk_txt, disk_attr = "hub: ?", 0
+        try:
+            ms = DK.mirrors()
+            free, tot = DK.fs_free(C.MIRROR_DIR)
+            pct = (100.0 * (tot - free) / tot) if tot else 0
+            disk_txt = "hub: %d mirrors, %s, disk %s%% full" % (
+                len(ms), DK.human(sum(m[2] for m in ms)), int(pct))
+            disk_attr = (curses.color_pair(4) if pct > 90 else
+                         (curses.color_pair(3) if pct > 75 else
+                          curses.color_pair(2)))
+        except Exception:
+            pass
 
-    wh_txt, wh_attr = "webhooks: off", dim
-    try:
-        from . import webhooks as WH
-        if WH.get_secret():
-            wh_attr = G if S.webhooks_active() else dim
-            wh_txt = "webhooks: %s" % ("live" if S.webhooks_active()
-                                       else "configured, not running")
-        else:
-            wh_txt = "webhooks: not set up"
-    except Exception:
-        pass
+        wh_txt, wh_attr = "webhooks: not set up", 0
+        try:
+            if WH.get_secret():
+                live = S.webhooks_active()
+                wh_attr = curses.color_pair(2) if live else 0
+                wh_txt = ("webhooks: live" if live
+                          else "webhooks: configured, not running")
+        except Exception:
+            pass
 
+        with _health_lock:
+            _health.update(tok_txt=tok_txt, tok_attr=tok_attr,
+                           disk_txt=disk_txt, disk_attr=disk_attr,
+                           wh_txt=wh_txt, wh_attr=wh_attr)
+        state["dirty"] = True
+    finally:
+        _health_busy.release()
+
+
+def _health_strip(stdscr, row, w, G, Y, R, dim):
+    """one line: token health + hub disk + webhook receiver state (cached)"""
+    if row >= stdscr.getmaxyx()[0] - 2:
+        return
+    with _health_lock:
+        tok_txt = _health["tok_txt"]
+        tok_attr = _health["tok_attr"]
+        disk_txt = _health["disk_txt"]
+        wh_txt = _health["wh_txt"]
     safe_add(stdscr, row, 1, (" %-34s %-46s %s"
                               % (tok_txt, disk_txt, wh_txt))[:w - 3], dim)
     # recolour just the token segment
@@ -1077,11 +1569,15 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         recs = state.get("records") or [{}]
         lr = recs[-1] or {}
         if lr.get("finished_at"):
-            attr = R if (lr.get("failed") or lr.get("partial")) else G
+            bad = (lr.get("failed") or lr.get("partial"))
+            attr = R if bad else G
+            extra = ""
+            if lr.get("partial"):
+                extra = ", %s partial" % lr.get("partial")
             safe_add(stdscr, row, 0,
-                     (" last: %s ok, %s fail of %s (%ss)"
-                      % (lr.get("synced_ok", "?"), lr.get("failed", "?"),
-                         lr.get("github_repos", "?"),
+                     (" last: %s ok%s, %s failed of %s (%ss)"
+                      % (lr.get("ok", "?"), extra, lr.get("failed", "?"),
+                         lr.get("repos", "?"),
                          lr.get("elapsed_sec", "?")))[:w - 1], attr)
             row += 1
         safe_add(stdscr, row, 0,
@@ -1130,6 +1626,17 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
     _panel_rows(stdscr, h, w, top, plat_rows, "PLATFORMS (A = manage accounts)")
     top2 = top + min(len(plat_rows) + 2, h - top - 6)
 
+    if not state["routes"]:
+        _panel_rows(stdscr, h, w, top2, [
+            ("1. add your accounts:  A  (or: gitsync platforms add ...)", 0),
+            ("2. add a route:        gitsync routes add main github "
+             "gitlab,forgejo,backup", 0),
+            ("   two-way instead:    gitsync routes add all "
+             "github,gitlab,forgejo", 0),
+            ("3. run it:             S  (or: gitsync sync)", 0),
+        ], "GETTING STARTED - no routes yet")
+        top2 += 6
+
     bits = []
     for (n, s, t, _i, _e, direction, paused, route_on) in state["routes"]:
         if direction == "mesh":
@@ -1140,6 +1647,19 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         if not route_on:
             bits[-1] += " [PAUSED]"
     routes_txt = "  |  ".join(bits) or "(none)"
+    # one long line used to be truncated at the screen edge with no hint,
+    # so with several routes the dashboard silently hid the last ones
+    if len(routes_txt) > w - 10 and bits:
+        keep, used = [], 0
+        for b in bits:
+            if used + len(b) + 4 > w - 26:
+                break
+            keep.append(b)
+            used += len(b) + 4
+        hidden = len(bits) - len(keep)
+        routes_txt = "  |  ".join(keep)
+        if hidden > 0:
+            routes_txt += "  |  +%d more (3:Routes)" % hidden
     st = state["settings"]
     route_rows = [
         (routes_txt[:w - 8], curses.A_BOLD),
@@ -1154,17 +1674,14 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
 
     top3 = top2 + len(route_rows) + 3
     if state["syncing"]:
-        prog = SYNC.progress
-        active = list(prog.get("active", {}).keys())
-        done, total = prog.get("done", 0), prog.get("total", 0)
+        done, total, current = sync_progress()
         pct = ("%d/%d" % (done, total)) if total else "starting..."
         bar_w = max(10, w - 44)
         filled = int(bar_w * done / total) if total else 0
         _panel_rows(stdscr, h, w, top3, [
             ("[%s%s] %s" % ("#" * filled, "-" * (bar_w - filled), pct),
              curses.A_BOLD),
-            ("in flight: %s" % (", ".join(a[:18] for a in active[:4])
-                                or "..."), Y),
+            ("current: %s" % (current[:w - 20] or "..."), Y),
         ], "SYNC IN PROGRESS")
         top3 += 4
 
@@ -1205,8 +1722,17 @@ def snapshot():
                                         info if ok else "FAIL: %s" % info))
     print()
     for r in C.routes(cfg):
-        print("  route %-10s %s -> %s" % (r.get("name"), r.get("source"),
-                                          ", ".join(r.get("targets", []))))
+        tag = " [mesh]" if r.get("direction") == "mesh" else ""
+        if r.get("enabled") is False:
+            tag += " [PAUSED]"
+        paused = set(r.get("paused_targets") or [])
+        tgts = [t + ("*" if t in paused else "")
+                for t in r.get("targets", [])]
+        print("  route %-10s%s %s -> %s"
+              % (r.get("name"), tag, r.get("source"),
+                 ", ".join(tgts) or "(none)"))
+        if paused:
+            print("             paused: %s" % ", ".join(sorted(paused)))
     print()
     print("settings : workers=%s mode=%s schedule=%s"
           % (C.setting(cfg, "workers"), C.setting(cfg, "mode"),
@@ -1245,6 +1771,10 @@ def _run(stdscr):
     except (AttributeError, curses.error):
         pass
     stdscr.timeout(1000)
+    try:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+    except (AttributeError, curses.error):
+        pass
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
@@ -1266,6 +1796,7 @@ def _run(stdscr):
                             for r in C.routes(_cfg)}
     state["settings"] = dict(_cfg.get("settings", {}))
     threading.Thread(target=refresh_platforms, daemon=True).start()
+    threading.Thread(target=refresh_health, daemon=True).start()
     last_draw = 0.0
     last_clock = 0.0
     dirty = True
@@ -1284,6 +1815,20 @@ def _run(stdscr):
             last_clock = now
             dirty = True
         ch = stdscr.getch()
+        if ch == curses.KEY_MOUSE:
+            # a malformed event must not spin the loop: fall through as "no
+            # key" rather than re-reading the same queued event
+            ch = -1
+            try:
+                _eid, mx, my, _bz, bstate = curses.getmouse()
+            except Exception:
+                bstate = 0
+            if bstate & curses.BUTTON1_CLICKED:
+                if my == 2:                     # the tab bar
+                    hit = _tab_at(mx, stdscr.getmaxyx()[1])
+                    if hit is not None:
+                        state["tab"] = hit
+                        state["scroll"] = 0
         if ch != -1:
             dirty = True
 
@@ -1307,6 +1852,8 @@ def _run(stdscr):
             state["scroll"] = 0
         elif ch in (ord("s"), ord("S")):
             run_sync()
+        elif ch in (ord("d"), ord("D")):
+            run_sync(dry_run=True)
         elif ch in (ord("l"), ord("L")):
             log_view(stdscr)
         elif ch in (ord("h"), ord("H")):
@@ -1337,6 +1884,8 @@ def _run(stdscr):
             read_log_tail()
             if time.time() - state["counts_age"] > 60:
                 threading.Thread(target=refresh_platforms, daemon=True).start()
+            if time.time() - _health["at"] > HEALTH_TTL:
+                threading.Thread(target=refresh_health, daemon=True).start()
 
 
 def launch_wizard(stdscr):
