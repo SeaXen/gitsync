@@ -152,6 +152,7 @@ echo
 say "${B}done!${NC} gitsync is installed and configured."
 echo
 echo "  gitsync              open the dashboard (TUI)"
+echo "  gitsync web          open the dashboard in your browser (LAN-reachable)"
 echo "  gitsync status       quick health check"
 echo "  gitsync doctor       full diagnostics"
 echo "  gitsync scopes       which token scopes each platform needs"
