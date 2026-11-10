@@ -4,6 +4,25 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.1] - 2026-11-10
+
+### Changed — Web UI design polish
+
+The web dashboard now reads as a real app, not a prototype.
+
+- **App shell**: a sticky, blurred **top bar** (brand + live status pill + global
+  **Sync now / Dry run** with an inline progress bar) and an **icon sidebar**
+  (inline SVG nav, active-item accent indicator, version + sign-out footer).
+  The top-bar sync drives a live progress readout everywhere; the Dashboard
+  reflects the same run in its "Syncing now" card and log.
+- **Refined components**: gradient primary buttons, elevated cards (12px,
+  layered shadow), hover-highlighted tables, focused form controls with
+  chevron selects, refined badges/chips/dots, and top-right toasts with icons.
+- **Skeleton loaders** replace spinners on first paint; nicer empty/error
+  states. Mobile layout tightened (sidebar → tab strip, top bar compresses).
+
+No API or engine changes; the CLI and TUI are untouched. Still 124 unit tests.
+
 ## [1.9.0] - 2026-11-10
 
 ### Added — Web UI (`gitsync web`) and Docker

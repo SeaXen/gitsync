@@ -135,9 +135,7 @@
 
   G.mount("dashboard", function (main) {
     main.innerHTML =
-      G.bar("Dashboard", "…",
-        '<button class="btn" id="btn-dry">Dry run</button>' +
-        '<button class="btn primary" id="btn-sync">Sync now</button>', "dash-sub") +
+      G.bar("Dashboard", "…", "", "dash-sub") +
       '<section class="card" id="sync-card" style="display:none">' +
         '<p class="label">Syncing now</p>' +
         '<div class="row" style="margin-bottom:8px">' +
@@ -147,7 +145,7 @@
       "</section>" +
       '<div class="grid">' +
         '<section class="card"><p class="label" id="plats-label">Platforms</p>' +
-          '<div class="stack" id="plats-body">' + G.loading("reading sites…") + "</div></section>" +
+          '<div class="stack" id="plats-body">' + G.loading() + "</div></section>" +
         '<section class="card"><p class="label" id="lastrun-label">Last run</p>' +
           '<div id="lastrun-body">' + G.loading() + "</div></section>" +
         '<section class="card"><p class="label">Disk and health</p>' +
@@ -157,21 +155,8 @@
         '<a href="log.html" style="text-transform:none;letter-spacing:0">full →</a></p>' +
         '<div class="mono log" id="logtail">' + G.loading() + "</div></section>";
 
-    function runSync(dry) {
-      G.api("POST", "/api/sync", { dry_run: dry })
-        .then(function (r) { attachSync(r.job_id); })
-        .catch(function (e) {
-          if (e.status === 409) G.toast(e.error || "already running", "warn");
-          else G.toast(e.error || "could not start sync", "bad");
-        });
-    }
-    document.getElementById("btn-sync").addEventListener("click", function () { runSync(false); });
-    document.getElementById("btn-dry").addEventListener("click", function () { runSync(true); });
-
     refresh();
-    // if a sync is already running (started elsewhere), attach to it live
-    G.api("GET", "/api/sync/state").then(function (s) {
-      if (s.syncing && s.job_id) attachSync(s.job_id);
-    }).catch(function () {});
+    // the top bar owns Sync/Dry-run; here we just reflect a run live
+    G.onSync(function (jobId) { attachSync(jobId); });
   });
 })();
