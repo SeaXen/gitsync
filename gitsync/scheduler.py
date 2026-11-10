@@ -277,6 +277,100 @@ def webhooks_active():
     except Exception:
         return False
 
+
+# ---- web dashboard service (always-on) ----
+
+WEB_SERVICE = "gitsync-web.service"
+WEB_TEMPLATE = """[Unit]
+Description=gitsync web dashboard (browser UI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# a user unit already has the right $HOME; a system unit would need it
+Environment=GH_CONFIG_DIR=%h/.config/gh
+Environment=XDG_CONFIG_HOME=%h/.config
+ExecStart={gitsync} web --bind {bind} --port {port}
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy={wantedby}
+"""
+
+
+def install_systemd_web(port=7765, bind="0.0.0.0", system=False):
+    """write + enable a service that runs the web dashboard on boot.
+
+    A *user* unit by default (it must run as the user who owns the config,
+    or ~/.config/gitsync and the gh CLI are invisible to it). Binds 0.0.0.0
+    so it is reachable on the LAN; authentication is still required.
+    """
+    if not have_systemd():
+        return False
+    wantedby = "multi-user.target" if system else "default.target"
+    text = WEB_TEMPLATE.format(gitsync=gitsync_bin(), bind=bind,
+                               port=int(port), wantedby=wantedby)
+    if system:
+        with open(os.path.join(SYSTEMD_DIR, WEB_SERVICE), "w") as f:
+            f.write(text)
+        _sh(["systemctl", "daemon-reload"])
+        _sh(["systemctl", "enable", "--now", WEB_SERVICE])
+        return True
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
+                            "user")
+    try:
+        os.makedirs(unit_dir, exist_ok=True)
+        with open(os.path.join(unit_dir, WEB_SERVICE), "w") as f:
+            f.write(text)
+    except OSError:
+        return False
+    _sh(["systemctl", "--user", "daemon-reload"])
+    ok = _sh(["systemctl", "--user", "enable", "--now", WEB_SERVICE])
+    if ok.returncode != 0:
+        return False
+    print("  status: systemctl --user status gitsync-web")
+    print("  logs  : journalctl --user -u gitsync-web -f")
+    print("  to keep it running while logged out: loginctl enable-linger $USER")
+    return True
+
+
+def uninstall_systemd_web(system=False):
+    if system:
+        if not os.path.exists(os.path.join(SYSTEMD_DIR, WEB_SERVICE)):
+            return False
+        _sh(["systemctl", "disable", "--now", WEB_SERVICE])
+        try:
+            os.remove(os.path.join(SYSTEMD_DIR, WEB_SERVICE))
+        except OSError:
+            pass
+        _sh(["systemctl", "daemon-reload"])
+        return True
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
+                            "user")
+    existed = os.path.exists(os.path.join(unit_dir, WEB_SERVICE))
+    _sh(["systemctl", "--user", "disable", "--now", WEB_SERVICE])
+    try:
+        os.remove(os.path.join(unit_dir, WEB_SERVICE))
+    except OSError:
+        pass
+    _sh(["systemctl", "--user", "daemon-reload"])
+    return existed
+
+
+def web_active():
+    """is the always-on web dashboard service running?"""
+    try:
+        r = _sh(["systemctl", "--user", "is-active", WEB_SERVICE])
+        return ((r.stdout or "").strip() == "active"
+                and getattr(r, "returncode", 1) == 0)
+    except Exception:
+        return False
+
+
 def status():
     """human-readable scheduler status"""
     if systemd_installed():

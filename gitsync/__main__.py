@@ -235,6 +235,28 @@ def cmd_web(args):
                                        getattr(args, "port", None), cfg)
     web.remember_bind_port(cfg, getattr(args, "bind", None),
                            getattr(args, "port", None))
+    from . import scheduler as S
+    if getattr(args, "install", False):
+        ok = S.install_systemd_web(port=port, bind=bind, system=args.system)
+        if ok:
+            print("web dashboard service installed and started (always-on).")
+            print("  open : http://<this-box>:%d   (http://127.0.0.1:%d)"
+                  % (port, port))
+            print("  stop : gitsync web --uninstall   (or: systemctl --user "
+                  "disable --now gitsync-web)")
+            print("  to survive logout/reboot: loginctl enable-linger $USER")
+            return 0
+        print("could not install the service (needs systemd). Run "
+              "'gitsync web' in the foreground instead.")
+        return 1
+    if getattr(args, "uninstall", False):
+        ok = S.uninstall_systemd_web(system=args.system)
+        print("web service removed" if ok else "web service not installed")
+        return 0
+    if getattr(args, "status", False):
+        print("web service: %s" % ("active" if S.web_active()
+                                   else "not running"))
+        return 0
     return web.serve(port=port, bind=bind,
                      allowed_hosts=getattr(args, "allowed_host", None))
 
@@ -1770,6 +1792,16 @@ def main(argv=None):
     sp.add_argument("--disable-password", dest="disable_password",
                     action="store_true",
                     help="remove the web password (token sign-in remains)")
+    sp.add_argument("--install", action="store_true",
+                    help="install + start a systemd service so the dashboard "
+                         "is always on (survives reboot)")
+    sp.add_argument("--uninstall", action="store_true",
+                    help="remove the always-on web service")
+    sp.add_argument("--status", action="store_true",
+                    help="is the always-on web service running?")
+    sp.add_argument("--system", action="store_true",
+                    help="with --install: a root system service instead of a "
+                         "user service")
     sp.set_defaults(func=cmd_web)
 
     sp = sub.add_parser("install", help="install the scheduler")

@@ -153,6 +153,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 |---|---|
 | `gitsync` | **open the TUI** (no arguments needed) |
 | `gitsync web` | **open the web dashboard in a browser** (`--port 7765`, `--bind`) |
+| `gitsync web --install` | run the web dashboard **always-on** as a systemd service (survives reboot) |
 | `gitsync setup` | guided first-run configuration |
 | `gitsync sync` | sync all routes now |
 | `gitsync sync --route main` | sync one route |
@@ -648,6 +649,22 @@ restore, mirror). **Sync now / Dry run** stream the real
 with a live `[done/total]` progress bar — nothing is reimplemented, so it can
 never drift from the CLI.
 
+**Always-on (survives reboot):** run it in the foreground with `gitsync web`
+(Ctrl-C to stop), or install it as a systemd service so it starts on boot:
+
+```bash
+gitsync web --install          # user service on 0.0.0.0:7765, starts on boot
+loginctl enable-linger "$USER" # keep it running while logged out
+gitsync web --status           # is it running?
+gitsync web --uninstall        # remove it
+journalctl --user -u gitsync-web -f   # logs
+```
+
+The first start prints the access token to the journal
+(`journalctl --user -u gitsync-web`). For an always-on dashboard, set a
+password so you don't depend on that one-time token:
+`gitsync web --set-password USER`.
+
 **Security** (the config holds platform tokens, so this is the priority):
 
 - binds `0.0.0.0` by default so it's reachable on your LAN (it's a browser
@@ -696,6 +713,16 @@ docker run -d -p 7765:7765 \
   -e GITSYNC_WEB_TOKEN=choose-your-own \
   gitsync
 ```
+
+**Yes — you can run gitsync's web dashboard in Docker only, with no native
+install.** The container *is* the always-on process (`restart: unless-stopped`),
+so there's no systemd service to set up. Configure it entirely from the browser:
+open `http://<host>:7765`, sign in (token from `docker logs`, or set
+`GITSYNC_WEB_TOKEN`), then add your accounts on **Platforms** and your
+directions on **Routes** — the web UI does everything the setup wizard and TUI
+do, so nothing else is needed. Syncs run from the dashboard (or schedule
+`gitsync sync` from a host cron / sidecar; the systemd timer doesn't run inside
+a container).
 
 - **config + mirror hub live on volumes** (`/data/config`, `/data/share`), so
   they survive restarts and updates. The access token is generated on first run

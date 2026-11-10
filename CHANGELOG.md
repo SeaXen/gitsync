@@ -4,6 +4,29 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.4] - 2026-11-10
+
+### Added — always-on web dashboard
+
+`gitsync web --install` installs and starts a **systemd user service** so the
+dashboard is up on boot and stays up (same pattern as the sync timer / webhook
+receiver). Binds `0.0.0.0:7765` by default; authentication is still required on
+every request.
+
+```bash
+gitsync web --install            # always-on service, starts on boot
+loginctl enable-linger "$USER"   # keep running while logged out
+gitsync web --status             # active / not running
+gitsync web --uninstall          # remove it
+journalctl --user -u gitsync-web -f
+```
+
+`--system` installs a root system service instead. In Docker there's no systemd,
+but the container itself is the always-on process (`restart: unless-stopped`) —
+so the dashboard can be run **Docker-only**, configured entirely from the
+browser (Platforms + Routes), with no native install. CLI/TUI otherwise
+unchanged; 126 unit tests.
+
 ## [1.9.3] - 2026-11-10
 
 ### Changed
