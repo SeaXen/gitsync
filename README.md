@@ -183,8 +183,37 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync scopes` | required token scopes per platform |
 | `gitsync log -n 50` | last 50 log lines |
 | `gitsync records` | run history with failure details |
-| `gitsync notify --test` | send a Discord test message |
+| `gitsync notify --test` | send a test message (Discord **and** Telegram) |
+| `gitsync notify --set-url https://discord.com/api/webhooks/...` | **save** a Discord webhook (validated, not just printed) |
+| `gitsync notify --set-telegram BOTTOKEN --chat-id 12345` | **save** Telegram credentials |
 | `gitsync fix` | detect drift across platforms and repair it |
+| `gitsync fix --route main` | repair only that route |
+| `gitsync install` | install the scheduler for the **finest** route schedule |
+| `gitsync install --schedule weekly --user` | user timer, weekly (never writes `/etc` without `--system`) |
+| `gitsync install --cron` | use cron instead of systemd |
+| `gitsync ci` | run the same checks CI runs (syntax, smoke, 85 unit tests) |
+| `gitsync ci --install-hook` | add a `pre-push` hook so every push runs them first |
+| `gitsync doctor` | health check: tokens, routes, storage, scheduler |
+| `gitsync update` | pull the newest release and reinstall |
+| `gitsync watch --interval 60` | sync on a loop in the foreground (minimum 30s) |
+| `gitsync uninstall` | remove the scheduler and the command (keeps config + mirrors) |
+
+### Flags worth knowing
+
+| Flag | On | What it does |
+|---|---|---|
+| `--dry-run` | `sync`, `fix` | preview only. Names every ref a `full`-mode push **would delete** |
+| `--quiet` | `sync` | no progress output (what the timer uses) |
+| `--scheduled` | `sync` | only run routes whose own schedule says they are due |
+| `--to NAME` | `sync`, `mirror` | push to one target only. **Ignored on a mesh route** (a mesh always syncs every peer) |
+| `--from NAME` | `mirror` | pull from a specific platform instead of the route's source |
+| `--repos "a,b"` | `sync`, `stars copy` | only these repos (exact, case-insensitive names) |
+| `--route NAME` | most commands | only this route |
+| `--orphans --prune-orphans` | `disk` | list mirrors no route owns, then delete them (two separate steps, on purpose) |
+| `--system` | `install` | install a root system unit instead of a user unit |
+| `--user` | `install` | install under `$HOME` (never uses sudo) |
+| `--yes` | `install` | no prompts |
+| `--json` | `stars list` | machine-readable output |
 | `gitsync watch --interval 60` | sync every 60 s in the foreground |
 | `gitsync install --schedule daily` | (re)install the scheduler |
 | `gitsync doctor` | full health check |
@@ -503,13 +532,21 @@ next sync if the repo reappears).
 
 | Key | Action |
 |---|---|
-| `S` | run a sync now (live output) |
-| `L` | full log viewer |
-| `H` | run history |
-| `C` | schedule: hourly / 6h / 12h / daily / OFF |
-| `O` | options: workers (1–8), mirror mode, include forks |
-| `A` | accounts & platforms (tokens, scopes, how to add more) |
-| `E` | **repo browser** — see the account's repos, pick some, sync just those |
+| `S` | run a sync now (live output + progress bar) |
+| `D` | **dry run** — preview a whole run, or one route from the pause screen |
+| `L` | full log viewer (scroll, `/` to filter, `G`/`End` bottom, `Home` top) |
+| `H` | run history + duration trend |
+| `C` | schedule: hourly / 6h / 12h / daily / weekly / off |
+| `O` | options: workers, mirror mode, forks, notify, **pacing**, mesh policy, token warning, **theme** |
+| `A` | accounts: add / edit / remove / test / enable-disable a site, `V` browse its repos, `?` token scopes |
+| `P` (Routes tab) | pause/resume a target or a route · `S` run one route · `D` dry-run it · `F` filters · `A` add · `X` remove · `O` per-route options |
+| `E` | **repo browser** — see the account's repos, pick some, `S` all targets / `T` one site / `L` local only |
+| `T` | **tools**: disk + orphans, doctor, compare, mirror one repo, fix drift, update, uninstall (run in the background, output streams to the dashboard) |
+| `N` | notifications: Discord `D`, Telegram `T`, mode `M`, test Enter, webhook receiver `W` |
+| `R` | refresh platform connections |
+| `W` | setup wizard |
+| `1`–`7` | Dashboard · Platforms · Routes · Stars · Log · History · Settings |
+| mouse | click a tab, or a row in the repo browser / pause screen |
 | `W` | re-run the setup wizard |
 | `R` | refresh platform connections |
 | `P` (Routes tab) | **pause / resume** a route or one of its targets |
@@ -686,10 +723,62 @@ also come from `GITHUB_TOKEN`, `GITLAB_TOKEN`, `FORGEJO_TOKEN`, `GITEA_TOKEN`,
     {"name": "main", "source": "github",
      "targets": ["gitlab", "homelab", "anygit", "backup"]}
   ],
-  "settings": {"workers": 4, "mode": "full",
+  "settings": {"workers": 4, "mode": "safe", "mesh_conflict": "skip",
                "schedule": "hourly", "include_forks": false}
 }
 ```
+
+Every key below is optional unless the *Required* column says so; anything
+missing falls back to the default shown.
+
+### `settings` — global defaults (a route can override most of them)
+
+| Key | Values | Default | What it does | Change it in |
+|---|---|---|---|---|
+| `workers` | 1, 2, 4, 8 | `4` | repos synced in parallel | `O` |
+| `mode` | `safe`, `full` | `safe` | `safe`: never deletes, never force-pushes. `full`: force-update heads+tags and **delete** target refs the source doesn't have | `O` or per-route `P`→`O` |
+| `mesh_conflict` | `newest`, `skip` | `skip` | when two peers disagree on a branch: `newest` overwrites the older side, `skip` leaves both alone and reports `partial` | `O` or per-route `P`→`O` |
+| `schedule` | `hourly`, `6h`, `12h`, `daily`, `weekly`, `off` | `hourly` | how often the timer runs. The timer actually fires at the **finest** route schedule | `C` |
+| `include_forks` | `true`, `false` | `false` | mirror forked repos too | `O` |
+| `pace` | 0, 1, 2, 5, 10 (seconds) | `0` | pause between repos — slows a run to spare laptop heat / disk throttling | `O` |
+| `relax_protection` | `true`, `false` | `false` | allow gitsync to turn on force-push over **branch protection** on a destination. Off means a rejected push is reported, never worked around | hand-edit only |
+| `token_warn_days` | 7, 14, 30, 60, 90 | `30` | how early a credential warns before it expires | `O` |
+| `theme` | `default`, `mono`, `ocean`, `forest`, `sunset` | `default` | TUI colours. `mono` is all-white | `O` |
+| `notify.on` | `failure`, `success`, `always`, `never` | `failure` | when to send Discord/Telegram alerts | `O` or `N`→`M` |
+| `notify.discord_webhook` | URL | *(empty)* | Discord webhook | `N`→`D` or `notify --set-url` |
+| `notify.telegram_token` / `notify.telegram_chat_id` | string | *(empty)* | Telegram bot + chat | `N`→`T` or `notify --set-telegram … --chat-id …` |
+
+### `platforms` — one entry per site
+
+| Key | Applies to | What it does |
+|---|---|---|
+| `type` | **required** | `github`, `gitlab`, `forgejo`, `gitea`, `bitbucket`, `generic`, `local` |
+| `enabled` | all | `false` = never synced, still listed and testable |
+| `url` | all but `local` | instance URL. Defaults per type (`https://github.com`, `https://gitlab.com`, `https://bitbucket.org`, `http://localhost:3000`) |
+| `token` | all but `local` | API token. **Empty on GitHub** means "use the `gh` CLI" |
+| `owner` | all but `local` | your username / workspace / namespace. Blank = auto-detected |
+| `auth` | github | `gh` (use the CLI) or `token`. Set automatically when no token is given |
+| `affiliation` | github | which repos to list: `owner` (default) or `owner,organization_member`. **Org repos stay invisible until this is set**, even with the `read:org` scope |
+| `ns_id` | gitlab | target namespace id. Blank = your personal namespace (never a group, unless you set it) |
+| `protocol` | all but `local` | `http` (default) or `ssh`. SSH needs a key on the host |
+| `ssh_port` | all but `local` | SSH port when `protocol: ssh` (default 22) |
+| `user` | forgejo, gitea, generic | git username inside token URLs (default: the account login) |
+| `url_template` | generic | URL pattern with `{owner}` and `{name}`, e.g. `https://git.example.com/{owner}/{name}.git` |
+| `path` | **local (required)** | folder that holds the bare `*.git` mirrors |
+
+### `routes` — one entry per sync direction
+
+| Key | What it does |
+|---|---|
+| `name` | any label; used by `--route`, `route-schedule`, `pause`/`resume` |
+| `source` | platform repos are read from |
+| `targets` | list of platforms repos are written to |
+| `direction` | `one-way` (default) or `mesh`. **Mesh = every peer is equal**: newest commit wins per branch, refs are unioned, nothing is deleted unless *no* peer has it |
+| `enabled` | `false` pauses the whole route — every run, including the timer, skips it |
+| `paused_targets` | list of targets to skip while the rest keep syncing |
+| `workers` / `mode` / `mesh_conflict` | per-route override of the global value |
+| `schedule` | per-route frequency; the timer fires at the finest one |
+| `include` / `exclude` | glob lists, e.g. `["Sea*"]` / `["tradex"]` |
 
 You can enable **several platforms of the same type** — two Forgejo servers,
 GitHub plus a self-hosted Gitea, each with its own token and route.
@@ -1010,6 +1099,7 @@ ships a `pre-push` hook that runs them before every push
 |---|---|
 | [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) | step-by-step walkthrough: install → log in → pick folders → first sync |
 | [docs/PERMISSIONS.md](docs/PERMISSIONS.md) | exactly which token scopes every platform needs |
+| [docs/OPTIONS.md](docs/OPTIONS.md) | **what every setting means**, in plain language, and when to change it |
 | [CHANGELOG.md](CHANGELOG.md) | release history |
 | [SECURITY.md](SECURITY.md) | how credentials are stored, how to report issues |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | dev setup, conventions, how to add a platform |

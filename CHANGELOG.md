@@ -4,6 +4,28 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-11-10
+
+### Documentation
+
+- **`docs/OPTIONS.md`** — what every setting means, in plain language, and
+  when to change it: the two decisions that matter (`mode`, `mesh_conflict`),
+  every global setting with its cost, per-route overrides, notifications, the
+  platform keys, and where the files live.
+- **README configuration reference** — tables for every `settings`,
+  `platforms` and `routes` key with values, defaults and the TUI key that
+  changes it. The example previously showed 4 of the 9 settings.
+- **README command + flag reference** — the commands that were missing
+  (`install`, `ci`, `doctor`, `update`, `watch`, `uninstall`, `notify
+  --set-url/--set-telegram`, `fix --route`) and a "flags worth knowing" table
+  (`--dry-run`, `--scheduled`, `--to` on a mesh route, `--orphans
+  --prune-orphans`, `--system`/`--user`/`--yes`).
+- **README TUI key reference** — every key on every tab, including the ones
+  added since 1.5 (`D`, `T`, `V`, `?`, `W`, per-tab keys, mouse).
+
+Every value in the new tables was checked against the code, and every flag
+was checked against `--help`.
+
 ## [1.7.0] - 2026-11-09
 
 A full review pass: 14 correctness/safety bugs, 10 honesty fixes, and one
