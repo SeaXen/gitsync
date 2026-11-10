@@ -663,6 +663,54 @@ class TestScheduleStamp(unittest.TestCase):
 
 # ------------------------------------------------------------------- stars
 
+class TestStarAdapters(unittest.TestCase):
+    """P1-4: the GitLab star path was double-encoded, and GitHub's
+    starred() treated a good HTTP 200 as a failure."""
+
+    def test_gitlab_star_path_encoded_once(self):
+        # quote() of a string that already holds %2F produced %252F
+        self.assertEqual(P._url_quote("group/sub/repo"), "group%2Fsub%2Frepo")
+        self.assertEqual(P._url_quote("group%2Fsub%2Frepo"),
+                         "group%252Fsub%252Frepo")
+        # so the star call must quote the raw path exactly once
+        path = P._url_quote("group/sub/repo")
+        self.assertNotIn("%25", path)
+
+    def test_github_starred_accepts_status_200(self):
+        class Fake:
+            token = "t"
+            ptype = "github"
+
+            def _api(self, path, method="GET", payload=None):
+                self.seen = getattr(self, "seen", 0) + 1
+                if self.seen == 1:
+                    return 200, [{"full_name": "a/b"}]
+                return 200, []
+
+        self.assertEqual(ST.starred(Fake()), [("a/b", "")])
+
+    def test_gitlab_star_posts_to_the_encoded_path(self):
+        # a fake GitLab platform records the URL star() builds
+        calls = []
+
+        class Fake:
+            token = "t"
+            ptype = "gitlab"
+
+            def _api(self, path, method="GET", payload=None):
+                calls.append((method, path))
+                if method == "GET":
+                    return 404, {"message": "404 Not Found"}
+                return 201, {}
+
+        ST.star(Fake(), "group/sub/repo")
+        self.assertTrue(calls)
+        method, path = calls[-1]
+        self.assertEqual(method, "POST")
+        self.assertIn("group%2Fsub%2Frepo", path)
+        self.assertNotIn("%25", path)
+
+
 class TestStars(unittest.TestCase):
     def test_norm_url(self):
         self.assertEqual(

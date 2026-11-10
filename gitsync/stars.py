@@ -106,16 +106,20 @@ def star(plat, name):
             rc, _o, _e = plat._gh(["api", "--method", "PUT", path])
             return rc == 0
         if ptype == "gitlab":
-            # GitLab stars by project id, not path
-            rc, o = plat._api("/projects/%s/star"
-                              % P._url_quote(name.replace("/", "%2F")))
-            if rc not in (201, 200, 304):
-                # fall back to a lookup by path
-                rc2, pr = plat._api("/projects/%s"
-                                    % P._url_quote(name.replace("/", "%2F")))
-                if rc2 != 200 or not isinstance(pr, dict) or not pr.get("id"):
-                    return False
-                rc, _o = plat._api("/projects/%s/star" % pr["id"], "POST")
+            # GitLab stars by project id, not path. The path is quoted once:
+            # quoting a string that already held %2F produced %252F. The
+            # star call itself must be a POST - a GET only reports the
+            # current status, so an unstarred project looked "already ok".
+            quoted = P._url_quote(name)
+            rc, _o = plat._api("/projects/%s/star" % quoted, "POST")
+            if rc in (201, 200, 304):
+                return True
+            # not found under that path: resolve the project by path, then
+            # star it by id
+            rc2, pr = plat._api("/projects/%s" % quoted)
+            if rc2 != 200 or not isinstance(pr, dict) or not pr.get("id"):
+                return False
+            rc, _o = plat._api("/projects/%s/star" % pr["id"], "POST")
             return rc in (201, 200, 304)
         if ptype in ("forgejo", "gitea"):
             rc, _o = plat._api("/repos/%s/star" % name, "PUT")

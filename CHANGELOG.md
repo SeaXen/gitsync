@@ -38,9 +38,19 @@ The features the review deferred until the fixes were in, plus the P2 polish.
   `CONTRIBUTING.md` describes the real CI, `import json` moved to the top of
   `sync.py`.
 
+### Fixed
+
+- **GitLab `star()` never actually starred.** It issued a `GET` (which only
+  reports the current status) and treated a `200` as success, so an
+  unstarred project looked "already ok" and nothing was starred. It now
+  POSTs, and falls back to a path lookup then a POST by id.
+- The GitLab star path was double-encoded (`%252F`); the earlier fix for it
+  had not actually landed. Both are now covered by tests, which is how they
+  were caught.
+
 ### Changed
 
-- 100 unit tests (was 91).
+- 103 unit tests (was 91).
 - README gains "If the source host disappears" and "A repo list in a file",
   plus rows for every new command and key; `docs/OPTIONS.md` gains the repo
   selection, `glab` and restore sections.
