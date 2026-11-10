@@ -32,6 +32,7 @@ from . import tokencheck as TK
 from . import webhooks as WH
 
 WH_PORT = WH.DEFAULT_PORT
+WH_PORT_WEB = 7765
 
 
 def _platforms_table(cfg):
@@ -204,6 +205,33 @@ def cmd_tui(args):
     from . import tui
     tui.main()
     return 0
+
+
+def cmd_web(args):
+    from . import web
+    if getattr(args, "set_password", None):
+        import getpass
+        user = args.set_password
+        p1 = getpass.getpass("New password for '%s': " % user)
+        p2 = getpass.getpass("Confirm password: ")
+        if p1 != p2:
+            print("passwords do not match")
+            return 2
+        try:
+            web.set_password(user, p1)
+        except ValueError as e:
+            print(e)
+            return 2
+        print("password set for '%s' (stored as a PBKDF2 hash, mode 0600)." % user)
+        print("sign in with it at the web UI, or disable with "
+              "gitsync web --disable-password.")
+        return 0
+    if getattr(args, "disable_password", False):
+        web.clear_password()
+        print("password sign-in disabled (access-token sign-in still works).")
+        return 0
+    return web.serve(port=args.port, bind=args.bind,
+                     allowed_hosts=getattr(args, "allowed_host", None))
 
 
 def cmd_install(args):
@@ -1720,6 +1748,22 @@ def main(argv=None):
 
     sp = sub.add_parser("tui", help="open the dashboard")
     sp.set_defaults(func=cmd_tui)
+
+    sp = sub.add_parser("web", help="open the web dashboard in a browser")
+    sp.add_argument("--port", type=int, default=WH_PORT_WEB,
+                    help="listen port (default %d)" % WH_PORT_WEB)
+    sp.add_argument("--bind", default="127.0.0.1",
+                    help="bind address (default 127.0.0.1; other binds "
+                         "always require the access token)")
+    sp.add_argument("--allowed-host", dest="allowed_host", action="append",
+                    help="extra Host/Origin to accept (repeatable; for a "
+                         "reverse-proxy domain). DNS-rebinding guard stays on")
+    sp.add_argument("--set-password", dest="set_password", metavar="USER",
+                    help="set a username + password for web sign-in, then exit")
+    sp.add_argument("--disable-password", dest="disable_password",
+                    action="store_true",
+                    help="remove the web password (token sign-in remains)")
+    sp.set_defaults(func=cmd_web)
 
     sp = sub.add_parser("install", help="install the scheduler")
     sp.add_argument("--schedule", choices=sorted(C.SCHEDULES),

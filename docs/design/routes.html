@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gitsync · Routes</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo">gitsync</div>
+      <a class="nav" href="index.html">Dashboard</a>
+      <a class="nav" href="platforms.html">Platforms</a>
+      <a class="nav on" aria-current="page" href="routes.html">Routes</a>
+      <a class="nav" href="stars.html">Stars</a>
+      <a class="nav" href="log.html">Log</a>
+      <a class="nav" href="history.html">History</a>
+      <a class="nav" href="settings.html">Settings</a>
+  </aside>
+  <main class="main">
+    <div class="bar">
+      <div><h1>Routes</h1><div class="muted sub">Any direction between sites.</div></div>
+      <button class="btn primary">Add route</button>
+    </div>
+
+    <section class="card">
+      <div class="bar">
+        <div><span class="route-title">main</span> <span class="chip">one-way</span><span class="chip">hourly</span></div>
+        <div class="actions"><button class="btn">Dry run</button><button class="btn">Run</button><button class="btn">Pause</button></div>
+      </div>
+      <div class="mono" style="margin:14px 0 6px">github <span class="muted">→</span></div>
+      <span class="chip">gitlab</span><span class="chip">forgejo</span><span class="chip paused">bitbucket (paused)</span><span class="chip">local hub</span>
+      <div class="muted" style="margin-top:8px">Last run 12 min ago: 54 ok. Include <span class="mono">*</span>, exclude <span class="mono">archive-*</span></div>
+    </section>
+
+    <section class="card">
+      <div class="bar">
+        <div><span class="route-title">all</span> <span class="chip">two-way mesh</span><span class="chip">daily</span><span class="chip">on conflict: report</span></div>
+        <div class="actions"><button class="btn">Dry run</button><button class="btn">Run</button><button class="btn">Pause</button></div>
+      </div>
+      <div class="flow mono"><span class="chip">github</span>⇄<span class="chip">gitlab</span>⇄<span class="chip">forgejo</span>⇄<span class="chip">local hub</span></div>
+      <div class="warn" style="margin-top:8px">1 disagreement waiting: SeaVault, branch main differs on gitlab and github</div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

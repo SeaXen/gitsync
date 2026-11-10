@@ -1,0 +1,102 @@
+You are adding a web UI to gitsync, an existing Python CLI/TUI that mirrors
+git repositories between GitHub, GitLab, Forgejo, Gitea, Bitbucket and local
+folders. Read the repo first (README.md, gitsync/__main__.py, gitsync/tui.py,
+gitsync/sync.py, gitsync/config.py, gitsync/platforms.py,
+gitsync/webhooks.py). Do not write code until you have read them.
+
+## Goal
+A self-hosted web app that offers everything the TUI offers (tabs: Dashboard,
+Platforms, Routes, Stars, Log, History, Settings; plus repo browser with
+selective sync, accounts, notifications, doctor/disk/compare tools) through a
+browser. Launched with `gitsync web [--port 8484] [--bind 127.0.0.1]`.
+
+## Hard constraints
+1. Zero dependencies. Python 3.8+ standard library only (use
+   http.server.ThreadingHTTPServer, as gitsync/webhooks.py already does).
+   No pip, no npm, no build step. The front end is plain HTML, CSS and
+   vanilla JS served as static files.
+2. Reuse the existing engine. Call into config.py, sync.py, platforms.py,
+   stars.py, tokencheck.py, diskutil.py and scheduler.py. Do not
+   reimplement sync logic. Do not modify TUI behaviour. If the engine needs a
+   small change to be callable from the web layer, keep it backward
+   compatible and tell me.
+3. Security (most important):
+   - Bind to 127.0.0.1 by default. Binding elsewhere must require an
+     explicit --bind flag and must require authentication.
+   - Config holds platform tokens. NEVER return a token in any API response
+     or log line. Return only state such as {"token": "set"|"missing"|"expired"}.
+     Token fields are write-only in forms.
+   - Add auth: a random access token generated on first run, stored with
+     0600 permissions, required on every /api request (Authorization: Bearer
+     or an HttpOnly, SameSite=Strict cookie). Use hmac.compare_digest.
+   - Protect state-changing requests against CSRF and DNS rebinding
+     (check Host and Origin headers; require a custom header or token on POST).
+   - Validate all inputs (platform names, route names, repo names, paths).
+     Never pass user input to a shell. Use subprocess with argument lists.
+   - Reject path traversal for local-folder targets and static files.
+4. Only one sync at a time. The engine uses a lock file (sync.lock in the data
+   dir). The web layer must respect it and report "already running" cleanly.
+5. Write config atomically (temp file, then os.replace) and keep the existing
+   .broken backup behaviour.
+
+## Architecture
+- New module gitsync/web.py (server, routing, auth) and a static folder
+  gitsync/webui/ (index.html, app.js, style.css, one HTML page per tab).
+- JSON API under /api, for example:
+  GET  /api/status        version, scheduler, last run, syncing flag
+  GET  /api/platforms     list with ok/fail, repo counts, token state
+  POST /api/platforms     add, PUT edit, DELETE remove, POST /test
+  GET  /api/routes        POST add, PUT edit, DELETE remove,
+                          POST pause/resume (whole route or one target)
+  POST /api/sync          body: route, to, repos, dry_run
+  GET  /api/sync/stream   Server-Sent Events: live lines from the sync run,
+                          parsed progress {done,total,repo}
+  GET  /api/repos?platform=   browse an account's repos (selective sync)
+  GET  /api/stars, POST /api/stars/copy
+  GET  /api/log?tail=, GET /api/history
+  GET  /api/settings, PUT /api/settings (workers, mode, schedule, notify)
+  GET  /api/health        tokens, disk, drift (compare)
+- Run syncs as a subprocess (`python3 -m gitsync sync ...`) like the TUI does,
+  and stream its stdout to the browser with SSE. The TUI parses lines of the
+  form "[12/54] OK repo -> targets"; reuse that format for the progress bar.
+- Do long-running calls (platform tests, repo listing) off the request thread
+  and never block the server.
+
+## Front end
+Match the design in docs/design/ (index.html, routes.html, style.css). It is a
+dark, terminal-flavoured UI: monospace for repo names and logs, green/amber/red
+only for status, sidebar navigation that collapses to a scrolling tab strip
+below 720px. Keep the CSS variables and class names from style.css; extend, do
+not restyle. Build the remaining pages (Platforms, Stars, Log, History,
+Settings, repo browser) in the same style. Requirements: real <button>/<a>/
+<label> elements, visible focus states, 44px touch targets, text contrast at
+least 4.5:1, works at phone width, no emoji icons.
+Replace every sample value in the design with data from the API. Show loading,
+empty and error states.
+
+## Phases (stop after each and wait for my go-ahead)
+0. Write a plan: files you will add or change, the full API table, the auth
+   design, and any engine changes you think are needed. No code yet.
+1. Server skeleton: `gitsync web`, auth, static files, GET /api/status,
+   Dashboard page showing real data.
+2. Platforms and Routes pages with full CRUD, token-safe forms.
+3. Sync, dry run and the live SSE progress and log.
+4. Repo browser with selective sync, Stars, History, Log, Settings.
+5. Tools (doctor, disk, compare, token check), polish, README section.
+
+## Definition of done
+- `gitsync web` starts on 127.0.0.1 and every TUI feature has a web equivalent.
+- No API response, log line or HTML page ever contains a token. Prove it with a
+  test that greps responses for known token strings.
+- Unit tests (unittest, standard library) for auth, input validation, token
+  redaction, atomic config write and the sync-lock behaviour.
+- Existing CLI and TUI behave exactly as before.
+- README documents setup, the security model, and how to put it behind a
+  reverse proxy.
+
+## Do not
+- Add third-party packages or a JS build toolchain.
+- Expose the server on 0.0.0.0 by default.
+- Store or echo tokens in the browser (localStorage included).
+- Rewrite working engine code or reformat unrelated files.
+- Continue to the next phase without my approval.

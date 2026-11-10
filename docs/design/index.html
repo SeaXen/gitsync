@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>gitsync · Dashboard</title>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+  <aside class="side">
+    <div class="logo">gitsync</div>
+      <a class="nav on" aria-current="page" href="index.html">Dashboard</a>
+      <a class="nav" href="platforms.html">Platforms</a>
+      <a class="nav" href="routes.html">Routes</a>
+      <a class="nav" href="stars.html">Stars</a>
+      <a class="nav" href="log.html">Log</a>
+      <a class="nav" href="history.html">History</a>
+      <a class="nav" href="settings.html">Settings</a>
+  </aside>
+  <main class="main">
+    <div class="bar">
+      <div><h1>Dashboard</h1><div class="muted sub">Timer: hourly, next run in 23 min.</div></div>
+      <div class="actions"><button class="btn">Dry run</button><button class="btn primary">Sync now</button></div>
+    </div>
+
+    <section class="card">
+      <p class="label">Syncing now</p>
+      <div class="row" style="margin-bottom:8px"><span class="mono">[12/54] SeaVault → gitlab, forgejo, local</span><span class="muted">22%</span></div>
+      <div class="progress" role="progressbar" aria-valuenow="22" aria-valuemin="0" aria-valuemax="100"><span style="width:22%"></span></div>
+    </section>
+
+    <div class="grid">
+      <section class="card">
+        <p class="label">Platforms: 4 sites, 3 connected</p>
+        <div class="stack">
+          <div class="row"><span><i class="dot"></i>github</span><span class="mono muted">54 repos</span></div>
+          <div class="row"><span><i class="dot"></i>gitlab</span><span class="mono muted">54 repos</span></div>
+          <div class="row"><span><i class="dot"></i>forgejo</span><span class="mono muted">51 repos</span></div>
+          <div class="row"><span><i class="dot bad"></i>bitbucket</span><span class="mono bad">token expired</span></div>
+        </div>
+      </section>
+      <section class="card">
+        <p class="label">Last run</p>
+        <div class="big ok">52 ok</div>
+        <div class="muted" style="margin-top:6px">2 failed of 54, in 214 s</div>
+        <div class="mono spark" aria-hidden="true">▂▃▅▃▆▇▅▃▂▄▆▇</div>
+        <div class="muted" style="font-size:12px">last 12 runs</div>
+      </section>
+      <section class="card">
+        <p class="label">Disk and health</p>
+        <div class="mono" style="line-height:1.9">hub size <span class="muted">18.4 GB</span><br>orphans <span class="warn">3 mirrors</span><br>drift <span class="ok">none</span><br>tokens <span class="warn">1 expiring</span></div>
+      </section>
+    </div>
+
+    <section class="card">
+      <p class="label">Log</p>
+      <div class="mono log">
+        <div class="ok">[11/54] OK   tradex → gitlab, forgejo, local</div>
+        <div class="ok">[12/54] OK   SeaVault → gitlab, forgejo, local</div>
+        <div class="bad">[13/54] FAIL old-notes → forgejo (protected branch)</div>
+        <div class="muted">[14/54] ...   dotfiles</div>
+      </div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

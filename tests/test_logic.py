@@ -26,6 +26,7 @@ from gitsync import sync as SY
 from gitsync import tokencheck as TK
 from gitsync import tui
 from gitsync import webhooks as WH
+from gitsync import web as W
 
 # CI runners inject credential env vars (GITHUB_TOKEN, FORGEJO_TOKEN, ...).
 # The adapters deliberately fall back to them, so a test that does not set a
@@ -1279,6 +1280,202 @@ class TestTui(unittest.TestCase):
             {"platforms": {"a": {"type": "github", "enabled": True}}})
         self.assertEqual(rows[0][2], "ON ")
         self.assertIn(rows[0][3], ("OK ", "FAIL"))
+
+
+# ------------------------------------------------------------------ web UI
+
+class TestWeb(unittest.TestCase):
+    """The web layer is a new exit path for secrets and inputs, so auth
+    helpers, validation and redaction are asserted here (offline)."""
+
+    def test_valid_name(self):
+        self.assertTrue(W._valid_name("github"))
+        self.assertTrue(W._valid_name("gh-2"))
+        self.assertTrue(W._valid_name("a.b_c"))
+        self.assertFalse(W._valid_name(""))
+        self.assertFalse(W._valid_name("has space"))
+        self.assertFalse(W._valid_name("a/b"))
+        self.assertFalse(W._valid_name("x" * 65))
+
+    def test_clean_repo_list(self):
+        self.assertEqual(W._clean_repo_list("a, b ,c"), ["a", "b", "c"])
+        self.assertEqual(W._clean_repo_list(""), [])
+        self.assertEqual(W._clean_repo_list("Sea*"), ["Sea*"])
+        with self.assertRaises(ValueError):
+            W._clean_repo_list("bad;rm -rf")
+        with self.assertRaises(ValueError):
+            W._clean_repo_list("has space")
+
+    def test_token_state_reports_state_not_value(self):
+        self.assertEqual(W._token_state({"type": "local"}), "local")
+        self.assertEqual(W._token_state({"type": "gitlab", "token": "x"}), "set")
+        self.assertEqual(W._token_state({"type": "gitlab"}), "missing")
+        self.assertEqual(W._token_state({"type": "github", "auth": "gh"}), "gh")
+        self.assertEqual(W._token_state({"type": "gitlab", "auth": "glab"}), "glab")
+
+    def test_public_platform_never_contains_the_token(self):
+        p = {"type": "gitlab", "enabled": True, "url": "https://gitlab.com",
+             "token": "glpat-SECRET", "owner": "me"}
+        pub = W._public_platform("gl", p)
+        self.assertNotIn("token", pub)
+        self.assertNotIn("glpat-SECRET", json.dumps(pub))
+        self.assertEqual(pub["token_state"], "set")
+
+    def test_redactor_removes_known_secret(self):
+        r = W.Redactor()
+        with r._lock:
+            r._secrets = {"glpat-SECRET-xyz"}
+        self.assertEqual(r.redact("Token is glpat-SECRET-xyz here"),
+                         "Token is *** here")
+        # and a URL-embedded form (engine _redact also runs)
+        self.assertNotIn("glpat-SECRET-xyz",
+                         r.redact("https://oauth2:glpat-SECRET-xyz@gitlab.com/x"))
+
+    def test_redactor_reads_the_config(self):
+        # end-to-end: a token planted in the config must never survive
+        with tempfile.TemporaryDirectory() as td:
+            cfgfile = os.path.join(td, "config.json")
+            with open(cfgfile, "w") as f:
+                json.dump({"platforms": {"gl": {"type": "gitlab",
+                                                "token": "glpat-LEAK-ME"}},
+                           "settings": {}}, f)
+            old = C.CONFIG_FILE
+            C.CONFIG_FILE = cfgfile
+            try:
+                r = W.Redactor()
+                self.assertNotIn("glpat-LEAK-ME",
+                                 r.redact("error: push ...glpat-LEAK-ME..."))
+            finally:
+                C.CONFIG_FILE = old
+
+    def test_public_record_redacts_failure_errors(self):
+        with W.REDACTOR._lock:
+            W.REDACTOR._secrets = {"TOPSECRET"}
+        try:
+            rec = {"finished_at": "t", "ok": 1,
+                   "failures": [{"route": "r", "repo": "x",
+                                 "error": "failed TOPSECRET"}]}
+            self.assertNotIn("TOPSECRET", json.dumps(W._public_record(rec)))
+        finally:
+            W.REDACTOR.reload()
+
+    def test_tool_argv_builds_the_right_command(self):
+        self.assertEqual(W._tool_argv("compare", {}), (["compare"], False))
+        self.assertEqual(W._tool_argv("compare", {"route": "main"}),
+                         (["compare", "--route", "main"], False))
+        self.assertEqual(W._tool_argv("fix", {"route": "main"}),
+                         (["fix", "--route", "main"], True))
+        self.assertEqual(W._tool_argv("doctor", {"fix": True}),
+                         (["doctor", "--fix"], False))
+        self.assertEqual(W._tool_argv("restore", {"to": "backup",
+                                                  "dry_run": True}),
+                         (["restore", "--to", "backup", "--dry-run"], True))
+        self.assertEqual(W._tool_argv("mirror", {"repos": "a,b", "to": "gl"}),
+                         (["mirror", "a", "b", "--to", "gl"], True))
+        self.assertEqual(W._tool_argv("tokens", {}), (["tokens"], False))
+
+    def test_tool_argv_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            W._tool_argv("restore", {})           # needs --to
+        with self.assertRaises(ValueError):
+            W._tool_argv("mirror", {})            # needs repos
+        with self.assertRaises(ValueError):
+            W._tool_argv("nonsense", {})          # unknown tool
+
+    def test_engine_sync_busy_is_false_when_free(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                self.assertFalse(W._engine_sync_busy())
+            finally:
+                C.DATA_DIR = old
+
+    def test_is_loopback(self):
+        self.assertTrue(W._is_loopback("127.0.0.1"))
+        self.assertTrue(W._is_loopback("::1"))
+        self.assertTrue(W._is_loopback("localhost"))
+        self.assertFalse(W._is_loopback("0.0.0.0"))
+        self.assertFalse(W._is_loopback("192.168.1.5"))
+
+    def test_get_web_token_prefers_the_env(self):
+        old = os.environ.get("GITSYNC_WEB_TOKEN")
+        os.environ["GITSYNC_WEB_TOKEN"] = "env-token-123"
+        try:
+            tok, gen = W.get_web_token()
+            self.assertEqual(tok, "env-token-123")
+            self.assertFalse(gen)
+        finally:
+            if old is None:
+                os.environ.pop("GITSYNC_WEB_TOKEN", None)
+            else:
+                os.environ["GITSYNC_WEB_TOKEN"] = old
+
+    def test_password_set_and_check(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            try:
+                self.assertIsNone(W.get_auth())
+                self.assertFalse(W.check_password("alice", "hunter2hunter2"))
+                W.set_password("alice", "hunter2hunter2")
+                a = W.get_auth()
+                self.assertEqual(a["username"], "alice")
+                # the plaintext is never stored
+                self.assertNotIn("hunter2hunter2", json.dumps(a))
+                self.assertTrue(W.check_password("alice", "hunter2hunter2"))
+                self.assertFalse(W.check_password("alice", "wrong-password"))
+                self.assertFalse(W.check_password("bob", "hunter2hunter2"))
+            finally:
+                C.CONFIG_DIR = old
+
+    def test_password_min_length_and_blank(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            try:
+                with self.assertRaises(ValueError):
+                    W.set_password("alice", "short")
+                with self.assertRaises(ValueError):
+                    W.set_password("", "longenoughpassword")
+            finally:
+                C.CONFIG_DIR = old
+
+    def test_clear_password(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            try:
+                W.set_password("alice", "hunter2hunter2")
+                self.assertTrue(W.clear_password())
+                self.assertIsNone(W.get_auth())
+                self.assertFalse(W.check_password("alice", "hunter2hunter2"))
+            finally:
+                C.CONFIG_DIR = old
+
+    def test_login_throttle_locks_after_failures(self):
+        t = W._Throttle(max_fails=3, window=120)
+        self.assertFalse(t.locked())
+        t.fail(); t.fail()
+        self.assertFalse(t.locked())
+        t.fail()
+        self.assertTrue(t.locked())
+        t.reset()
+        self.assertFalse(t.locked())
+
+    def test_config_write_is_atomic_and_0600(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_f, old_d = C.CONFIG_FILE, C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            try:
+                C.save_config({"platforms": {}, "routes": [], "settings": {}})
+                self.assertTrue(os.path.exists(C.CONFIG_FILE))
+                self.assertFalse(os.path.exists(C.CONFIG_FILE + ".tmp"))
+                self.assertEqual(oct(os.stat(C.CONFIG_FILE).st_mode & 0o777),
+                                 "0o600")
+            finally:
+                C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
 
 
 if __name__ == '__main__':

@@ -1,0 +1,96 @@
+/* Stars — read one account's stars and apply them to the others.
+   Only repos that already exist on a target are starred; nothing is created. */
+(function () {
+  var G = window.Gitsync;
+  var state = { source: "", platforms: [], stars: [], targets: {}, loaded: false, busy: false };
+
+  function render(main) {
+    main.innerHTML =
+      G.bar("Stars", "Copy an account's starred repos to your other accounts.") +
+      '<section class="card">' +
+        '<div class="inline mb">' +
+          '<div class="field" style="margin:0;min-width:220px"><label>Read stars from</label>' +
+          '<select id="s-src"></select></div>' +
+          '<button class="btn" id="s-reload" style="align-self:flex-end">Re-read</button>' +
+        "</div>" +
+        '<div id="s-list">' + G.loading("reading stars…") + "</div>" +
+      "</section>" +
+      '<section class="card" id="s-copycard" style="display:none">' +
+        '<div class="bar"><span class="route-title">Copy to</span>' +
+        '<div class="actions">' +
+          '<label class="check"><input type="checkbox" id="s-dry"> dry run</label>' +
+          '<button class="btn primary" id="s-copy">Copy stars</button>' +
+        "</div></div>" +
+        '<div id="s-targets" class="mt"></div>' +
+        '<div class="viewer mt" id="s-out" style="display:none"></div>' +
+      "</section>";
+
+    G.api("GET", "/api/platforms?probe=0").then(function (d) {
+      state.platforms = d.platforms.filter(function (p) { return p.enabled; });
+      var sel = document.getElementById("s-src");
+      sel.innerHTML = state.platforms.map(function (p) {
+        return '<option value="' + G.esc(p.name) + '">' + G.esc(p.name) + " (" + G.esc(p.type) + ")</option>";
+      }).join("");
+      state.source = state.platforms.length ? state.platforms[0].name : "";
+      renderTargets();
+      loadStars();
+      sel.addEventListener("change", function () { state.source = sel.value; state.stars = []; state.loaded = false; state.targets = {}; renderTargets(); loadStars(); });
+    }).catch(function (e) { document.getElementById("s-list").innerHTML = G.errorBox(e); });
+
+    document.getElementById("s-reload").addEventListener("click", loadStars);
+    document.getElementById("s-copy").addEventListener("click", copy);
+  }
+
+  function renderTargets() {
+    var host = document.getElementById("s-targets");
+    var others = state.platforms.filter(function (p) { return p.name !== state.source; });
+    if (!others.length) { host.innerHTML = '<div class="empty">no other accounts</div>'; return; }
+    host.innerHTML = others.map(function (p) {
+      return '<label class="check"><input type="checkbox" class="s-t" value="' +
+        G.esc(p.name) + '"> ' + G.esc(p.name) + "</label>";
+    }).join("");
+  }
+
+  function loadStars() {
+    document.getElementById("s-list").innerHTML = G.loading("reading stars…");
+    G.api("GET", "/api/stars?platform=" + encodeURIComponent(state.source))
+      .then(function (d) {
+        state.stars = d.stars || []; state.loaded = true; renderStars();
+      }).catch(function (e) { document.getElementById("s-list").innerHTML = G.errorBox(e); });
+  }
+
+  function renderStars() {
+    var host = document.getElementById("s-list");
+    document.getElementById("s-copycard").style.display = state.stars.length ? "" : "none";
+    if (!state.stars.length) {
+      host.innerHTML = '<div class="empty">no stars (or this site does not expose them)</div>';
+      return;
+    }
+    host.innerHTML = '<p class="label">' + state.stars.length + " starred</p>" +
+      state.stars.map(function (s) {
+        return '<div class="mono" style="padding:2px 0">' + G.esc(s.name) + "</div>";
+      }).join("");
+  }
+
+  function copy() {
+    var targets = Array.prototype.slice.call(document.querySelectorAll(".s-t:checked"))
+      .map(function (c) { return c.value; });
+    if (!targets.length) return G.toast("pick at least one target", "warn");
+    var out = document.getElementById("s-out");
+    out.style.display = ""; out.textContent = "copying…";
+    G.api("POST", "/api/stars/copy", {
+      source: state.source, targets: targets,
+      dry_run: document.getElementById("s-dry").checked
+    }).then(function (d) {
+      var s = d.summary;
+      out.innerHTML = (d.log || []).map(function (l) {
+        return '<div class="' + G.stateClass(l) + '">' + G.esc(l) + "</div>";
+      }).join("") +
+      '<div class="l-head mt">' + s.starred + " starred, " + s.already + " already, " +
+      s.missing + " not on that site, " + s.failed + " failed</div>";
+      G.toast("stars: " + s.starred + " new, " + s.missing + " not on target", "ok");
+    }).catch(function (e) { out.innerHTML = G.errorBox(e); });
+  }
+
+  G.mount("stars", render);
+})();

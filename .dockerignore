@@ -1,0 +1,12 @@
+# keep the image lean and free of local state
+.git
+.gitignore
+**/__pycache__
+**/*.pyc
+tests
+gitsync design
+GITSYNC-REVIEW.md
+.github
+.gitlab-ci.yml
+.forgejo
+*.log

@@ -107,6 +107,7 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **One-click install** | download + install + wizard + scheduler + first sync in one command |
 | **Token guidance** | the wizard shows exactly which scopes each platform needs before asking |
 | **TUI dashboard** | live status, per-platform repo counts, log tail, run history |
+| **Web UI + Docker** | `gitsync web` — every TUI feature in the browser, live SSE sync progress, and a ready container image |
 | **Drift detection** | `gitsync compare` verifies HEADs match across every platform |
 | **Self-healing** | a network drop mid-clone leaves a partial mirror that is detected, removed and re-cloned |
 | **Never overlaps** | run lock — the timer and manual runs step aside instead of colliding |
@@ -151,6 +152,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | Command | What it does |
 |---|---|
 | `gitsync` | **open the TUI** (no arguments needed) |
+| `gitsync web` | **open the web dashboard in a browser** (`--port 7765`, `--bind`) |
 | `gitsync setup` | guided first-run configuration |
 | `gitsync sync` | sync all routes now |
 | `gitsync sync --route main` | sync one route |
@@ -195,7 +197,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync install` | install the scheduler for the **finest** route schedule |
 | `gitsync install --schedule weekly --user` | user timer, weekly (never writes `/etc` without `--system`) |
 | `gitsync install --cron` | use cron instead of systemd |
-| `gitsync ci` | run the same checks CI runs (syntax, smoke, 85 unit tests) |
+| `gitsync ci` | run the same checks CI runs (syntax, smoke, 124 unit tests) |
 | `gitsync ci --install-hook` | add a `pre-push` hook so every push runs them first |
 | `gitsync restore --to gitlab` | **push the hub back out** — the source host is gone |
 | `gitsync restore --to backup --dry-run` | preview a restore (nothing is modified) |
@@ -610,6 +612,89 @@ next sync if the repo reappears).
 
 **Adaptive:** switches to a compact single-column layout on phones and narrow
 terminals (≥70×18 → full dashboard; smaller → compact; <34×10 → rotate hint).
+
+---
+
+## Web UI (`gitsync web`)
+
+Everything the TUI does, from a browser — plus live streaming. Zero new
+dependencies (Python standard library on the server; plain HTML/CSS/vanilla JS
+on the front end; no build step).
+
+```bash
+gitsync web                         # http://127.0.0.1:7765
+gitsync web --port 8484 --bind 127.0.0.1
+gitsync web --bind 0.0.0.0          # LAN / behind a proxy — auth always on
+```
+
+Open the URL, paste the **access token** printed on first run (stored at
+`~/.config/gitsync/web.token`, mode `0600`; set `GITSYNC_WEB_TOKEN` to choose
+your own), and you get a dark, terminal-flavoured dashboard with tabs for
+Dashboard, Platforms, Routes, Repos, Stars, Log, History, Tools and Settings.
+
+Every TUI feature has a web equivalent — accounts, routes (pause a route *or*
+one target), the repo browser with selective sync and save-to-file, star copy,
+the full log viewer, run history, options, notifications, webhook control,
+scheduler install, and the tools (doctor, compare, fix, tokens, disk, gc,
+restore, mirror). **Sync now / Dry run** stream the real
+`python3 -m gitsync sync` subprocess to the browser over Server-Sent Events,
+with a live `[done/total]` progress bar — nothing is reimplemented, so it can
+never drift from the CLI.
+
+**Security** (the config holds platform tokens, so this is the priority):
+
+- binds `127.0.0.1` by default; any other bind needs an explicit `--bind` and
+  **always** requires authentication
+- a random access token guards every `/api` call (`Authorization: Bearer` or an
+  `HttpOnly, SameSite=Strict` cookie, compared with `hmac.compare_digest`)
+- **optional username + password sign-in**: set one in Settings (or
+  `gitsync web --set-password USER`); it is stored as a PBKDF2 hash (mode
+  `0600`, never the plaintext, never returned), with a brute-force throttle.
+  The access token still works for API/curl. Web/Docker only — the TUI has no
+  login
+- a token is **never** returned in any response, log line or page — only state
+  (`set` / `missing` / `gh` / `glab`); token fields are write-only in forms; a
+  redactor strips any known token from every response and streamed line
+- CSRF guard (a custom header on cookie sessions) and a DNS-rebinding guard
+  (Host/Origin allowlist; loopback + private IPs are allowed for LAN access —
+  add a proxy domain with `--allowed-host` or `GITSYNC_ALLOWED_HOSTS`)
+- all subprocesses are argv lists (never a shell); names/paths are validated;
+  static files and local paths are confined (no traversal)
+- one sync at a time: the web layer respects the engine's `sync.lock` and
+  reports "already running" cleanly
+
+**Behind a reverse proxy:** terminate TLS at the proxy, forward to
+`127.0.0.1:7765`, and pass the public host with `--allowed-host your.domain`
+(or `GITSYNC_ALLOWED_HOSTS`). Keep the token required.
+
+---
+
+## Docker
+
+Run the same `gitsync web` as a container. The base image bundles git, so the
+build needs no apt/network at build time.
+
+```bash
+docker compose up -d               # builds and runs on http://<host>:7765
+docker logs gitsync                # first run prints the access token
+
+# or by hand:
+docker build -t gitsync .
+docker run -d -p 7765:7765 \
+  -v gitsync-config:/data/config \
+  -v gitsync-share:/data/share \
+  -e GITSYNC_WEB_TOKEN=choose-your-own \
+  gitsync
+```
+
+- **config + mirror hub live on volumes** (`/data/config`, `/data/share`), so
+  they survive restarts and updates. The access token is generated on first run
+  and stored in the config volume (or set `GITSYNC_WEB_TOKEN`).
+- runs **unprivileged**, with a `/healthz` healthcheck.
+- inside the container it binds `0.0.0.0` so the published port is reachable —
+  the access token is still enforced on every request.
+- the **systemd timer does not run in a container**; schedule syncs with a host
+  cron (`gitsync sync`), a sidecar, or `gitsync watch`.
 
 ---
 

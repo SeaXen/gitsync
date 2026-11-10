@@ -4,6 +4,55 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-11-10
+
+### Added — Web UI (`gitsync web`) and Docker
+
+Everything the TUI does, now from a browser — plus live streaming and a
+container image. Zero new dependencies: Python standard library only on the
+server, plain HTML/CSS/vanilla JS on the front end, no build step.
+
+- **`gitsync web [--port 7765] [--bind 127.0.0.1]`** opens a dark,
+  terminal-flavoured dashboard (matching `docs/design/`). Tabs: Dashboard,
+  Platforms, Routes, Repos, Stars, Log, History, Tools, Settings.
+- **Every TUI feature has a web equivalent**: accounts (add/edit/remove/test/
+  enable-disable), routes (add/edit/remove/pause/resume a route *or* one
+  target, per-route workers/mode/conflict/schedule, filters), repo browser
+  with selective sync + save-to-file, star copy, full log viewer, run history,
+  options, notifications, webhook-receiver control, scheduler install, and the
+  tools (doctor, compare, fix, tokens, disk, gc, restore, mirror).
+- **Live sync over Server-Sent Events**: the same `python3 -m gitsync sync`
+  subprocess the timer runs, streamed to the browser with a parsed
+  `[done/total]` progress bar — nothing reimplemented, nothing can drift.
+- **Security first** (the config holds platform tokens):
+  - binds `127.0.0.1` by default; any other bind needs an explicit `--bind`
+    and always requires auth
+  - a random access token (`web.token`, 0600) guards every `/api` call via
+    `Authorization: Bearer` or an `HttpOnly, SameSite=Strict` cookie
+    (`hmac.compare_digest`)
+  - a token is **never** returned in any response, log line or page — only
+    state (`set`/`missing`/`gh`/`glab`); token fields are write-only in forms;
+    a redactor strips any known token from every body and SSE line, on top of
+    the engine's own `_redact()`
+  - CSRF guard (custom header for cookie sessions) + DNS-rebinding guard
+    (Host/Origin allowlist, private/loopback IPs allowed for LAN access)
+  - **optional username + password sign-in** (`gitsync web --set-password USER`
+    or the web Settings): a PBKDF2 hash at mode 0600, never the plaintext, with a
+    brute-force throttle. Web/Docker only; the TUI keeps no login. The access
+    token still works for API access
+  - all subprocesses are argv lists (never a shell); names/paths validated;
+    static files and local paths confined (no traversal)
+- **One sync at a time**: respects the engine's `sync.lock` and reports
+    "already running" (409) cleanly.
+- **Docker**: `Dockerfile` + `docker-compose.yml`. Runs the same `gitsync web`
+    on `0.0.0.0:7765`; config + mirror hub live on volumes; token auto-generated
+    on first run (or set `GITSYNC_WEB_TOKEN`); unprivileged user; `/healthz`
+    healthcheck. The base image bundles git, so the build needs no apt network.
+- The CLI and TUI behave exactly as before (the only engine change is the
+  additive `web` subcommand). 124 unit tests (was 107), including auth,
+  input validation, token redaction, password hashing, atomic config write and
+  the sync lock.
+
 ## [1.8.1] - 2026-11-10
 
 ### Performance

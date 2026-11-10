@@ -1,0 +1,24 @@
+services:
+  gitsync:
+    build: .
+    image: gitsync:latest
+    container_name: gitsync
+    restart: unless-stopped
+    ports:
+      - "7765:7765"
+    volumes:
+      - gitsync-config:/data/config      # config.json, web.token, secrets
+      - gitsync-share:/data/share        # mirror hub, logs, run records
+    environment:
+      # Optional: a known access token. Leave empty and one is generated on
+      # first run, stored in the config volume, and printed to `docker logs`.
+      GITSYNC_WEB_TOKEN: "${GITSYNC_WEB_TOKEN:-}"
+      GITSYNC_CONFIG_DIR: /data/config
+      GITSYNC_DATA_DIR: /data/share
+      # Reaching it through a domain / reverse proxy? allow that Host here
+      # (comma-separated). The DNS-rebinding guard stays on for everything else.
+      # GITSYNC_ALLOWED_HOSTS: "git.example.com"
+
+volumes:
+  gitsync-config:
+  gitsync-share:
