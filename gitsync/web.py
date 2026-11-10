@@ -810,18 +810,18 @@ def make_handler():
             return urllib.parse.parse_qs(self.path.split("?", 1)[1])
 
         def _send(self, code, body_bytes, ctype, extra=None):
-            self.send_response(code)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body_bytes)))
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("X-Frame-Options", "DENY")
-            for k, v in (extra or {}).items():
-                self.send_header(k, v)
-            self.end_headers()
             try:
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body_bytes)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                for k, v in (extra or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
                 self.wfile.write(body_bytes)
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
         def _json(self, obj, code=200):
@@ -971,8 +971,8 @@ def make_handler():
             if path in ("/", ""):
                 path = "/index.html"
             root = os.path.realpath(WEBUI_DIR)
-            full = os.path.realpath(os.path.join(
-                root, os.path.normpath(path).lstrip("/")))
+            clean = os.path.normpath(path).lstrip("/\\")
+            full = os.path.realpath(os.path.join(root, clean))
             if full != root and not full.startswith(root + os.sep):
                 return self._err(403, "forbidden")
             if not os.path.isfile(full):
@@ -1961,6 +1961,12 @@ class _Server(ThreadingHTTPServer):
         self.extra_hosts = extra_hosts
         super().__init__(addr, handler)
         self.port = self.server_address[1]   # actual bound port (may be 0→ephemeral)
+
+    def handle_error(self, request, client_address):
+        _cls, exc, _tb = sys.exc_info()
+        if exc and isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+            return
+        super().handle_error(request, client_address)
 
 
 def serve(port=DEFAULT_PORT, bind=DEFAULT_BIND, allowed_hosts=None):

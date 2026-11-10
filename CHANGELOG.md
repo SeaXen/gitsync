@@ -4,6 +4,18 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.9] - 2026-11-10
+
+Cross-platform static path resolution fix and end-to-end Playwright test suite.
+
+### Fixed — Windows static files & socket handling
+- **Windows static asset path resolution**: Fixed a bug where `os.path.normpath(path).lstrip("/")` retained leading backslashes (`\index.html`) on Windows, causing `os.path.join(root, ...)` to evaluate to `D:\index.html` (the drive root) and fail directory containment with 403 Forbidden. Now strips both forward and backslashes (`.lstrip("/\\")`).
+- **Suppressed client disconnect socket noise**: Added `ConnectionAbortedError: [WinError 10053]` handling to `_send` and `_Server.handle_error` to cleanly ignore standard keep-alive teardowns and client aborts without printing tracebacks.
+
+### Added — E2E Testing
+- **Playwright E2E browser test suite**: Added `tests/test_webapp_playwright.py` exercising the full Web UI in headless Chromium across authentication, all 9 navigation pages, in-app modal confirmation dialogs, mobile responsive viewports (375×667), and session logout.
+- **Cross-platform static regression guard**: Added `test_static_files_serve_200_cross_platform` to `tests/test_logic.py`.
+
 ## [1.9.8] - 2026-11-10
 
 Web Interface Guidelines compliance pass across the entire web UI.

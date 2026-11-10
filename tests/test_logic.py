@@ -1753,6 +1753,14 @@ class TestWebHttp(unittest.TestCase):
         r = conn.getresponse(); r.read(); conn.close()
         self.assertEqual(r.status, 413)
 
+    def test_static_files_serve_200_cross_platform(self):
+        code, body, _ = self._req("GET", "/")
+        self.assertEqual(code, 200)
+        self.assertIn("gitsync", body)
+        code, body, _ = self._req("GET", "/style.css")
+        self.assertEqual(code, 200)
+        self.assertIn("color-scheme:dark", body)
+
 
 class TestTenOutOfTenFixes(unittest.TestCase):
     def test_github_token_is_url_quoted(self):
