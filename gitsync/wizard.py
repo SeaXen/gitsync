@@ -99,6 +99,46 @@ def hr(title=""):
         print("=" * 68)
 
 
+REPO_LIST_CAP = 50
+
+
+def _pick_repos(cfg, src):
+    """let the user choose which repos to sync. Returns [] for "all".
+
+    Enter (blank) = every repo. Otherwise a comma-separated list of names or
+    globs (`Sea*`), stored as the route's include. The printed list is capped
+    so a 500-repo account does not dump 500 lines without a count first.
+    """
+    sp = C.platform(cfg, src)
+    if not sp or not sp.get("enabled"):
+        return []
+    try:
+        repos = P.make(src, sp).list_repos()
+    except Exception as e:
+        print(" cannot list repos on %s: %s" % (src, e))
+        print(" syncing everything — narrow it later with: "
+              "gitsync routes edit main --include 'Sea*'")
+        return []
+    if not repos:
+        print(" (no repos on %s yet)" % src)
+        return []
+    names = sorted((r["name"] for r in repos), key=str.lower)
+    print("\n %d repos on %s:" % (len(names), src))
+    for n in names[:REPO_LIST_CAP]:
+        print("   %s" % n)
+    if len(names) > REPO_LIST_CAP:
+        print("   ... and %d more" % (len(names) - REPO_LIST_CAP))
+    print("\n Which repos? Enter = ALL, or a comma-separated list / globs")
+    print("   e.g.  SeaVault,tradex      or      Sea*")
+    ans = ask("Repos", "")
+    if not ans.strip():
+        print(" -> all %d repos" % len(names))
+        return []
+    picked = [p.strip() for p in ans.split(",") if p.strip()]
+    print(" -> %d pattern(s): %s" % (len(picked), ", ".join(picked)))
+    return picked
+
+
 def run_wizard():
     hr("gitsync setup wizard")
     print(" This configures platforms, sync direction and schedule.")
@@ -198,9 +238,16 @@ def run_wizard():
     src = ask("Source platform (repos are read from here)", enabled[0])
     tgt = ask("Targets (comma-separated, repos are written here)",
               ",".join([e for e in enabled if e != src]))
-    cfg["routes"] = [{"name": "main", "source": src,
-                      "targets": [t.strip() for t in tgt.split(",")
-                                  if t.strip() and t.strip() != src]}]
+    route = {"name": "main", "source": src,
+             "targets": [t.strip() for t in tgt.split(",")
+                         if t.strip() and t.strip() != src]}
+
+    # F2: choose which repos, here, instead of silently mirroring the whole
+    # account. Enter = everything; otherwise a comma list or globs.
+    include = _pick_repos(cfg, src)
+    if include:
+        route["include"] = include
+    cfg["routes"] = [route]
 
     # ---- settings ----
     hr("STEP 4/4 — schedule & options")

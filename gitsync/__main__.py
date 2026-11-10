@@ -959,6 +959,30 @@ def cmd_stars(args):
     return 0 if t["failed"] == 0 else 1
 
 
+def cmd_restore(args):
+    """push the local hub back out — for when the source host is gone"""
+    cfg = C.load_config()
+    if not args.to:
+        print("usage: gitsync restore --to PLATFORM[,PLATFORM] [--repos a,b]")
+        print("       gitsync restore --to backup --dry-run")
+        return 2
+    targets = [t.strip() for t in args.to.split(",") if t.strip()]
+    unknown = [t for t in targets if not C.platform(cfg, t)]
+    if unknown:
+        print("no such platform(s): %s" % ", ".join(unknown))
+        return 2
+    only = [r.strip() for r in (args.repos or "").split(",") if r.strip()]
+    t = SYNC.restore(cfg, targets, only=only or None, dry_run=args.dry_run,
+                     prune=args.prune, private=not args.public,
+                     log_fn=lambda m: print(m))
+    if args.dry_run:
+        print("\n%d repo(s) would be restored (nothing was modified)" % t["ok"])
+        return 0
+    print("\n%d restored, %d skipped, %d failed" % (t["ok"], t["skipped"],
+                                                     t["failed"]))
+    return 0 if t["failed"] == 0 else 1
+
+
 def cmd_tokens(args):
     """check every platform's credential for expiry / revocation"""
     cfg = C.load_config()
@@ -1706,6 +1730,19 @@ def main(argv=None):
     sp.add_argument("--dry-run", action="store_true")
     sp.add_argument("--json", action="store_true", help="list as JSON")
     sp.set_defaults(func=cmd_stars)
+
+    sp = sub.add_parser("restore",
+                        help="push the hub back out (source host is gone)")
+    sp.add_argument("--to", required=True,
+                    help="comma-separated platforms to restore to")
+    sp.add_argument("--repos", help="only these repos")
+    sp.add_argument("--dry-run", action="store_true")
+    sp.add_argument("--prune", action="store_true",
+                    help="also delete target refs the hub does not have "
+                         "(only with mode=full)")
+    sp.add_argument("--public", action="store_true",
+                    help="create missing repos as public (default private)")
+    sp.set_defaults(func=cmd_restore)
 
     sp = sub.add_parser("tokens", help="check credentials for expiry")
     sp.set_defaults(func=cmd_tokens)

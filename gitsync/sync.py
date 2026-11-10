@@ -6,6 +6,7 @@ resumable and gives an offline copy for free.
 """
 
 import fnmatch
+import json
 import os
 import threading
 import time
@@ -13,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
 from . import config as C
+from . import diskutil as DK
 from . import notify as NT
 from . import platforms as P
 
@@ -997,7 +999,6 @@ def _record(summary):
         pass
 
 
-import json  # noqa: E402  (used by _record)
 
 
 def last_records(n=10):
@@ -1007,3 +1008,85 @@ def last_records(n=10):
     except (OSError, ValueError):
         pass
     return []
+
+
+# ---------------------------------------------------------------- restore
+
+def _hub_repo_name(rel_id):
+    """the repo name a hub mirror directory stands for.
+
+    New layout is mirrors/{type}/{fs_safe(id)}.git with '/' turned into
+    '__', so 'SeaXen__gitsync' is the repo 'gitsync' in owner 'SeaXen'. The
+    legacy flat layout stored the name directly.
+    """
+    last = rel_id.split("/")[-1]
+    if "__" in last:
+        return last.split("__")[-1]
+    return last
+
+
+def restore(cfg, target_names, only=None, dry_run=False, prune=False,
+            private=True, log_fn=None):
+    """push every hub mirror to the given targets — the hub is the truth.
+
+    This is the answer to "what if the source host disappears": no route can
+    list repos from a dead platform, but the hub still holds every mirror.
+
+    - skips mirrors with no refs (an empty repo), with a log line
+    - creates missing repos on the target via ensure_repo
+    - never deletes anything on a target unless the global mode is full AND
+      the caller passed prune=True
+    """
+    def say(msg):
+        (log_fn or log)(msg)
+
+    mode = C.setting(cfg, "mode", "safe")
+    do_prune = prune and mode == "full"
+    targets = {}
+    for t in target_names:
+        tp = C.platform(cfg, t)
+        if not tp or not tp.get("enabled"):
+            say("%s: not configured/enabled — skipped" % t)
+            continue
+        targets[t] = P.make(t, tp)
+    if not targets:
+        return {"repos": 0, "ok": 0, "partial": 0, "failed": 0,
+                "failures": [], "restored": 0, "skipped": 0}
+
+    want = {o.lower() for o in only} if only else None
+    ok = partial = failed = skipped = 0
+    failures = []
+    for rel_id, path, _size, _mt in DK.mirrors():
+        name = _hub_repo_name(rel_id)
+        if want and name.lower() not in want:
+            continue
+        rc, out, _ = P.run(["git", "for-each-ref"], cwd=path, timeout=60)
+        if rc != 0 or not out.strip():
+            skipped += 1
+            say("  %-28s empty mirror — skipped" % name)
+            continue
+        repo = {"name": name, "id": rel_id, "private": private,
+                "clone_url": path}
+        bad = []
+        for tname, tplat in targets.items():
+            if dry_run:
+                say("  would restore %-22s -> %s" % (name, tname))
+                continue
+            err = _push_target(tname, tplat, repo, path,
+                               "full" if do_prune else "safe")
+            if err:
+                bad.append(err)
+        if dry_run:
+            ok += 1
+            continue
+        if bad:
+            failed += 1
+            failures.append({"repo": name, "error": "; ".join(bad)[:200]})
+            say("  FAILED %-24s %s" % (name, "; ".join(bad)[:120]))
+        else:
+            ok += 1
+    say("restore: %d ok, %d skipped, %d failed%s"
+        % (ok, skipped, failed, " (dry run)" if dry_run else ""))
+    return {"repos": ok + skipped + failed, "ok": ok, "partial": 0,
+            "failed": failed, "failures": failures, "restored": ok,
+            "skipped": skipped}

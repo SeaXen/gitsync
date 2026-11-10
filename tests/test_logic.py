@@ -827,6 +827,83 @@ class TestWizardSafety(unittest.TestCase):
         self.assertIn("name=type", src.replace(" ", "").replace('"', ""))
 
 
+class TestRestore(unittest.TestCase):
+    """F1: the hub is the source of truth when a platform is gone."""
+
+    def _hub(self, td, names, empty=()):
+        import subprocess
+        hub = os.path.join(td, "data", "mirrors")
+        seed = os.path.join(td, "seed")
+        os.makedirs(hub)
+        os.makedirs(seed)
+        subprocess.run(["git", "init", "-q", seed], capture_output=True)
+        subprocess.run(["git", "-C", seed, "commit", "--allow-empty", "-q",
+                        "-m", "x", "--author", "t <t@t>",
+                        "--date", "2020-01-01T00:00:00"],
+                       capture_output=True)
+        for n in names:
+            subprocess.run(["git", "init", "--bare", "-q",
+                            os.path.join(hub, n + ".git")], capture_output=True)
+            subprocess.run(["git", "-C", os.path.join(hub, n + ".git"),
+                            "fetch", "-q", seed,
+                            "+refs/heads/*:refs/heads/*"], capture_output=True)
+        for n in empty:
+            subprocess.run(["git", "init", "--bare", "-q",
+                            os.path.join(hub, n + ".git")], capture_output=True)
+        return hub
+
+    def test_restore_pushes_every_mirror_and_skips_empty(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            old_m, old_d = C.MIRROR_DIR, C.DATA_DIR
+            C.MIRROR_DIR = os.path.join(td, "data", "mirrors")
+            C.DATA_DIR = os.path.join(td, "data")
+            try:
+                self._hub(td, ["a", "b"], empty=["empty"])
+                dst = os.path.join(td, "dst")
+                os.makedirs(dst)
+                cfg = {"platforms": {"dst": {"type": "local", "enabled": True,
+                                             "path": dst}},
+                       "settings": {"mode": "safe"}}
+                out = []
+                t = SY.restore(cfg, ["dst"], log_fn=out.append)
+                self.assertEqual(t["ok"], 2)
+                self.assertEqual(t["skipped"], 1)
+                self.assertEqual(t["failed"], 0)
+                self.assertFalse(os.path.isdir(os.path.join(dst, "empty.git")))
+                for r in ("a", "b"):
+                    refs = subprocess.run(
+                        ["git", "-C", os.path.join(dst, r + ".git"),
+                         "for-each-ref", "--format=%(refname)"],
+                        capture_output=True, text=True).stdout.split()
+                    self.assertTrue(refs, r)
+            finally:
+                C.MIRROR_DIR, C.DATA_DIR = old_m, old_d
+
+    def test_restore_dry_run_touches_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            old_m, old_d = C.MIRROR_DIR, C.DATA_DIR
+            C.MIRROR_DIR = os.path.join(td, "data", "mirrors")
+            C.DATA_DIR = os.path.join(td, "data")
+            try:
+                self._hub(td, ["a"])
+                dst = os.path.join(td, "dst")
+                os.makedirs(dst)
+                cfg = {"platforms": {"dst": {"type": "local", "enabled": True,
+                                             "path": dst}},
+                       "settings": {"mode": "safe"}}
+                t = SY.restore(cfg, ["dst"], dry_run=True, log_fn=lambda m: None)
+                self.assertEqual(t["ok"], 1)
+                self.assertFalse(os.listdir(dst))     # nothing created
+            finally:
+                C.MIRROR_DIR, C.DATA_DIR = old_m, old_d
+
+    def test_hub_repo_name_from_the_directory(self):
+        self.assertEqual(SY._hub_repo_name("SeaXen__gitsync"), "gitsync")
+        self.assertEqual(SY._hub_repo_name("gitlab/group__docs"), "docs")
+        self.assertEqual(SY._hub_repo_name("legacy"), "legacy")
+
+
 class TestNotifyCli(unittest.TestCase):
     """P0-13: --set-url / --set-telegram / --install-hook do what they say."""
 
