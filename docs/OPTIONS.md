@@ -169,6 +169,27 @@ is no API to list repos.
 
 ---
 
+## Speed
+
+Measured on a 4-platform, 53-mirror setup:
+
+| | Before | After |
+|---|---|---|
+| TUI start, warm (within 60s) | 4.4 s | **0.21 s** |
+| TUI start, cold | 4.4 s | 3.3 s |
+| Key response | 15 ms | 15 ms |
+| Slowest tab per frame | 2.4 ms | 2.0 ms |
+
+The warm start comes from caching the last platform probe for 60s
+(`~/.local/share/gitsync/probe_cache.json`, `0600`): the dashboard paints
+real counts at once and a background refresh corrects them. `R` forces a
+refresh, and the "counts: Ns old" line always shows how old the numbers
+really are. The remaining cold-start cost is the `gh` CLI (~0.7s a call),
+which gitsync does not control.
+
+Per-frame work is already small: drawing is under 2.5 ms on the slowest tab,
+and the log tail is cached by (mtime, size) so the Log tab costs 0.33 ms.
+
 ## Where the numbers live
 
 | Thing | Where |

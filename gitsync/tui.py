@@ -106,8 +106,53 @@ def _probe(name, p):
             bool(ok), info, count)
 
 
+PROBE_TTL = 60          # seconds a cached probe is shown before refreshing
+
+
+def _probe_cache_file():
+    return os.path.join(C.DATA_DIR, "probe_cache.json")
+
+
+def load_probe_cache():
+    """(rows, age_seconds) from the last probe, if it is still fresh.
+
+    Probing four sites costs ~2.7s (mostly the gh CLI at ~0.7s a call), so
+    every TUI start used to show "loading..." for that long. A fresh cache
+    paints real numbers immediately and the background refresh corrects
+    them; `R` forces a refresh. The age travels with the data so the
+    "counts: Ns old" line stays honest about how old the numbers are.
+    """
+    try:
+        with open(_probe_cache_file()) as f:
+            data = json.load(f)
+        age = time.time() - data.get("at", 0)
+        if age < PROBE_TTL:
+            return [tuple(r) for r in (data.get("rows") or [])], age
+    except (OSError, ValueError):
+        pass
+    return [], None
+
+
+def save_probe_cache(rows):
+    try:
+        C.ensure_dirs()
+        tmp = _probe_cache_file() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"at": time.time(),
+                       "rows": [list(r) for r in rows]}, f)
+        os.replace(tmp, _probe_cache_file())
+        os.chmod(_probe_cache_file(), 0o600)
+    except OSError:
+        pass
+
+
 def _refresh_platforms_inner():
     state["counts_age"] = time.time()   # advance first: hung calls can't re-arm
+    cached, age = load_probe_cache()
+    if cached:
+        state["platforms"] = cached     # paint now, correct in the background
+        state["counts_age"] = time.time() - (age or 0)
+        state["dirty"] = True
     cfg = C.load_config()
     # probing is network-bound and used to be sequential: four sites took
     # ~8s, which is the "loading..." you see at start-up and on R. Running
@@ -119,6 +164,7 @@ def _refresh_platforms_inner():
         for f in as_completed(futs):
             rows[futs[f]] = f.result()
     state["platforms"] = [r for r in rows if r]
+    save_probe_cache(state["platforms"])
     state["routes"] = [(r.get("name"), r.get("source"),
                         list(r.get("targets", [])),
                         r.get("include") or [], r.get("exclude") or [],
@@ -133,18 +179,38 @@ def _refresh_platforms_inner():
     state["dirty"] = True
 
 
+_log_cache = {"key": None, "lines": []}
+
+
 def read_log_tail(n=150):
+    """last n log lines, cached by (mtime, size, n).
+
+    The Log tab called this on every frame, which re-read the whole file
+    (up to the 2 MB rotation cap) each time.
+    """
     try:
+        st = os.stat(C.LOG_FILE)
+        key = (st.st_mtime_ns, st.st_size, n)
+        if _log_cache["key"] == key:
+            state["log_tail"] = _log_cache["lines"]
+            return
         with open(C.LOG_FILE) as f:
-            state["log_tail"] = f.read().splitlines()[-n:]
+            lines = f.read().splitlines()[-n:]
+        _log_cache["key"] = key
+        _log_cache["lines"] = lines
+        state["log_tail"] = lines
     except OSError:
         state["log_tail"] = []
 
 
 def read_full_log():
     try:
-        with open(C.LOG_FILE) as f:
-            state["full_log"] = f.read().splitlines()
+        st = os.stat(C.LOG_FILE)
+        key = (st.st_mtime_ns, st.st_size)
+        if _log_cache.get("full_key") != key:
+            with open(C.LOG_FILE) as f:
+                state["full_log"] = f.read().splitlines()
+            _log_cache["full_key"] = key
     except OSError:
         state["full_log"] = []
 

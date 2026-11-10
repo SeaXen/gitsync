@@ -4,6 +4,34 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.1] - 2026-11-10
+
+### Performance
+
+Measured before and after on the real setup (4 platforms, 53 mirrors):
+
+- **Warm TUI start: 4.4s -> 0.21s.** The platform probe (2.7s, mostly the
+  `gh` CLI at ~0.7s a call) ran on every start and the dashboard showed
+  "loading..." for all of it. The last result is now cached on disk for 60s
+  (`~/.local/share/gitsync/probe_cache.json`, 0600): a repeat launch paints
+  real counts immediately and the background refresh corrects them. `R`
+  forces a refresh, and the "counts: Ns old" line reports the data's real
+  age, not the launch time.
+- **Cold TUI start: 4.4s -> 3.3s.** GitHub's probe ran `gh auth status` and
+  then `gh api user`; it now makes one call, which says "not authenticated"
+  just as clearly.
+- **Log tab: 2.2ms -> 0.33ms per frame.** `read_log_tail` re-read the whole
+  log file on every frame; it is now cached by (mtime, size, n), as is the
+  full-log viewer.
+
+No behaviour change: nothing is cached across a real change, a stale cache
+is ignored, and the probe still runs in the background on every start.
+
+### Changed
+
+- 107 unit tests (was 103), including the caches (stale ignored, age
+  reported, log cache invalidated by a write).
+
 ## [1.8.0] - 2026-11-10
 
 The features the review deferred until the fixes were in, plus the P2 polish.

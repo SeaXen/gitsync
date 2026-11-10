@@ -12,6 +12,7 @@ import curses
 import json
 import os
 import tempfile
+import time
 import unittest
 
 import gitsync.__main__ as M
@@ -1137,6 +1138,61 @@ class TestNotifyCli(unittest.TestCase):
 
 
 # --------------------------------------------------------------------- TUI
+
+class TestStartupCaches(unittest.TestCase):
+    """Warm starts must be instant, and stale data must not be trusted."""
+
+    def setUp(self):
+        self._old = C.DATA_DIR
+        self.td = tempfile.mkdtemp()
+        C.DATA_DIR = self.td
+        self._rows = [("github", "github", True, True, "ok", "52")]
+
+    def tearDown(self):
+        C.DATA_DIR = self._old
+        import shutil
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def test_no_cache_means_no_rows(self):
+        self.assertEqual(tui.load_probe_cache(), ([], None))
+
+    def test_cache_round_trips_and_reports_its_age(self):
+        tui.save_probe_cache(self._rows)
+        rows, age = tui.load_probe_cache()
+        self.assertEqual(rows, self._rows)
+        self.assertIsNotNone(age)
+        self.assertLess(age, 5)
+
+    def test_stale_cache_is_ignored(self):
+        tui.save_probe_cache(self._rows)
+        path = os.path.join(self.td, "probe_cache.json")
+        data = json.load(open(path))
+        data["at"] = time.time() - (tui.PROBE_TTL + 10)
+        json.dump(data, open(path, "w"))
+        self.assertEqual(tui.load_probe_cache(), ([], None))
+
+    def test_log_tail_is_cached_until_the_file_changes(self):
+        log = os.path.join(self.td, "gitsync.log")
+        old_log = C.LOG_FILE
+        C.LOG_FILE = log
+        try:
+            with open(log, "w") as f:
+                f.write("one\ntwo\n")
+            tui.read_log_tail(10)
+            self.assertEqual(tui.state["log_tail"], ["one", "two"])
+            with open(log, "a") as f:
+                f.write("three\n")
+            tui.read_log_tail(10)
+            self.assertEqual(tui.state["log_tail"],
+                             ["one", "two", "three"])
+            # and an unchanged file is served from the cache
+            tui._log_cache["key"] = None      # force a re-read once
+            tui.read_log_tail(10)
+            key = tui._log_cache["key"]
+            self.assertIsNotNone(key)
+        finally:
+            C.LOG_FILE = old_log
+
 
 class TestTui(unittest.TestCase):
     def setUp(self):

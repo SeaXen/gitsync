@@ -168,11 +168,14 @@ class GitHubPlatform:
 
     def test(self):
         if self.auth == "gh" and not self.token:
-            rc, out, err = self._gh(["auth", "status"])
-            if rc == 0:
-                u = self.user() or "unknown"
-                return True, "gh CLI authenticated as %s" % u
-            return False, "gh CLI not authenticated (run: gh auth login)"
+            # one call, not two: `gh auth status` then `gh api user` cost
+            # ~1.4s of the 2.7s probe. If gh is not logged in, `gh api user`
+            # says so just as clearly.
+            rc, out, _ = self._gh(["api", "user", "--jq", ".login"])
+            if rc == 0 and out.strip():
+                return True, "gh CLI authenticated as %s" % out.strip()
+            return False, ("gh CLI not authenticated "
+                           "(run: gh auth login)")
         rc, out = self._api("/user")
         if isinstance(out, dict) and out.get("login"):
             return True, "token OK — user %s" % out["login"]
