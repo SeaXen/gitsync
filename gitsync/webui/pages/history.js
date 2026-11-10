@@ -23,7 +23,7 @@
           return '<div class="mono l-bad" style="padding-left:14px">! ' +
             G.esc(f.route) + "/" + G.esc(f.repo) + ": " + G.esc(f.error) + "</div>";
         }).join("");
-        return "<tr><td class='mono'>" + G.esc(r.finished_at) + "</td>" +
+        return "<tr><td class='mono'>" + G.esc(G.formatDate ? G.formatDate(r.finished_at) : r.finished_at) + "</td>" +
           "<td class='mono " + (bad ? "l-bad" : "l-ok") + "'>" + (r.ok || 0) + " ok</td>" +
           "<td class='mono'>" + (r.partial || 0) + "</td>" +
           "<td class='mono " + (r.failed ? "l-bad" : "") + "'>" + (r.failed || 0) + "</td>" +
@@ -32,7 +32,7 @@
           (fails ? "<tr><td colspan='6' style='padding-top:0'>" + fails + "</td></tr>" : "");
       }).join("");
       host.innerHTML = sparkHtml +
-        '<div style="overflow-x:auto"><table class="mt"><thead><tr><th>Finished</th>' +
+        '<div style="overflow-x:auto"><table class="mt" aria-label="Recent sync history"><thead><tr><th>Finished</th>' +
         "<th>OK</th><th>Partial</th><th>Failed</th><th>Repos</th><th>Time</th>" +
         "</tr></thead><tbody>" + rows + "</tbody></table></div>";
     }).catch(function (e) {

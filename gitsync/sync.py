@@ -863,6 +863,10 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
         try:
             fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            try:
+                lockf.close()
+            except OSError:
+                pass
             log("another gitsync run is already active — exiting")
             return {"repos": 0, "ok": 0, "partial": 0, "failed": 0,
                     "failures": [], "elapsed_sec": 0,
@@ -1078,6 +1082,15 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             NT.notify_run(cfg, totals)
     except Exception as e:
         log("  notification failed: %s" % e)
+    if fcntl:
+        try:
+            fcntl.flock(lockf, fcntl.LOCK_UN)
+        except OSError:
+            pass
+    try:
+        lockf.close()
+    except OSError:
+        pass
     return totals
 
 
@@ -1087,13 +1100,14 @@ def _record(summary):
         records = []
         if os.path.exists(C.RECORDS_FILE):
             try:
-                records = json.load(open(C.RECORDS_FILE))
+                with open(C.RECORDS_FILE, "r", encoding="utf-8") as rf:
+                    records = json.load(rf)
             except (OSError, ValueError):
                 records = []
         records.append(summary)
         records = records[-200:]          # keep the last 200 runs
         tmp = C.RECORDS_FILE + ".tmp"
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(records, f, indent=2)
         os.replace(tmp, C.RECORDS_FILE)
         os.chmod(C.RECORDS_FILE, 0o600)   # failure text can name a remote
@@ -1106,7 +1120,8 @@ def _record(summary):
 def last_records(n=10):
     try:
         if os.path.exists(C.RECORDS_FILE):
-            return json.load(open(C.RECORDS_FILE))[-n:]
+            with open(C.RECORDS_FILE, "r", encoding="utf-8") as rf:
+                return json.load(rf)[-n:]
     except (OSError, ValueError):
         pass
     return []

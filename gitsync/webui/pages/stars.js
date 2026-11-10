@@ -9,17 +9,17 @@
       G.bar("Stars", "Copy an account's starred repos to your other accounts.") +
       '<section class="card">' +
         '<div class="inline mb">' +
-          '<div class="field" style="margin:0;min-width:220px">' +
-            G.field("Read stars from", '<select id="s-src"></select>') + "</div>" +
-          '<button class="btn" id="s-reload" style="align-self:flex-end">Re-read</button>' +
+          '<div style="min-width:220px">' +
+            G.field("Read stars from", '<select id="s-src" name="star_source"></select>') + "</div>" +
+          '<button class="btn" id="s-reload" style="align-self:flex-end;margin-bottom:14px">Re-read</button>' +
         "</div>" +
         '<div id="s-list">' + G.loading("reading stars…") + "</div>" +
       "</section>" +
       '<section class="card" id="s-copycard" style="display:none">' +
         '<div class="bar"><span class="route-title">Copy to</span>' +
         '<div class="actions">' +
-          '<label class="check"><input type="checkbox" id="s-dry"> dry run</label>' +
-          '<button class="btn primary" id="s-copy">Copy stars</button>' +
+          '<label class="check"><input type="checkbox" id="s-dry" name="dry_run"> Dry Run</label>' +
+          '<button class="btn primary" id="s-copy">Copy Stars</button>' +
         "</div></div>" +
         '<div id="s-targets" class="mt"></div>' +
         '<div class="viewer mt" id="s-out" style="display:none" role="log" aria-live="polite"></div>' +
@@ -56,7 +56,7 @@
       host.innerHTML = '<div class="empty">no other accounts</div>'; return;
     }
     host.innerHTML = others.map(function (p) {
-      return '<label class="check"><input type="checkbox" class="s-t" value="' +
+      return '<label class="check"><input type="checkbox" class="s-t" name="star_targets" value="' +
         G.esc(p.name) + '"> ' + G.esc(p.name) + "</label>";
     }).join("");
   }

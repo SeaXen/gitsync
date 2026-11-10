@@ -13,36 +13,36 @@
 
       '<section class="card"><div class="bar"><span class="route-title">Sign-in</span>' +
         '<div class="actions">' +
-        '<button class="btn danger" id="pw-disable">Disable</button>' +
-        '<button class="btn primary" id="pw-save">Set password</button></div></div>' +
+        '<button class="btn danger" id="pw-disable">Disable Password</button>' +
+        '<button class="btn primary" id="pw-save">Set Password</button></div></div>' +
         '<div class="muted sub" id="pw-state">' + G.loading() + "</div>" +
         '<div class="form-grid mt">' +
-        f("Username", '<input type="text" id="pw-user" autocomplete="username" placeholder="e.g. admin">') +
-        f("New password", '<input type="password" id="pw-pass" autocomplete="new-password" placeholder="at least 8 characters">') +
-        f("Confirm password", '<input type="password" id="pw-confirm" autocomplete="new-password" placeholder="repeat">') +
+        f("Username", '<input type="text" id="pw-user" name="username" autocomplete="username" spellcheck="false" placeholder="e.g. admin…">') +
+        f("New password", '<input type="password" id="pw-pass" name="new_password" autocomplete="new-password" spellcheck="false" placeholder="at least 8 characters…">') +
+        f("Confirm password", '<input type="password" id="pw-confirm" name="confirm_password" autocomplete="new-password" spellcheck="false" placeholder="repeat password…">') +
         "</div>" +
         '<div class="muted mt">Stored as a PBKDF2 hash (mode 0600) — never sent back to the browser. The access token still works for API / curl sign-in.</div>' +
         "</section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Scheduler</span>' +
-        '<div class="actions"><button class="btn primary" id="install-sched">Install / update</button></div></div>' +
+        '<div class="actions"><button class="btn primary" id="install-sched">Install / Update</button></div></div>' +
         '<div class="muted" id="sched-status">—</div>' +
         '<div class="muted mt" style="font-size:12.5px">Uses the Schedule chosen in Options above. Runs <span class="mono">gitsync sync --scheduled</span> on a systemd timer (or cron).</div>' +
         "</section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Notifications</span>' +
-        '<div class="actions"><button class="btn" id="notify-test">Send test</button></div></div>' +
+        '<div class="actions"><button class="btn" id="notify-test">Send Test</button></div></div>' +
         '<div class="form-grid mt">' +
         f("Notify on", G.select("n-on", "", ["failure", "success", "always", "never"])) +
-        f("Discord webhook", '<input type="password" id="n-discord" autocomplete="off" placeholder="leave blank to keep">', "write-only; validated on save") +
-        f("Telegram bot token", '<input type="password" id="n-tgtoken" autocomplete="off" placeholder="leave blank to keep">', "write-only") +
-        f("Telegram chat id", '<input type="text" id="n-tgchat" placeholder="required with token">') +
+        f("Discord webhook", '<input type="password" id="n-discord" name="discord_webhook" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "write-only; validated on save") +
+        f("Telegram bot token", '<input type="password" id="n-tgtoken" name="telegram_token" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "write-only") +
+        f("Telegram chat id", '<input type="text" id="n-tgchat" name="telegram_chat_id" placeholder="required with token…">') +
         "</div></section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Webhook receiver</span>' +
         '<div class="actions">' +
-        '<button class="btn" id="wh-rotate">Rotate secret</button>' +
-        '<button class="btn" id="wh-install">Install service</button>' +
+        '<button class="btn" id="wh-rotate">Rotate Secret</button>' +
+        '<button class="btn" id="wh-install">Install Service</button>' +
         '<button class="btn danger" id="wh-stop">Stop</button></div></div>' +
         '<div class="mono mt" id="wh-status">—</div>' +
         '<div class="muted mt">Point each platform at ' +
@@ -79,11 +79,11 @@
         f("Mirror mode", G.select("s-mode", S.mode, [{ v: "safe", l: "safe (never delete)" }, { v: "full", l: "full (prunes)" }])) +
         f("Mesh conflicts", G.select("s-conflict", S.mesh_conflict, [{ v: "newest", l: "newest wins" }, { v: "skip", l: "skip (report)" }])) +
         f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "the timer fires at the finest route schedule") +
-        f("Include forks", '<label class="check"><input type="checkbox" id="s-forks"' + (S.include_forks ? " checked" : "") + "> mirror forked repos</label>") +
+        f("Include forks", '<label class="check"><input type="checkbox" id="s-forks" name="include_forks"' + (S.include_forks ? " checked" : "") + "> mirror forked repos</label>") +
         f("Pause between repos", G.select("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "seconds — spare laptop heat / disk") +
         f("Token warning", G.select("s-warn", S.token_warn_days || 30, [7, 14, 30, 60, 90]), "days before a credential warns") +
         f("TUI theme", G.select("s-theme", S.theme, (S.themes || [])), "colours the terminal TUI only") +
-        f("Relax protection", '<label class="check"><input type="checkbox" id="s-relax"' + (S.relax_protection ? " checked" : "") + "> allow force-push over branch protection</label>", "hand-edit territory — off by default");
+        f("Relax protection", '<label class="check"><input type="checkbox" id="s-relax" name="relax_protection"' + (S.relax_protection ? " checked" : "") + "> allow force-push over branch protection</label>", "hand-edit territory — off by default");
       document.getElementById("sched-status").textContent = S.scheduler || "—";
       document.getElementById("n-on").value = (S.notify && S.notify.on) || "failure";
       document.getElementById("paths").innerHTML =
@@ -172,10 +172,17 @@
   }
 
   function disablePassword() {
-    if (!confirm("Disable password sign-in? The access token will be the only way in.")) return Promise.resolve();
-    return G.api("POST", "/api/auth/password", { disable: true })
-      .then(function (d) { G.toast(d.message || "disabled", "ok"); load(); })
-      .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+    return G.modalConfirm({
+      title: "Disable password sign-in",
+      message: "Disable password sign-in? The access token will be the only way in.",
+      confirmText: "Disable Password",
+      danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      return G.api("POST", "/api/auth/password", { disable: true })
+        .then(function (d) { G.toast(d.message || "disabled", "ok"); load(); })
+        .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+    });
   }
 
   function wh(action) {

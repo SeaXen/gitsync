@@ -142,6 +142,77 @@
       function (e) { done(); throw e; });
   }
 
+  // ---- accessible confirmation modal (replaces native window.confirm) ----
+  function modalConfirm(opts) {
+    opts = (typeof opts === "string") ? { message: opts } : (opts || {});
+    return new Promise(function (resolve) {
+      var title = opts.title || "Confirm";
+      var message = opts.message || "Are you sure?";
+      var confirmLabel = opts.confirmText || "Confirm";
+      var cancelLabel = opts.cancelText || "Cancel";
+      var danger = (opts.danger !== undefined) ? !!opts.danger
+        : /remove|delete|disable|rewrite|prune/i.test(message + " " + title);
+
+      var prevFocus = document.activeElement;
+      var backdrop = document.createElement("div");
+      backdrop.className = "modal-backdrop";
+      backdrop.setAttribute("role", "presentation");
+
+      var modal = document.createElement("div");
+      modal.className = "modal";
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+      modal.setAttribute("aria-labelledby", "gs-modal-title");
+      modal.setAttribute("aria-describedby", "gs-modal-desc");
+
+      modal.innerHTML =
+        '<div class="modal-head">' +
+          '<h2 class="modal-title" id="gs-modal-title">' + esc(title) + "</h2>" +
+        "</div>" +
+        '<div class="modal-body" id="gs-modal-desc">' + esc(message) + "</div>" +
+        '<div class="modal-foot">' +
+          '<button class="btn" id="gs-modal-cancel" type="button">' + esc(cancelLabel) + "</button>" +
+          '<button class="btn ' + (danger ? "danger" : "primary") + '" id="gs-modal-ok" type="button">' + esc(confirmLabel) + "</button>" +
+        "</div>";
+
+      backdrop.appendChild(modal);
+      document.body.appendChild(backdrop);
+
+      var okBtn = modal.querySelector("#gs-modal-ok");
+      var cancelBtn = modal.querySelector("#gs-modal-cancel");
+
+      function cleanup(result) {
+        document.removeEventListener("keydown", onKey);
+        backdrop.remove();
+        if (prevFocus && typeof prevFocus.focus === "function") prevFocus.focus();
+        resolve(result);
+      }
+
+      function onKey(e) {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          cleanup(false);
+        } else if (e.key === "Tab") {
+          var focusable = [cancelBtn, okBtn];
+          var idx = focusable.indexOf(document.activeElement);
+          if (e.shiftKey) {
+            if (idx <= 0) { focusable[focusable.length - 1].focus(); e.preventDefault(); }
+          } else {
+            if (idx === -1 || idx >= focusable.length - 1) { focusable[0].focus(); e.preventDefault(); }
+          }
+        }
+      }
+
+      cancelBtn.addEventListener("click", function () { cleanup(false); });
+      okBtn.addEventListener("click", function () { cleanup(true); });
+      backdrop.addEventListener("click", function (e) {
+        if (e.target === backdrop) cleanup(false);
+      });
+      document.addEventListener("keydown", onKey);
+      (danger ? cancelBtn : okBtn).focus();
+    });
+  }
+
   // ---- formatting ----
   function bytes(n) {
     if (n === null || n === undefined) return "—";
@@ -152,10 +223,32 @@
   function ago(sec) {
     if (sec === null || sec === undefined) return "—";
     sec = Math.max(0, Math.floor(sec));
+    if (typeof Intl !== "undefined" && Intl.RelativeTimeFormat) {
+      try {
+        var rtf = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+        if (sec < 60) return rtf.format(-sec, "second");
+        var m = Math.floor(sec / 60); if (m < 60) return rtf.format(-m, "minute");
+        var h = Math.floor(m / 60); if (h < 24) return rtf.format(-h, "hour");
+        return rtf.format(-Math.floor(h / 24), "day");
+      } catch (e) {}
+    }
     if (sec < 60) return sec + "s ago";
-    var m = Math.floor(sec / 60); if (m < 60) return m + "m ago";
-    var h = Math.floor(m / 60); if (h < 24) return h + "h ago";
-    return Math.floor(h / 24) + "d ago";
+    var min = Math.floor(sec / 60); if (min < 60) return min + "m ago";
+    var hr = Math.floor(min / 60); if (hr < 24) return hr + "h ago";
+    return Math.floor(hr / 24) + "d ago";
+  }
+  function formatDate(isoStr) {
+    if (!isoStr) return "—";
+    try {
+      var d = new Date(isoStr);
+      if (!isNaN(d.getTime()) && typeof Intl !== "undefined" && Intl.DateTimeFormat) {
+        return new Intl.DateTimeFormat(undefined, {
+          dateStyle: "short",
+          timeStyle: "medium"
+        }).format(d);
+      }
+    } catch (e) {}
+    return String(isoStr);
   }
   function pct(done, total) {
     return total ? Math.min(100, Math.round(100 * done / total)) : 0;
@@ -252,7 +345,7 @@
         (String(value) === String(v) ? " selected" : "") + ">" + esc(l) +
         "</option>";
     }).join("");
-    return '<select id="' + esc(id) + '">' + opts + "</select>";
+    return '<select id="' + esc(id) + '" name="' + esc(id) + '">' + opts + "</select>";
   }
   function loading(msg) {
     return '<div class="skel-card" role="status" aria-busy="true">' +
@@ -291,18 +384,18 @@
     if (!host) return;
     var html = "";
     if (info.password_set) {
-      html = field("Username", '<input type="text" id="lu" ' +
-        'autocomplete="username" placeholder="' + esc(info.username || "") +
-        '">') +
-        field("Password", '<input type="password" id="lp" ' +
-        'autocomplete="current-password" placeholder="password">') +
+      html = field("Username", '<input type="text" id="lu" name="username" ' +
+        'autocomplete="username" spellcheck="false" placeholder="' +
+        esc((info.username || "admin") + "…") + '">') +
+        field("Password", '<input type="password" id="lp" name="password" ' +
+        'autocomplete="current-password" spellcheck="false" placeholder="password…">') +
         '<button class="btn primary" id="loginbtn" type="submit" ' +
         'style="width:100%">Sign in</button>' +
         '<p class="muted mt" style="font-size:12.5px;text-align:center">' +
-        '<a href="#" id="use-token">use access token instead</a></p>';
+        '<button class="btn ghost sm" id="use-token" type="button">Use access token instead</button></p>';
     } else {
-      html = field("Access token", '<input type="password" id="tok" ' +
-        'autocomplete="current-password" placeholder="paste the token">') +
+      html = field("Access token", '<input type="password" id="tok" name="token" ' +
+        'autocomplete="current-password" spellcheck="false" placeholder="paste the token…">') +
         '<button class="btn primary" id="loginbtn" type="submit" ' +
         'style="width:100%">Sign in</button>' +
         '<p class="muted mt" style="font-size:12.5px;text-align:center">' +
@@ -334,8 +427,10 @@
     if (ut) ut.addEventListener("click", function (e) {
       e.preventDefault(); renderLoginForm({ password_set: false });
     });
+    var isTouch = ("ontouchstart" in window) || (navigator.maxTouchPoints > 0) ||
+      (window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
     var first = host.querySelector("input");
-    if (first) first.focus();
+    if (!isTouch && first) first.focus();
   }
 
   // ---- shell (icon sidebar + top bar) ----
@@ -354,8 +449,8 @@
         '<div class="logo">' + I.logo + "gitsync</div>" + navHtml +
         '<div class="foot">' +
           '<div class="meta" id="side-version">gitsync</div>' +
-          '<a class="nav" href="#" id="logout">' + I.logout +
-            "<span>Sign out</span></a>" +
+          '<button class="nav" id="logout" type="button" style="background:transparent;border:0;cursor:pointer;width:100%;text-align:left;font:inherit">' +
+            I.logout + "<span>Sign out</span></button>" +
         "</div>" +
       "</nav>" +
       '<div class="content">' +
@@ -453,7 +548,8 @@
 
   window.Gitsync = {
     I: I, esc: esc, apiError: apiError, api: api, checkSession: checkSession,
-    toast: toast, busy: busy, bytes: bytes, ago: ago, pct: pct, spark: spark,
+    toast: toast, busy: busy, modalConfirm: modalConfirm, bytes: bytes,
+    ago: ago, formatDate: formatDate, pct: pct, spark: spark,
     tokenStateBadge: tokenStateBadge, stateClass: stateClass, sse: sse,
     watchJob: watchJob, showLogin: showLogin, renderShell: renderShell,
     el: el, bar: bar, field: field, select: select, loading: loading,

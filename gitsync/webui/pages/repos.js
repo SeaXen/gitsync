@@ -7,26 +7,26 @@
   function render(main) {
     main.innerHTML =
       G.bar("Repos", "Browse an account and sync a selection.",
-        '<button class="btn" id="r-none">Select none</button>' +
-        '<button class="btn" id="r-all">Select all</button>') +
+        '<button class="btn" id="r-none">Select None</button>' +
+        '<button class="btn" id="r-all">Select All</button>') +
       '<section class="card">' +
         '<div class="inline mb">' +
-          '<div class="field" style="margin:0;min-width:200px">' +
-            G.field("Platform", '<select id="r-plat"></select>') + "</div>" +
-          '<div class="field grow" style="margin:0">' +
-            G.field("Filter", '<input type="text" id="r-q" placeholder="type to filter…">') + "</div>" +
-          '<label class="check"><input type="checkbox" id="r-forks"> include forks</label>' +
+          '<div style="min-width:200px">' +
+            G.field("Platform", '<select id="r-plat" name="platform"></select>') + "</div>" +
+          '<div class="grow">' +
+            G.field("Filter", '<input type="text" id="r-q" name="filter" autocomplete="off" placeholder="type to filter…">') + "</div>" +
+          '<label class="check" style="align-self:flex-end;margin-bottom:14px"><input type="checkbox" id="r-forks" name="include_forks"> include forks</label>' +
         "</div>" +
         '<div id="r-list">' + G.loading("listing repos…") + "</div>" +
       "</section>" +
       '<section class="card" id="r-actions" style="display:none">' +
         '<div class="bar"><span class="route-title">Sync <span id="r-count">0</span> selected</span>' +
         '<div class="actions">' +
-          '<div class="field" style="margin:0">' +
-            G.field("Target", '<select id="r-to"></select>') + "</div>" +
-          '<button class="btn" id="r-local">Local only</button>' +
-          '<button class="btn primary" id="r-sync">Sync selected</button>' +
-          '<button class="btn" id="r-save">Save to file</button>' +
+          '<div>' +
+            G.field("Target", '<select id="r-to" name="target"></select>') + "</div>" +
+          '<button class="btn" id="r-local">Local Only</button>' +
+          '<button class="btn primary" id="r-sync">Sync Selected</button>' +
+          '<button class="btn" id="r-save">Save to File</button>' +
         "</div></div>" +
         '<div class="muted mt">“Sync selected” pushes to the chosen target, ' +
         "or every target on the route if you leave it on “all targets”.</div>" +
@@ -111,7 +111,7 @@
     host.innerHTML = rows.map(function (r) {
       var on = !!state.sel[r.name];
       return '<label class="check" style="justify-content:flex-start">' +
-        '<input type="checkbox" data-repo="' + G.esc(r.name) + '"' +
+        '<input type="checkbox" name="selected_repo" data-repo="' + G.esc(r.name) + '"' +
         (on ? " checked" : "") + "> " +
         '<span class="mono">' + G.esc(r.name) + "</span> " +
         '<span class="muted" style="font-size:12px">' + (r.private ? "priv" : "pub") +

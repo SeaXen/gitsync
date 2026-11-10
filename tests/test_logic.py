@@ -1170,9 +1170,11 @@ class TestStartupCaches(unittest.TestCase):
     def test_stale_cache_is_ignored(self):
         tui.save_probe_cache(self._rows)
         path = os.path.join(self.td, "probe_cache.json")
-        data = json.load(open(path))
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
         data["at"] = time.time() - (tui.PROBE_TTL + 10)
-        json.dump(data, open(path, "w"))
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f)
         self.assertEqual(tui.load_probe_cache(), ([], None))
 
     def test_log_tail_is_cached_until_the_file_changes(self):
@@ -1610,8 +1612,9 @@ class TestWeb(unittest.TestCase):
         # regression guard: the Tools page's card ids must all be accepted by
         # _tool_argv (this is the class of bug that made "doctorfix" dead)
         import re as _re
-        src = open(os.path.join(os.path.dirname(W.__file__), "webui", "pages",
-                                "tools.js")).read()
+        with open(os.path.join(os.path.dirname(W.__file__), "webui", "pages",
+                                "tools.js"), "r", encoding="utf-8") as f:
+            src = f.read()
         ids = _re.findall(r'toolCard\("(\w+)"', src)
         self.assertTrue(ids)
         args = {"restore": {"to": "dst"}, "mirror": {"repos": "hello"}}
@@ -1736,7 +1739,8 @@ class TestWebHttp(unittest.TestCase):
         code, _, _ = self._req("PUT", "/api/settings", {"mode": "nonsense"},
                                headers=self._auth())
         self.assertEqual(code, 400)
-        saved = json.load(open(C.CONFIG_FILE))
+        with open(C.CONFIG_FILE, "r", encoding="utf-8") as f:
+            saved = json.load(f)
         self.assertNotEqual(saved["settings"].get("mode"), "nonsense")
 
     def test_oversized_body_is_413(self):
@@ -1792,6 +1796,32 @@ class TestTenOutOfTenFixes(unittest.TestCase):
     def test_webhook_template_user_wantedby(self):
         self.assertIn("WantedBy={wantedby}", S.WEBHOOK_TEMPLATE)
         self.assertNotIn("Environment=HOME=%h", S.WEBHOOK_TEMPLATE)
+
+    def test_webui_html_dark_mode_metadata(self):
+        webui = os.path.join(C.APP_DIR, "gitsync", "webui")
+        for f in os.listdir(webui):
+            if f.endswith(".html"):
+                with open(os.path.join(webui, f), encoding="utf-8") as fp:
+                    html = fp.read()
+                self.assertIn('color-scheme: dark', html, f)
+                self.assertIn('name="theme-color" content="#0d1117"', html, f)
+
+    def test_webui_style_guidelines(self):
+        css_path = os.path.join(C.APP_DIR, "gitsync", "webui", "style.css")
+        with open(css_path, encoding="utf-8") as fp:
+            css = fp.read()
+        self.assertIn("color-scheme:dark", css)
+        self.assertIn("touch-action:manipulation", css)
+        self.assertIn("modal-backdrop", css)
+        self.assertIn("font-variant-numeric:tabular-nums", css)
+
+    def test_webui_app_modal_confirm_and_intl(self):
+        app_path = os.path.join(C.APP_DIR, "gitsync", "webui", "app.js")
+        with open(app_path, encoding="utf-8") as fp:
+            app = fp.read()
+        self.assertIn("modalConfirm: modalConfirm", app)
+        self.assertIn("formatDate: formatDate", app)
+        self.assertIn("Intl.RelativeTimeFormat", app)
 
 
 if __name__ == '__main__':

@@ -97,7 +97,7 @@
     }
     var bad = (last.failed || 0) + (last.partial || 0);
     host.innerHTML =
-      '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " ok</div>" +
+      '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " OK</div>" +
       '<div class="muted" style="margin-top:6px">' + (last.failed || 0) + " failed" +
       (last.partial ? ", " + last.partial + " partial" : "") + " of " +
       (last.repos || 0) + ", in " + (last.elapsed_sec || "?") + "s</div>" +
@@ -148,7 +148,7 @@
     main.innerHTML =
       G.bar("Dashboard", "…", "", "dash-sub") +
       '<section class="card" id="sync-card" style="display:none">' +
-        '<p class="label">Syncing now</p>' +
+        '<p class="label">Syncing Now</p>' +
         '<div class="row" style="margin-bottom:8px">' +
           '<span class="mono" id="sync-label">starting…</span>' +
           '<span class="muted" id="sync-pct">0%</span></div>' +
@@ -157,13 +157,13 @@
       '<div class="grid">' +
         '<section class="card"><p class="label" id="plats-label">Platforms</p>' +
           '<div class="stack" id="plats-body">' + G.loading() + "</div></section>" +
-        '<section class="card"><p class="label" id="lastrun-label">Last run</p>' +
+        '<section class="card"><p class="label" id="lastrun-label">Last Run</p>' +
           '<div id="lastrun-body">' + G.loading() + "</div></section>" +
-        '<section class="card"><p class="label">Disk and health</p>' +
+        '<section class="card"><p class="label">Disk &amp; Health</p>' +
           '<div id="health-body">' + G.loading() + "</div></section>" +
       "</div>" +
       '<section class="card"><p class="label">Log ' +
-        '<a href="log.html" style="text-transform:none;letter-spacing:0">full →</a></p>' +
+        '<a href="log.html" style="text-transform:none;letter-spacing:0">View full log →</a></p>' +
         '<div class="mono log" id="logtail">' + G.loading() + "</div></section>";
 
     refresh();

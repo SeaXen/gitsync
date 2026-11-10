@@ -179,7 +179,8 @@ def cmd_log(args):
         print("no log yet")
         return 0
     n = args.lines
-    lines = open(C.LOG_FILE).read().splitlines()
+    with open(C.LOG_FILE, "r", encoding="utf-8", errors="replace") as lf:
+        lines = lf.read().splitlines()
     for line in lines[-n:]:
         print(line)
     return 0

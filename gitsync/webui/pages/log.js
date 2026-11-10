@@ -8,12 +8,12 @@
       G.bar("Log", "The gitsync log, newest last.") +
       '<section class="card">' +
         '<div class="inline mb">' +
-          '<div class="field" style="margin:0;min-width:140px">' +
+          '<div style="min-width:140px">' +
             G.field("Tail", G.select("l-tail", "400", [200, 400, 1000, 3000])) + "</div>" +
-          '<div class="field grow" style="margin:0">' +
-            G.field("Filter", '<input type="text" id="l-q" placeholder="substring…">') + "</div>" +
-          '<label class="check"><input type="checkbox" id="l-auto"> auto-refresh (3s)</label>' +
-          '<button class="btn" id="l-refresh" style="align-self:flex-end">Refresh</button>' +
+          '<div class="grow">' +
+            G.field("Filter", '<input type="text" id="l-q" name="filter" autocomplete="off" placeholder="filter substring…">') + "</div>" +
+          '<label class="check" style="align-self:flex-end;margin-bottom:14px"><input type="checkbox" id="l-auto" name="auto_refresh"> auto-refresh (3s)</label>' +
+          '<button class="btn" id="l-refresh" style="align-self:flex-end;margin-bottom:14px">Refresh</button>' +
         "</div>" +
         '<div class="muted mb" id="l-meta"></div>' +
         '<div class="viewer" id="l-lines" role="log" aria-live="polite">' +

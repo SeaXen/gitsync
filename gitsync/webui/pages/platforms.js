@@ -60,15 +60,15 @@
         "<td class='mono muted'>" + (r.repo_count === null ? "—" : r.repo_count) + "</td>" +
         "<td class='mono muted nowrap'>" + G.esc(extra) + "</td>" +
         "<td class='actions nowrap'>" +
-          "<button class='btn sm' data-act='test' data-n='" + G.esc(r.name) + "'>Test</button>" +
-          "<button class='btn sm' data-act='edit' data-n='" + G.esc(r.name) + "'>Edit</button>" +
-          "<button class='btn sm' data-act='toggle' data-n='" + G.esc(r.name) + "'>" +
+          "<button class='btn sm' data-act='test' data-n='" + G.esc(r.name) + "' aria-label='Test " + G.esc(r.name) + "'>Test</button>" +
+          "<button class='btn sm' data-act='edit' data-n='" + G.esc(r.name) + "' aria-label='Edit " + G.esc(r.name) + "'>Edit</button>" +
+          "<button class='btn sm' data-act='toggle' data-n='" + G.esc(r.name) + "' aria-label='" + (r.enabled ? "Disable " : "Enable ") + G.esc(r.name) + "'>" +
             (r.enabled ? "Disable" : "Enable") + "</button>" +
-          "<button class='btn sm danger' data-act='del' data-n='" + G.esc(r.name) + "'>Del</button>" +
+          "<button class='btn sm danger' data-act='del' data-n='" + G.esc(r.name) + "' aria-label='Delete " + G.esc(r.name) + "'>Delete</button>" +
         "</td></tr>";
     }).join("");
     host.innerHTML =
-      '<div style="overflow-x:auto"><table><thead><tr><th>Name</th><th>Type</th>' +
+      '<div style="overflow-x:auto"><table aria-label="Configured platforms"><thead><tr><th>Name</th><th>Type</th>' +
       "<th>Status</th><th>Token</th><th>Repos</th><th>URL / path</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>";
     host.querySelectorAll("button[data-act]").forEach(function (b) {
@@ -90,18 +90,32 @@
       state.editing = r; state.formType = r.type; state.showForm = true;
       renderForm();
     } else if (a === "del") {
-      if (!confirm("Remove platform '" + name + "'? This cannot be undone.")) return;
-      G.busy(btn, function () {
-        return G.api("DELETE", "/api/platforms/" + encodeURIComponent(name))
-          .catch(function (e) {
-            if (e.status === 409 && confirm(e.error + "\n\nRemove anyway (force)?")) {
-              return G.api("DELETE", "/api/platforms/" +
-                encodeURIComponent(name) + "?force=1");
-            }
-            throw e;
-          })
-          .then(function () { G.toast(name + " removed", "ok"); load(); })
-          .catch(function (e) { if (e.error) G.toast(G.apiError(e), "bad"); });
+      G.modalConfirm({
+        title: "Remove platform",
+        message: "Remove platform '" + name + "'? This cannot be undone.",
+        confirmText: "Remove Platform",
+        danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        G.busy(btn, function () {
+          return G.api("DELETE", "/api/platforms/" + encodeURIComponent(name))
+            .catch(function (e) {
+              if (e.status === 409) {
+                return G.modalConfirm({
+                  title: "Force remove",
+                  message: e.error + "\n\nRemove anyway (force)?",
+                  confirmText: "Force Remove",
+                  danger: true
+                }).then(function (forceOk) {
+                  if (forceOk) return G.api("DELETE", "/api/platforms/" + encodeURIComponent(name) + "?force=1");
+                  throw e;
+                });
+              }
+              throw e;
+            })
+            .then(function () { G.toast(name + " removed", "ok"); load(); })
+            .catch(function (e) { if (e && e.error) G.toast(G.apiError(e), "bad"); });
+        });
       });
     }
   }
@@ -128,52 +142,52 @@
     };
     var f = "";
     if (!editing) {
-      f += G.field("Name", '<input type="text" id="f-name" placeholder="e.g. gitlab, backup" value="' +
+      f += G.field("Name", '<input type="text" id="f-name" name="platform_name" placeholder="e.g. gitlab, backup…" value="' +
         G.esc(val("f-name")) + '">');
       f += G.field("Type", G.select("f-type", t, TYPES));
     }
     if (isLocal) {
-      f += G.field("Folder path", '<input type="text" id="f-path" placeholder="~/git-mirrors" value="' +
+      f += G.field("Folder path", '<input type="text" id="f-path" name="folder_path" placeholder="~/git-mirrors…" value="' +
         G.esc(val("f-path", editing ? editing.path : "")) + '">',
         "holds the bare *.git mirrors");
     } else {
       if (t === "generic") {
-        f += G.field("URL template", '<input type="text" id="f-urltpl" placeholder="https://git.example.com/{owner}/{name}.git" value="' +
+        f += G.field("URL template", '<input type="text" id="f-urltpl" name="url_template" placeholder="https://git.example.com/{owner}/{name}.git…" value="' +
           G.esc(val("f-urltpl", editing ? editing.url_template : "")) + '">');
       } else {
-        f += G.field("Instance URL", '<input type="text" id="f-url" value="' +
+        f += G.field("Instance URL", '<input type="url" id="f-url" name="instance_url" inputmode="url" placeholder="https://…" value="' +
           G.esc(val("f-url", editing ? editing.url : "")) + '">');
       }
-      f += G.field("Token", '<input type="password" id="f-token" autocomplete="new-password" placeholder="' +
-        (editing ? "leave blank to keep current" : (t === "github" ? "blank = use gh CLI" : "API token")) + '">',
+      f += G.field("Token", '<input type="password" id="f-token" name="token" autocomplete="new-password" spellcheck="false" placeholder="' +
+        (editing ? "leave blank to keep current…" : (t === "github" ? "blank = use gh CLI…" : "API token…")) + '">',
         "write-only: never sent back to the browser");
-      f += G.field("Owner", '<input type="text" id="f-owner" placeholder="blank = auto-detect" value="' +
+      f += G.field("Owner", '<input type="text" id="f-owner" name="owner" placeholder="blank = auto-detect…" value="' +
         G.esc(val("f-owner", editing ? editing.owner : "")) + '">',
         "username / workspace / namespace");
       if (t === "github") {
-        f += G.field("Affiliation", '<input type="text" id="f-affil" placeholder="owner" value="' +
+        f += G.field("Affiliation", '<input type="text" id="f-affil" name="affiliation" placeholder="owner…" value="' +
           G.esc(val("f-affil", editing ? editing.affiliation : "")) + '">',
           "add organization_member to mirror org repos");
       }
       if (t === "gitlab") {
-        f += G.field("Namespace id", '<input type="text" id="f-nsid" placeholder="blank = personal namespace" value="' +
+        f += G.field("Namespace id", '<input type="text" id="f-nsid" name="namespace_id" placeholder="blank = personal namespace…" value="' +
           G.esc(val("f-nsid", editing ? editing.ns_id : "")) + '">');
       }
       if (t === "generic") {
-        f += G.field("Git user", '<input type="text" id="f-user" placeholder="git" value="' +
+        f += G.field("Git user", '<input type="text" id="f-user" name="git_user" placeholder="git…" value="' +
           G.esc(val("f-user", editing ? editing.user : "")) + '">');
       }
       f += G.field("Protocol", G.select("f-proto", editing && editing.protocol === "ssh" ? "ssh" : "http", ["http", "ssh"]));
-      f += G.field("SSH port", '<input type="number" id="f-sshport" value="' +
+      f += G.field("SSH port", '<input type="number" id="f-sshport" name="ssh_port" min="1" max="65535" inputmode="numeric" value="' +
         G.esc(val("f-sshport", editing && editing.ssh_port ? editing.ssh_port : 22)) + '">',
         "only used with ssh");
     }
     host.innerHTML =
       '<section class="card mb"><div class="bar"><span class="route-title">' +
-      (editing ? "Edit " + G.esc(editing.name) : "Add platform") + "</span>" +
+      (editing ? "Edit " + G.esc(editing.name) : "Add Platform") + "</span>" +
       '<div class="actions">' +
       '<button class="btn" id="f-cancel">Cancel</button>' +
-      '<button class="btn primary" id="f-save">' + (editing ? "Save" : "Add") + "</button>" +
+      '<button class="btn primary" id="f-save">' + (editing ? "Save Platform" : "Add Platform") + "</button>" +
       "</div></div>" +
       '<div class="form-grid mt">' + f + "</div></section>";
     document.getElementById("f-cancel").addEventListener("click", function () {

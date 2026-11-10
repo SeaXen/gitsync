@@ -42,13 +42,13 @@
     return '<section class="card" data-route="' + G.esc(r.name) + '">' +
       '<div class="bar"><div><span class="route-title">' + G.esc(r.name) + "</span> " +
         chips(r) + '</div><div class="actions">' +
-        '<button class="btn sm" data-a="run" data-n="' + G.esc(r.name) + '">Run</button>' +
-        '<button class="btn sm" data-a="dry" data-n="' + G.esc(r.name) + '">Dry run</button>' +
-        '<button class="btn sm" data-a="pause" data-n="' + G.esc(r.name) + '">' +
+        '<button class="btn sm" data-a="run" data-n="' + G.esc(r.name) + '" aria-label="Run route ' + G.esc(r.name) + '">Run</button>' +
+        '<button class="btn sm" data-a="dry" data-n="' + G.esc(r.name) + '" aria-label="Dry run route ' + G.esc(r.name) + '">Dry Run</button>' +
+        '<button class="btn sm" data-a="pause" data-n="' + G.esc(r.name) + '" aria-label="' + (r.enabled ? "Pause" : "Resume") + ' route ' + G.esc(r.name) + '">' +
           (r.enabled ? "Pause" : "Resume") + "</button>" +
-        '<button class="btn sm" data-a="manage" data-n="' + G.esc(r.name) + '">Targets</button>' +
-        '<button class="btn sm" data-a="edit" data-n="' + G.esc(r.name) + '">Edit</button>' +
-        '<button class="btn sm danger" data-a="del" data-n="' + G.esc(r.name) + '">Delete</button>' +
+        '<button class="btn sm" data-a="manage" data-n="' + G.esc(r.name) + '" aria-label="Manage targets for route ' + G.esc(r.name) + '">Targets</button>' +
+        '<button class="btn sm" data-a="edit" data-n="' + G.esc(r.name) + '" aria-label="Edit route ' + G.esc(r.name) + '">Edit</button>' +
+        '<button class="btn sm danger" data-a="del" data-n="' + G.esc(r.name) + '" aria-label="Delete route ' + G.esc(r.name) + '">Delete</button>' +
       "</div></div>" + flow(r) +
       '<div class="muted" style="margin-top:8px">next: ' + G.esc(r.next) +
         (filters ? ' · <span class="mono">' + G.esc(filters) + "</span>" : "") + "</div>" +
@@ -133,11 +133,18 @@
       closePanels();
       if (!open2) { panel.dataset.open = "1"; renderEdit(panel, r); }
     } else if (a === "del") {
-      if (!confirm("Remove route '" + name + "'?")) return;
-      G.busy(btn, function () {
-        return G.api("DELETE", "/api/routes/" + encodeURIComponent(name))
-          .then(function () { G.toast(name + " removed", "ok"); loadRoutes(); })
-          .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+      G.modalConfirm({
+        title: "Remove route",
+        message: "Remove route '" + name + "'? This cannot be undone.",
+        confirmText: "Remove Route",
+        danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        G.busy(btn, function () {
+          return G.api("DELETE", "/api/routes/" + encodeURIComponent(name))
+            .then(function () { G.toast(name + " removed", "ok"); loadRoutes(); })
+            .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+        });
       });
     }
   }
@@ -167,9 +174,9 @@
   }
 
   function renderEdit(panel, r) {
-    var f = G.field("Include globs", '<input type="text" id="e-inc" placeholder="blank = all" value="' +
+    var f = G.field("Include globs", '<input type="text" id="e-inc" name="include" placeholder="blank = all…" value="' +
         G.esc((r.include || []).join(",")) + '">') +
-      G.field("Exclude globs", '<input type="text" id="e-exc" value="' +
+      G.field("Exclude globs", '<input type="text" id="e-exc" name="exclude" placeholder="comma-separated globs…" value="' +
         G.esc((r.exclude || []).join(",")) + '">') +
       G.field("Workers", G.select("e-workers", r.workers || "inherit", ["inherit", "1", "2", "4", "8"])) +
       G.field("Mirror mode", G.select("e-mode", r.mode || "inherit", ["inherit", "full", "safe"])) +
@@ -181,8 +188,8 @@
       '<div class="mt" style="border-top:1px solid var(--line)">' +
       '<p class="label mt">Filters &amp; options</p>' +
       '<div class="form-grid">' + f + "</div>" +
-      '<div class="actions"><button class="btn primary" id="e-save">Save</button> ' +
-      '<button class="btn" id="e-clear">Clear filters</button></div></div>';
+      '<div class="actions"><button class="btn primary" id="e-save">Save Route</button> ' +
+      '<button class="btn" id="e-clear">Clear Filters</button></div></div>';
     document.getElementById("e-save").addEventListener("click", function () {
       var body = {
         include: splitList(document.getElementById("e-inc").value),
@@ -219,10 +226,10 @@
       return;
     }
     var tchecks = names.map(function (n, i) {
-      return '<label class="check"><input type="checkbox" class="t-target" value="' +
+      return '<label class="check"><input type="checkbox" class="t-target" name="route_targets" value="' +
         G.esc(n) + '"' + (i > 0 ? " checked" : "") + "> " + G.esc(n) + "</label>";
     }).join("");
-    var f = G.field("Name", '<input type="text" id="a-name" placeholder="e.g. all, gh-to-gl">') +
+    var f = G.field("Name", '<input type="text" id="a-name" name="route_name" placeholder="e.g. all, gh-to-gl…">') +
       G.field("Direction", G.select("a-dir", "one-way", ["one-way", "mesh"])) +
       G.field("Source", G.select("a-src", names[0], names)) +
       '<div class="field"><label>Targets</label>' + tchecks + "</div>" +
@@ -231,9 +238,9 @@
       G.field("Conflicts", G.select("a-conflict", "inherit", ["inherit", "newest", "skip"])) +
       G.field("Schedule", G.select("a-sched", "inherit", SCHED));
     host.innerHTML =
-      '<section class="card mb"><div class="bar"><span class="route-title">Add route</span>' +
+      '<section class="card mb"><div class="bar"><span class="route-title">Add Route</span>' +
       '<div class="actions"><button class="btn" id="a-cancel">Cancel</button>' +
-      '<button class="btn primary" id="a-save">Add</button></div></div>' +
+      '<button class="btn primary" id="a-save">Add Route</button></div></div>' +
       '<div class="form-grid mt">' + f + "</div></section>";
     document.getElementById("a-cancel").addEventListener("click", function () {
       state.showAdd = false; host.innerHTML = "";

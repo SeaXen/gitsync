@@ -4,6 +4,21 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.8] - 2026-11-10
+
+Web Interface Guidelines compliance pass across the entire web UI.
+
+### Changed — Web UI guidelines & design polish
+- **Accessible modal confirm dialogs**: Replaced native browser `window.confirm()` popups across Platform, Route, Tools (gc & restore), and Settings views with a non-blocking, keyboard-accessible in-app modal (`G.modalConfirm`) featuring backdrop blur, focus trapping, Escape key dismissal, and trigger focus restoration.
+- **Tabular numeric typography**: Added `font-variant-numeric: tabular-nums` to `.mono`, `table`, `.status`, `.badge`, `.big`, `.chip`, and `.kv` for rock-solid visual column stability across metrics, timers, and byte counts.
+- **Balanced headline wrapping**: Added `text-wrap: balance` to page headers, modal titles, and route cards to prevent orphaned words on narrow viewports.
+- **Form UX & semantics**: Added proper `name` attributes, `spellcheck="false"`, `inputmode="numeric"`, `inputmode="url"`, and standardized ellipsis placeholders (`…`) across all input fields and textareas.
+- **Action buttons over links**: Replaced action anchor tags (`#use-token`, `#logout`) with semantic `<button type="button">` elements.
+- **Dark mode metadata**: Added `<meta name="color-scheme" content="dark">`, `<meta name="theme-color" content="#0d1117">`, and `style="color-scheme: dark"` across all 9 HTML shells.
+- **Touch & mobile interaction**: Added `touch-action: manipulation` and disabled `-webkit-tap-highlight-color` to prevent tap delays and unstyled tap flashes on mobile viewports.
+- **Reduced motion compliance**: Extended `prefers-reduced-motion` media queries to eliminate infinite spinner animations and modal transitions when requested by the OS.
+- **Native formatting**: Implemented `Intl.DateTimeFormat` and `Intl.RelativeTimeFormat` for standardized localized timestamps and relative durations.
+
 ## [1.9.7] - 2026-11-10
 
 Comprehensive 10/10 quality and hardening pass across all sectors.
