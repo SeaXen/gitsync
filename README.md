@@ -132,6 +132,26 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 
 ---
 
+## Two ways to run gitsync
+
+| | **1 · Native** (TUI + localhost web UI) | **2 · Docker only** (web UI) |
+|---|---|---|
+| **Install** | `curl -fsSL https://raw.githubusercontent.com/SeaXen/gitsync/main/quickinstall.sh \| bash` | `docker compose up -d` |
+| **You get** | CLI + **TUI** + **web UI** on the box | **web UI** in a container |
+| **Terminal UI** | `gitsync` / `gitsync tui` | `docker exec -it gitsync gitsync tui` |
+| **Browser UI** | `gitsync web` → `http://127.0.0.1:7765` (this machine) | `http://<host>:7765` (LAN, port published) |
+| **Share on the LAN** | `gitsync web --bind 0.0.0.0`, or always-on: `gitsync web --install` | already LAN via `-p 7765:7765` |
+| **Configure** | `gitsync setup`, the TUI, or the web UI | the web UI (Platforms + Routes) |
+| **Data** | `~/.config/gitsync`, `~/.local/share/gitsync` | volumes `/data/config`, `/data/share` |
+
+Pick one (or run both on different ports). The native web UI binds **localhost**
+by default so it's private to the machine; make it reachable from other devices
+with `--bind 0.0.0.0` or the always-on service. Docker is the "just serve the
+dashboard" path — configure it entirely from the browser, no host install.
+Either way, authentication is required on every request.
+
+---
+
 ## Quick start
 
 ```bash

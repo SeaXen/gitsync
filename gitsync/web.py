@@ -13,10 +13,10 @@ same command the timer runs — and streamed to the browser over Server-Sent
 Events. No sync logic is reimplemented here.
 
 Security model (the config holds platform tokens, so this is the priority):
-  * binds 0.0.0.0 by default so the dashboard is reachable on your LAN (it is
-    meant to be opened in a browser); authentication is ALWAYS required on
-    every request. Lock it to this machine with `gitsync web --bind 127.0.0.1`
-    (the chosen bind/port is remembered in settings.web)
+  * `gitsync web` (foreground) binds 127.0.0.1 by default — this machine only;
+    the always-on service (`gitsync web --install`) and Docker bind 0.0.0.0
+    (LAN). Authentication is ALWAYS required on every request, whatever the
+    bind; the chosen bind/port is remembered in settings.web
   * a random access token (CONFIG_DIR/web.token, 0600) guards every /api
     call — via `Authorization: Bearer` or an HttpOnly, SameSite=Strict cookie
   * a token is NEVER returned in any response, log line or page; responses
@@ -59,11 +59,12 @@ from . import permissions as PERM
 from . import webhooks as WH
 
 DEFAULT_PORT = 7765
-# A web dashboard is meant to be opened in a browser, often from another
-# device on the LAN, so it binds all interfaces by default. This is NOT an
-# open port: authentication (access token and/or password) is required on
-# every request. Lock it to this machine with `gitsync web --bind 127.0.0.1`.
-DEFAULT_BIND = "0.0.0.0"
+# `gitsync web` in the foreground is for the person on this machine, so it
+# binds localhost by default. The always-on service (`gitsync web --install`)
+# and Docker are the "share it on the LAN" paths and bind 0.0.0.0. Any bind
+# still requires authentication on every request — never an open port.
+DEFAULT_BIND = "127.0.0.1"
+LAN_BIND = "0.0.0.0"
 WEBUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
 MAX_BODY = 1 << 20                      # 1 MB request cap
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -421,11 +422,11 @@ def _is_loopback(bind):
         return bind in ("localhost",)
 
 
-def resolve_bind_port(cli_bind, cli_port, cfg):
+def resolve_bind_port(cli_bind, cli_port, cfg, default_bind=None):
     """Effective (bind, port): explicit CLI flag > saved preference > default.
     Pure, so it can be unit-tested without starting a server."""
     web = (cfg.get("settings") or {}).get("web") or {}
-    bind = cli_bind or web.get("bind") or DEFAULT_BIND
+    bind = cli_bind or web.get("bind") or default_bind or DEFAULT_BIND
     port = cli_port or web.get("port") or DEFAULT_PORT
     try:
         port = int(port)
@@ -1628,7 +1629,8 @@ def serve(port=DEFAULT_PORT, bind=DEFAULT_BIND, allowed_hosts=None):
     _say("  this machine : http://127.0.0.1:%d" % port)
     if loop:
         _say("  bound to %s — reachable from this machine only." % bind)
-        _say("  to open it from other devices: gitsync web --bind 0.0.0.0")
+        _say("  to reach it from other devices: gitsync web --bind 0.0.0.0 "
+             "(or: gitsync web --install for always-on)")
     else:
         for ip in _local_ips():
             _say("  your network : http://%s:%d" % (ip, port))

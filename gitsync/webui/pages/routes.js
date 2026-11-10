@@ -267,11 +267,10 @@
   }
 
   function runRoute(name, dry) {
-    G.api("POST", "/api/sync", { route: name, dry_run: dry })
+    G.startSync({ route: name, dry_run: dry })
       .then(function (r) { showLive(name, r.job_id, dry); })
       .catch(function (e) {
         if (e.status === 409) G.toast(e.error || "already running", "warn");
-        else G.toast(e.error || "could not start", "bad");
       });
   }
 

@@ -1399,17 +1399,25 @@ class TestWeb(unittest.TestCase):
         self.assertFalse(W._is_loopback("192.168.1.5"))
 
     def test_resolve_bind_port_prefers_cli_then_saved_then_default(self):
-        # LAN-friendly defaults, no config
+        # foreground default is localhost (this machine)
         self.assertEqual(W.resolve_bind_port(None, None, {}),
-                         (W.DEFAULT_BIND, W.DEFAULT_PORT))
-        self.assertEqual(W.DEFAULT_BIND, "0.0.0.0")
-        # explicit CLI wins
-        self.assertEqual(W.resolve_bind_port("127.0.0.1", 9000, {}),
-                         ("127.0.0.1", 9000))
-        # saved preference is used when no CLI flag
+                         ("127.0.0.1", W.DEFAULT_PORT))
+        self.assertEqual(W.DEFAULT_BIND, "127.0.0.1")
+        self.assertEqual(W.LAN_BIND, "0.0.0.0")
+        # the service / Docker path passes LAN_BIND as its default
+        self.assertEqual(
+            W.resolve_bind_port(None, None, {}, default_bind=W.LAN_BIND),
+            ("0.0.0.0", W.DEFAULT_PORT))
+        # explicit CLI wins over everything
+        self.assertEqual(W.resolve_bind_port("0.0.0.0", 9000, {}),
+                         ("0.0.0.0", 9000))
+        # a saved preference beats the default (even the LAN default)
         cfg = {"settings": {"web": {"bind": "127.0.0.1", "port": 7782}}}
         self.assertEqual(W.resolve_bind_port(None, None, cfg),
                          ("127.0.0.1", 7782))
+        self.assertEqual(
+            W.resolve_bind_port(None, None, cfg, default_bind=W.LAN_BIND),
+            ("127.0.0.1", 7782))
         # CLI overrides saved
         self.assertEqual(W.resolve_bind_port("0.0.0.0", None, cfg),
                          ("0.0.0.0", 7782))

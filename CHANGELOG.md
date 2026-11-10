@@ -4,6 +4,27 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.5] - 2026-11-10
+
+### Changed — two clear run modes, and web UI fixes
+
+- **Two ways to run gitsync**, now the documented default. The **native** install
+  gives you the TUI plus a **localhost** web UI — `gitsync web` binds `127.0.0.1`
+  by default (private to the machine). The **always-on service**
+  (`gitsync web --install`) and **Docker** are the LAN paths and bind `0.0.0.0`.
+  `--bind` still overrides either and is remembered. A "Two ways to run gitsync"
+  table sits at the top of the README.
+
+### Fixed (web UI)
+
+- **SSE reconnect loop**: a finished run now closes its EventSource, so the
+  browser stops reconnecting and re-streaming a done job forever.
+- **One sync path**: the top-bar Sync/Dry-run, the Routes per-route Run, and the
+  Repos selection all go through the same coordinator, so the top bar's live
+  progress reflects every run, not just the global one.
+
+CLI/TUI otherwise unchanged; 126 unit tests.
+
 ## [1.9.4] - 2026-11-10
 
 ### Added — always-on web dashboard

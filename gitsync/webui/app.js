@@ -80,11 +80,17 @@
   }
 
   // ---- global sync control (top bar drives it; pages may listen) ----
-  function startSync(dry) {
-    return api("POST", "/api/sync", { dry_run: !!dry })
+  function startSync(opts) {
+    opts = opts || {};
+    var dry = !!opts.dry_run;
+    var body = { dry_run: dry };
+    if (opts.route) body.route = opts.route;
+    if (opts.to) body.to = opts.to;
+    if (opts.repos) body.repos = opts.repos;
+    return api("POST", "/api/sync", body)
       .then(function (r) {
         _activeJob = r.job_id;
-        syncListeners.forEach(function (cb) { try { cb(r.job_id, !!dry); }
+        syncListeners.forEach(function (cb) { try { cb(r.job_id, opts); }
                                               catch (e) {} });
         return r;
       })
@@ -154,7 +160,10 @@
     var es = new EventSource(path, { withCredentials: true });
     es.onmessage = function (ev) {
       var d; try { d = JSON.parse(ev.data); } catch (e) { return; }
-      onEvent(d);
+      onEvent(d, es);
+      // a finished run is terminal: close, or EventSource reconnects and
+      // re-streams the same done job forever
+      if (d && d.done) { try { es.close(); } catch (e) {} }
     };
     return es;
   }
@@ -321,7 +330,7 @@
     var dry = document.getElementById("top-dry");
     var sync = document.getElementById("top-sync");
     function run(d) {
-      startSync(d).catch(function (e) {
+      startSync({ dry_run: d }).catch(function (e) {
         if (e.status === 409) toast(e.error || "a sync is already running", "warn");
       });
     }

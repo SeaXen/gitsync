@@ -111,14 +111,11 @@
   function doSync(to) {
     var names = selectedNames();
     if (!names.length) return;
-    var body = { repos: names.join(",") };
-    if (to) body.to = to;
-    G.api("POST", "/api/sync", body).then(function (r) {
-      showLive(names.length + " repo(s)", r.job_id);
-    }).catch(function (e) {
-      if (e.status === 409) G.toast(e.error || "already running", "warn");
-      else G.toast(e.error || "could not start", "bad");
-    });
+    G.startSync({ repos: names.join(","), to: to || undefined })
+      .then(function (r) { showLive(names.length + " repo(s)", r.job_id); })
+      .catch(function (e) {
+        if (e.status === 409) G.toast(e.error || "already running", "warn");
+      });
   }
 
   function saveSelection() {

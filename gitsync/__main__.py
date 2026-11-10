@@ -231,12 +231,14 @@ def cmd_web(args):
         print("password sign-in disabled (access-token sign-in still works).")
         return 0
     cfg = C.load_config()
-    bind, port = web.resolve_bind_port(getattr(args, "bind", None),
-                                       getattr(args, "port", None), cfg)
-    web.remember_bind_port(cfg, getattr(args, "bind", None),
-                           getattr(args, "port", None))
     from . import scheduler as S
     if getattr(args, "install", False):
+        # the always-on service is the "share it on the LAN" path -> 0.0.0.0
+        bind, port = web.resolve_bind_port(getattr(args, "bind", None),
+                                           getattr(args, "port", None), cfg,
+                                           default_bind=web.LAN_BIND)
+        web.remember_bind_port(cfg, getattr(args, "bind", None),
+                               getattr(args, "port", None))
         ok = S.install_systemd_web(port=port, bind=bind, system=args.system)
         if ok:
             print("web dashboard service installed and started (always-on).")
@@ -257,6 +259,11 @@ def cmd_web(args):
         print("web service: %s" % ("active" if S.web_active()
                                    else "not running"))
         return 0
+    # foreground `gitsync web` is for this machine -> localhost by default
+    bind, port = web.resolve_bind_port(getattr(args, "bind", None),
+                                       getattr(args, "port", None), cfg)
+    web.remember_bind_port(cfg, getattr(args, "bind", None),
+                           getattr(args, "port", None))
     return web.serve(port=port, bind=bind,
                      allowed_hosts=getattr(args, "allowed_host", None))
 
@@ -1781,9 +1788,9 @@ def main(argv=None):
                     help="listen port (default %d; remembered once set)"
                          % WH_PORT_WEB)
     sp.add_argument("--bind", default=None,
-                    help="bind address (default 0.0.0.0 — reachable on your "
-                         "network, auth always required; use 127.0.0.1 to "
-                         "restrict to this machine; remembered once set)")
+                    help="bind address for `gitsync web` (default 127.0.0.1 — "
+                         "this machine; use 0.0.0.0 for LAN. `--install` and "
+                         "Docker default to 0.0.0.0). Remembered once set.")
     sp.add_argument("--allowed-host", dest="allowed_host", action="append",
                     help="extra Host/Origin to accept (repeatable; for a "
                          "reverse-proxy domain). DNS-rebinding guard stays on")
