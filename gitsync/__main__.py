@@ -230,7 +230,12 @@ def cmd_web(args):
         web.clear_password()
         print("password sign-in disabled (access-token sign-in still works).")
         return 0
-    return web.serve(port=args.port, bind=args.bind,
+    cfg = C.load_config()
+    bind, port = web.resolve_bind_port(getattr(args, "bind", None),
+                                       getattr(args, "port", None), cfg)
+    web.remember_bind_port(cfg, getattr(args, "bind", None),
+                           getattr(args, "port", None))
+    return web.serve(port=port, bind=bind,
                      allowed_hosts=getattr(args, "allowed_host", None))
 
 
@@ -1750,11 +1755,13 @@ def main(argv=None):
     sp.set_defaults(func=cmd_tui)
 
     sp = sub.add_parser("web", help="open the web dashboard in a browser")
-    sp.add_argument("--port", type=int, default=WH_PORT_WEB,
-                    help="listen port (default %d)" % WH_PORT_WEB)
-    sp.add_argument("--bind", default="127.0.0.1",
-                    help="bind address (default 127.0.0.1; other binds "
-                         "always require the access token)")
+    sp.add_argument("--port", type=int, default=None,
+                    help="listen port (default %d; remembered once set)"
+                         % WH_PORT_WEB)
+    sp.add_argument("--bind", default=None,
+                    help="bind address (default 0.0.0.0 — reachable on your "
+                         "network, auth always required; use 127.0.0.1 to "
+                         "restrict to this machine; remembered once set)")
     sp.add_argument("--allowed-host", dest="allowed_host", action="append",
                     help="extra Host/Origin to accept (repeatable; for a "
                          "reverse-proxy domain). DNS-rebinding guard stays on")

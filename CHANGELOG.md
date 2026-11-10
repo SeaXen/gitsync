@@ -4,6 +4,24 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.2] - 2026-11-10
+
+### Changed — web UI is LAN-reachable out of the box
+
+`gitsync web` now binds `0.0.0.0` by default, so the dashboard is reachable
+from your phone/laptop the moment you start it (a browser dashboard is meant
+to be opened from another device). **Authentication is still always required
+on every request** — this is not an open port. On start it prints the exact
+URLs to open (e.g. `http://192.168.0.222:7765`).
+
+- The chosen `--bind` / `--port` is **remembered** in `settings.web`, so
+  `gitsync web --bind 127.0.0.1 --port 7782` sticks — bare `gitsync web` reuses
+  it. Nothing is written unless you pass a flag explicitly.
+- Restrict to this machine any time with `gitsync web --bind 127.0.0.1`.
+- Docker already binds `0.0.0.0` internally; publish the port as before.
+
+CLI/TUI otherwise unchanged. 126 unit tests (adds bind/port resolution).
+
 ## [1.9.1] - 2026-11-10
 
 ### Changed — Web UI design polish

@@ -1398,6 +1398,40 @@ class TestWeb(unittest.TestCase):
         self.assertFalse(W._is_loopback("0.0.0.0"))
         self.assertFalse(W._is_loopback("192.168.1.5"))
 
+    def test_resolve_bind_port_prefers_cli_then_saved_then_default(self):
+        # LAN-friendly defaults, no config
+        self.assertEqual(W.resolve_bind_port(None, None, {}),
+                         (W.DEFAULT_BIND, W.DEFAULT_PORT))
+        self.assertEqual(W.DEFAULT_BIND, "0.0.0.0")
+        # explicit CLI wins
+        self.assertEqual(W.resolve_bind_port("127.0.0.1", 9000, {}),
+                         ("127.0.0.1", 9000))
+        # saved preference is used when no CLI flag
+        cfg = {"settings": {"web": {"bind": "127.0.0.1", "port": 7782}}}
+        self.assertEqual(W.resolve_bind_port(None, None, cfg),
+                         ("127.0.0.1", 7782))
+        # CLI overrides saved
+        self.assertEqual(W.resolve_bind_port("0.0.0.0", None, cfg),
+                         ("0.0.0.0", 7782))
+
+    def test_remember_bind_port_persists_only_explicit_choices(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            old_f, old_d = C.CONFIG_FILE, C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            try:
+                C.save_config({"platforms": {}, "routes": [], "settings": {}})
+                # nothing explicit -> config untouched (no settings.web)
+                W.remember_bind_port(C.load_config(), None, None)
+                self.assertNotIn("web", C.load_config().get("settings", {}))
+                # explicit -> persisted
+                W.remember_bind_port(C.load_config(), "0.0.0.0", 7782)
+                saved = C.load_config()["settings"]["web"]
+                self.assertEqual(saved, {"bind": "0.0.0.0", "port": 7782})
+            finally:
+                C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+
     def test_get_web_token_prefers_the_env(self):
         old = os.environ.get("GITSYNC_WEB_TOKEN")
         os.environ["GITSYNC_WEB_TOKEN"] = "env-token-123"

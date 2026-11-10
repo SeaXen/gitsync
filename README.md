@@ -622,14 +622,21 @@ dependencies (Python standard library on the server; plain HTML/CSS/vanilla JS
 on the front end; no build step).
 
 ```bash
-gitsync web                         # http://127.0.0.1:7765
-gitsync web --port 8484 --bind 127.0.0.1
-gitsync web --bind 0.0.0.0          # LAN / behind a proxy — auth always on
+gitsync web                         # prints the URLs; reachable on your LAN
+gitsync web --bind 127.0.0.1        # this machine only
+gitsync web --port 8484             # your bind/port are remembered
 ```
+
+It binds `0.0.0.0` by default (a browser dashboard is meant to be opened from
+another device) and prints the exact URLs to open, e.g.
+`http://192.168.0.222:7765`. **Authentication is always required.** Restrict
+to this machine any time with `--bind 127.0.0.1` — the choice is saved, so you
+set it once.
 
 Open the URL, paste the **access token** printed on first run (stored at
 `~/.config/gitsync/web.token`, mode `0600`; set `GITSYNC_WEB_TOKEN` to choose
-your own), and you get a dark, terminal-flavoured dashboard with tabs for
+your own), or sign in with the **username + password** you set, and you get a
+dark, terminal-flavoured dashboard with tabs for
 Dashboard, Platforms, Routes, Repos, Stars, Log, History, Tools and Settings.
 
 Every TUI feature has a web equivalent — accounts, routes (pause a route *or*
@@ -643,8 +650,11 @@ never drift from the CLI.
 
 **Security** (the config holds platform tokens, so this is the priority):
 
-- binds `127.0.0.1` by default; any other bind needs an explicit `--bind` and
-  **always** requires authentication
+- binds `0.0.0.0` by default so it's reachable on your LAN (it's a browser
+  dashboard); **authentication is always required on every request**. Restrict
+  to this machine with `gitsync web --bind 127.0.0.1` (the bind/port is saved,
+  so you choose once). Behind a reverse proxy, add the public host with
+  `--allowed-host` / `GITSYNC_ALLOWED_HOSTS`
 - a random access token guards every `/api` call (`Authorization: Bearer` or an
   `HttpOnly, SameSite=Strict` cookie, compared with `hmac.compare_digest`)
 - **optional username + password sign-in**: set one in Settings (or

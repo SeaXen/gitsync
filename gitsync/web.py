@@ -13,7 +13,10 @@ same command the timer runs — and streamed to the browser over Server-Sent
 Events. No sync logic is reimplemented here.
 
 Security model (the config holds platform tokens, so this is the priority):
-  * binds 127.0.0.1 by default; any other bind needs an explicit --bind
+  * binds 0.0.0.0 by default so the dashboard is reachable on your LAN (it is
+    meant to be opened in a browser); authentication is ALWAYS required on
+    every request. Lock it to this machine with `gitsync web --bind 127.0.0.1`
+    (the chosen bind/port is remembered in settings.web)
   * a random access token (CONFIG_DIR/web.token, 0600) guards every /api
     call — via `Authorization: Bearer` or an HttpOnly, SameSite=Strict cookie
   * a token is NEVER returned in any response, log line or page; responses
@@ -34,6 +37,7 @@ import mimetypes
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import threading
@@ -55,6 +59,11 @@ from . import permissions as PERM
 from . import webhooks as WH
 
 DEFAULT_PORT = 7765
+# A web dashboard is meant to be opened in a browser, often from another
+# device on the LAN, so it binds all interfaces by default. This is NOT an
+# open port: authentication (access token and/or password) is required on
+# every request. Lock it to this machine with `gitsync web --bind 127.0.0.1`.
+DEFAULT_BIND = "0.0.0.0"
 WEBUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
 MAX_BODY = 1 << 20                      # 1 MB request cap
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -410,6 +419,67 @@ def _is_loopback(bind):
         return ipaddress.ip_address(bind).is_loopback
     except ValueError:
         return bind in ("localhost",)
+
+
+def resolve_bind_port(cli_bind, cli_port, cfg):
+    """Effective (bind, port): explicit CLI flag > saved preference > default.
+    Pure, so it can be unit-tested without starting a server."""
+    web = (cfg.get("settings") or {}).get("web") or {}
+    bind = cli_bind or web.get("bind") or DEFAULT_BIND
+    port = cli_port or web.get("port") or DEFAULT_PORT
+    try:
+        port = int(port)
+    except (TypeError, ValueError):
+        port = DEFAULT_PORT
+    return bind, port
+
+
+def remember_bind_port(cfg, cli_bind, cli_port):
+    """persist an explicitly-chosen bind/port so `gitsync web` (bare) reuses
+    it. No-op when neither flag was given (the default/saved value stands)."""
+    if not cli_bind and not cli_port:
+        return
+    web = cfg.setdefault("settings", {}).setdefault("web", {})
+    if cli_bind:
+        web["bind"] = cli_bind
+    if cli_port:
+        try:
+            web["port"] = int(cli_port)
+        except (TypeError, ValueError):
+            pass
+    C.save_config(cfg)
+
+
+def _usable_ip(ip):
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return not (a.is_loopback or a.is_unspecified or a.is_link_local
+                or a.is_multicast)
+
+
+def _local_ips():
+    """this machine's non-loopback IPv4 addresses, best guess first."""
+    ips = []
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))            # no traffic; picks the route
+        ip = s.getsockname()[0]
+        s.close()
+        if ip and _usable_ip(ip):
+            ips.append(ip)
+    except Exception:                               # noqa: BLE001
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            ip = info[4][0]
+            if ip not in ips and _usable_ip(ip):
+                ips.append(ip)
+    except Exception:                               # noqa: BLE001
+        pass
+    return ips
 
 
 # ---------------------------------------------------------------- validation
@@ -1538,7 +1608,7 @@ class _Server(ThreadingHTTPServer):
         super().__init__(addr, handler)
 
 
-def serve(port=DEFAULT_PORT, bind="127.0.0.1", allowed_hosts=None):
+def serve(port=DEFAULT_PORT, bind=DEFAULT_BIND, allowed_hosts=None):
     token, generated = get_web_token()
     REDACTOR.reload()
     extra = set(h.lower() for h in (allowed_hosts or []))
@@ -1554,10 +1624,17 @@ def serve(port=DEFAULT_PORT, bind="127.0.0.1", allowed_hosts=None):
         return 1
 
     loop = _is_loopback(bind)
-    _say("%s web UI on http://%s:%d" % (_c("32", "gitsync"), bind, port))
-    if not loop:
-        _say("%s bound to %s (non-loopback). Authentication is REQUIRED and "
-             "enforced on every request." % (_c("33", "WARNING:"), bind))
+    _say("%s web UI on port %d" % (_c("32", "gitsync"), port))
+    _say("  this machine : http://127.0.0.1:%d" % port)
+    if loop:
+        _say("  bound to %s — reachable from this machine only." % bind)
+        _say("  to open it from other devices: gitsync web --bind 0.0.0.0")
+    else:
+        for ip in _local_ips():
+            _say("  your network : http://%s:%d" % (ip, port))
+        _say("%s bound to %s — reachable on your network. Authentication is "
+             "REQUIRED on every request. Restrict with: gitsync web "
+             "--bind 127.0.0.1" % (_c("33", "note:"), bind))
     if generated:
         _say("")
         _say("  %s %s" % (_c("1", "access token (shown once):"), token))
