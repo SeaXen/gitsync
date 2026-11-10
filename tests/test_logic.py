@@ -962,8 +962,19 @@ class TestDoctorHints(unittest.TestCase):
         self.assertLessEqual(len(M._doctor_hints({}, problems)), 3)
 
 
+def _have_git():
+    import shutil
+    return shutil.which("git") is not None
+
+
+@unittest.skipUnless(_have_git(), "needs the git binary")
 class TestRestore(unittest.TestCase):
-    """F1: the hub is the source of truth when a platform is gone."""
+    """F1: the hub is the source of truth when a platform is gone.
+
+    These build real bare repos, so they need git on PATH. GitLab's
+    python:3.8-slim image has none, so they skip there and run fully on the
+    ubuntu-based Forgejo runner.
+    """
 
     def _hub(self, td, names, empty=()):
         import subprocess
