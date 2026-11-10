@@ -2704,6 +2704,7 @@ def _run(stdscr):
     last_draw = 0.0
     last_clock = 0.0
     dirty = True
+    dead_reads = 0
     while True:
         now = time.time()
         # threads raise state["dirty"] when new data arrives; merge it in
@@ -2718,7 +2719,17 @@ def _run(stdscr):
             update_clock(stdscr)
             last_clock = now
             dirty = True
+        _t0 = time.time()
         ch = stdscr.getch()
+        # a live terminal blocks ~1s in getch (timeout 1000) when idle; a
+        # closed/orphaned terminal returns -1 instantly (EOF). Count instant
+        # empty reads and exit, rather than busy-spinning a core forever.
+        if ch == -1 and (time.time() - _t0) < 0.05:
+            dead_reads += 1
+            if dead_reads >= 20:
+                return                  # terminal is gone — stop cleanly
+        else:
+            dead_reads = 0
         if ch == curses.KEY_MOUSE:
             # a malformed event must not spin the loop: fall through as "no
             # key" rather than re-reading the same queued event

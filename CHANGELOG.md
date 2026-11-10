@@ -4,13 +4,21 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.10.0] - 2026-11-10
+## [1.9.6] - 2026-11-10
 
-Full review pass over the web UI (a fleet of correctness, security,
-architecture, code-quality, simplicity, UX/a11y, telemetry and testing
-reviewers). Fixes every actionable finding; no CLI/TUI behaviour change.
+Web UI review pass (a fleet of correctness, security, architecture,
+code-quality, simplicity, UX/a11y, telemetry and testing reviewers) plus a
+TUI resource fix. Backwards-compatible; no interactive behaviour change.
 
-### Fixed — correctness (dead/unsafe features)
+### Fixed — TUI resource use
+- An **orphaned TUI busy-spun at ~100% CPU**. The event loop paced itself on
+  `getch()`'s 1-second timeout, but when the terminal closes, `getch()` returns
+  instantly at EOF, so the `while True` loop never slept. The TUI now detects a
+  dead terminal (`getch()` returning empty in <50 ms, 20× in a row — a live
+  idle terminal blocks the full ~1 s, so it never false-triggers) and exits
+  cleanly instead of burning a core. Interactive use is unchanged.
+
+### Fixed — web UI correctness (dead/unsafe features)
 - **Route pause/resume returned 500** — the handlers called a non-existent
   `self._pause_resolve`; now wired correctly.
 - **"Doctor — auto-repair" button was dead** — the Tools page sent
