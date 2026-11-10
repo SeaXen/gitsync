@@ -827,6 +827,44 @@ class TestWizardSafety(unittest.TestCase):
         self.assertIn("name=type", src.replace(" ", "").replace('"', ""))
 
 
+class TestWizardRepoPicker(unittest.TestCase):
+    """F2: choose repos in the wizard, not after."""
+
+    def test_blank_means_all(self):
+        from unittest import mock
+        import gitsync.wizard as W
+        with mock.patch.object(W, "ask", return_value=""):
+            self.assertEqual(W._pick_repos({"platforms": {}}, "nope"), [])
+
+    def test_globs_become_the_route_include(self):
+        from unittest import mock
+        import gitsync.wizard as W
+        repos = [{"name": "SeaVault"}, {"name": "tradex"},
+                 {"name": "gitsync"}]
+
+        class FakePlat:
+            def list_repos(self):
+                return repos
+
+        with mock.patch.object(W.P, "make", return_value=FakePlat()), \
+                mock.patch.object(W, "ask", return_value="Sea*,gitsync"):
+            got = W._pick_repos({"platforms": {"gh": {"enabled": True}}}, "gh")
+        self.assertEqual(got, ["Sea*", "gitsync"])
+
+    def test_a_listing_failure_still_returns_all(self):
+        from unittest import mock
+        import gitsync.wizard as W
+
+        class Boom:
+            def list_repos(self):
+                raise RuntimeError("nope")
+
+        with mock.patch.object(W.P, "make", return_value=Boom()):
+            self.assertEqual(
+                W._pick_repos({"platforms": {"gh": {"enabled": True}}}, "gh"),
+                [])
+
+
 class TestRestore(unittest.TestCase):
     """F1: the hub is the source of truth when a platform is gone."""
 
