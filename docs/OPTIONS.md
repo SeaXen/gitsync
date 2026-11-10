@@ -181,3 +181,48 @@ is no API to list repos.
 
 Override the first two with `GITSYNC_CONFIG_DIR` and `GITSYNC_DATA_DIR` —
 handy for testing without touching a real setup.
+
+
+---
+
+## Picking repos: globs, or a file
+
+Three ways to say "not everything", strongest last:
+
+1. **In the wizard** (`gitsync setup`, step 3) — it lists your repos (capped
+   at 50 with a count) and takes Enter for all, or a comma list / globs.
+2. **Globs in the config** — `"include": ["Sea*", "gitsync"]`. Fine for a
+   handful; unreadable at 200.
+3. **A file** — `"include_file": "~/repos.txt"`, one exact repo name per
+   line, `#` comments:
+
+   ```
+   # the ones I actually care about
+   gitsync
+   dockeryaml
+   ```
+
+   Set it with `gitsync routes edit NAME --from-file repos.txt`, or from the
+   TUI: `E`, tick the repos, `W`, choose a path.
+
+A missing or empty file means **no filtering** — it never silently syncs
+nothing. `--clear-filters` (or deleting the key) goes back to "every repo".
+
+## GitLab via the `glab` CLI
+
+`"auth": "glab"` on a GitLab platform uses the CLI instead of a token:
+
+- the API goes through `glab api`
+- git gets a `GIT_ASKPASS` helper, so the token is read from `glab` at call
+  time and **never written into a remote URL** (and so never into a hub
+  `config` file or a log line)
+
+If `glab` is missing or not logged in, `platforms test` says so plainly
+rather than failing with an auth error. Requires `glab auth login` first.
+
+## When the source host is gone
+
+`gitsync restore --to PLATFORM` pushes every hub mirror back out. It skips
+empty mirrors with a log line, creates missing repos (private unless
+`--public`), and deletes nothing unless `mode: full` **and** `--prune`. See
+the README section "If the source host disappears".

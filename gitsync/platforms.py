@@ -54,11 +54,11 @@ GIT_TIMEOUT = 14400        # long operations (clone/push) pass this explicitly
 API_TIMEOUT = 120          # CLI/API calls (gh repo list, gh api, ...)
 
 
-def run(cmd, cwd=None, timeout=300):
+def run(cmd, cwd=None, timeout=300, env=None):
     try:
         r = subprocess.run(cmd, capture_output=True, text=True,
                            stdin=subprocess.DEVNULL,
-                           cwd=cwd, timeout=timeout)
+                           cwd=cwd, timeout=timeout, env=env)
         return r.returncode, r.stdout, r.stderr
     except subprocess.TimeoutExpired:
         return 124, "", "timeout after %ss" % timeout
@@ -354,12 +354,43 @@ class GitLabPlatform:
         self.owner = cfg.get("owner") or ""
         self.token = cfg.get("token") or os.environ.get("GITLAB_TOKEN", "")
         self.ns_id = cfg.get("ns_id") or ""
+        # auth: "glab" uses the CLI for the API and a GIT_ASKPASS helper for
+        # git, so the token never lands in a remote URL
+        self.auth = cfg.get("auth") or "token"
 
     def _api(self, path, method="GET", payload=None):
+        # auth: "glab" shells out to the CLI instead of sending a token
+        if self.auth == "glab":
+            return self._glab_api(path, method, payload)
         # GitLab wants PRIVATE-TOKEN (PAT) or Bearer, not Authorization: token
         return _http(method, self.url + "/api/v4" + path,
                      token=self.token, payload=payload,
                      auth_style="private-token")
+
+    def _glab(self, args, stdin_text=None):
+        if stdin_text is None:
+            return run(["glab"] + args, timeout=API_TIMEOUT)
+        try:
+            r = subprocess.run(["glab"] + args, capture_output=True,
+                               text=True, input=stdin_text,
+                               timeout=API_TIMEOUT)
+            return r.returncode, r.stdout, r.stderr
+        except Exception as e:
+            return 1, "", str(e)
+
+    def _glab_api(self, path, method="GET", payload=None):
+        """glab api <path>. Returns (status, body) like _http."""
+        args = ["api", "--method", method, path]
+        if payload is not None:
+            args += ["--input", "-"]
+        rc, out, err = self._glab(
+            args, stdin_text=json.dumps(payload) if payload else None)
+        if rc != 0:
+            return None, (err or out).strip()[:200]
+        try:
+            return 200, json.loads(out)
+        except ValueError:
+            return 200, out
 
     def user(self):
         rc, out = self._api("/user")
@@ -368,6 +399,13 @@ class GitLabPlatform:
         return None
 
     def test(self):
+        if self.auth == "glab":
+            rc, _o, err = self._glab(["auth", "status"])
+            if rc != 0:
+                return False, ("glab not logged in - run 'glab auth login', "
+                               "or paste a token instead")
+            u = self.user() or "unknown"
+            return True, "glab CLI authenticated as %s" % u
         rc, out = self._api("/user")
         if isinstance(out, dict) and out.get("username"):
             return True, "token OK — user %s" % out["username"]
@@ -393,6 +431,22 @@ class GitLabPlatform:
                 break
             page += 1
         return repos
+
+    def git_env(self):
+        """environment for git subprocesses when auth=glab.
+
+        The token is read from `glab auth status -t` at call time by a tiny
+        helper, so it is never written into a remote URL (and so never into
+        a hub config file).
+        """
+        if self.auth != "glab":
+            return None
+        helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "glab_askpass.py")
+        env = dict(os.environ)
+        env["GIT_ASKPASS"] = helper
+        env["GITLAB_HOST"] = self.url
+        return env
 
     def _url_with_token(self, http_url):
         if self.cfg.get("protocol") == "ssh" and http_url:

@@ -1020,6 +1020,43 @@ def _pick_platform(stdscr, title):
     return _picked_platform.get("name")
 
 
+def _save_selection_file(stdscr):
+    """write the selected repos to a file and attach it as include_file.
+
+    Keeps a long selection out of config.json (and diffable), which is the
+    point of F4.
+    """
+    names = sorted(state["repo_sel"])
+    src_plat = state.get("repo_src") or ""
+    cfg = C.load_config()
+    default = os.path.join(C.CONFIG_DIR, "repos-%s.txt"
+                           % (src_plat or "selection"))
+    path = prompt_line(stdscr, " save to: ", default)
+    if not path:
+        return
+    path = os.path.expanduser(path)
+    try:
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        with open(path, "w") as f:
+            f.write("# repos synced by gitsync — one per line, # comments\n")
+            for n in names:
+                f.write(n + "\n")
+        os.chmod(path, 0o600)
+    except OSError as e:
+        flash("cannot write %s: %s" % (path, str(e)[:40]), 6)
+        return
+    routes = [r for r in C.routes(cfg) if r.get("source") == src_plat]
+    if not routes:
+        routes = C.routes(cfg)[:1]
+    for r in routes:
+        r["include_file"] = path
+        r.pop("include", None)
+    C.save_config(cfg)
+    _reload_routes()
+    flash("%d repos saved to %s (attached to %s)"
+          % (len(names), path, ", ".join(r.get("name") for r in routes)), 8)
+
+
 def repos_screen(stdscr, source=None):
     """browse a platform's repos, pick some, sync just those.
 
@@ -1087,8 +1124,8 @@ def repos_screen(stdscr, source=None):
                                                        len(items)))[:w - 1],
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
-                     " space=select  a=all  n=none  /=filter  S=all targets  "
-                     "T=one site  L=local only  B=back ")
+                     " space=select  a=all  n=none  /=filter  W=save to file  "
+                     "S=all targets  T=one site  L=local only  B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
         if ch == curses.KEY_MOUSE:
@@ -1135,6 +1172,13 @@ def repos_screen(stdscr, source=None):
         elif ch == ord("/"):
             query = prompt_line(stdscr, " filter: ")
             cur = top = 0
+        elif ch in (ord("w"), ord("W")):
+            # F4: save the selection to a file and attach it to the route(s)
+            # whose source is the platform being browsed
+            if not state["repo_sel"]:
+                flash("nothing selected - press space on a repo", 5)
+                continue
+            _save_selection_file(stdscr)
         elif ch in (ord("s"), ord("S"), ord("l"), ord("L"),
                     ord("t"), ord("T")):
             if not state["repo_sel"]:

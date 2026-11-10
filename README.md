@@ -96,6 +96,10 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 | **Copy your stars** | read one account's starred repos and star the same ones on your other accounts |
 | **Two-way (mesh)** | one route where every peer is source and target: edit on GitLab, it lands on GitHub, Forgejo and the local hub |
 | **Safe by default** | a new setup uses `mode: safe` (never deletes, never force-pushes) and `mesh_conflict: skip` (reports a disagreement instead of overwriting the older side) |
+| **Restore from the hub** | `gitsync restore --to gitlab` pushes every local mirror back out when the source host is gone |
+| **Pick repos up front** | the wizard lists your repos and takes a list or globs, instead of silently mirroring the whole account |
+| **Repo list in a file** | `routes edit NAME --from-file repos.txt`, or `W` in the repo browser, keeps a long selection out of `config.json` |
+| **`glab` auth** | GitLab can use the `glab` CLI instead of a token — and the token never lands in a git URL |
 | **Pause anything** | pause one target or a whole route from the TUI (`P`) or CLI — the timer keeps running the rest |
 | **Conflict-safe mesh** | a mesh can be told to *report* a disagreement instead of overwriting it (`mesh_conflict: skip`) |
 | **Dry run anywhere** | `D` in the TUI previews a whole run, or one route, without touching anything |
@@ -193,6 +197,11 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync install --cron` | use cron instead of systemd |
 | `gitsync ci` | run the same checks CI runs (syntax, smoke, 85 unit tests) |
 | `gitsync ci --install-hook` | add a `pre-push` hook so every push runs them first |
+| `gitsync restore --to gitlab` | **push the hub back out** — the source host is gone |
+| `gitsync restore --to backup --dry-run` | preview a restore (nothing is modified) |
+| `gitsync routes edit main --include 'Sea*'` | change a route's repo filters |
+| `gitsync routes edit main --from-file repos.txt` | take the include list from a file (one repo per line, `#` comments) |
+| `gitsync routes edit main --clear-filters` | back to "every repo" |
 | `gitsync doctor` | health check: tokens, routes, storage, scheduler |
 | `gitsync update` | pull the newest release and reinstall |
 | `gitsync watch --interval 60` | sync on a loop in the foreground (minimum 30s) |
@@ -318,6 +327,42 @@ is on every platform** and reports it, instead of picking a winner:
 
 Reconcile by hand, and the next run converges. `newest` (the default) is the
 original behaviour.
+
+---
+
+## If the source host disappears
+
+Every repo is mirrored into the local hub first, so the hub is a complete
+copy even when GitHub is not. `restore` pushes it back out:
+
+```bash
+gitsync restore --to gitlab              # every mirror, create repos as needed
+gitsync restore --to backup --dry-run    # preview, change nothing
+gitsync restore --to gitlab,forgejo --repos "app,docs"
+```
+
+- mirrors with **no refs** (an empty repo) are skipped with a log line, and
+  nothing is created for them
+- nothing is deleted on a target unless `mode: full` **and** `--prune`
+- missing repos are created private unless `--public`
+- exit code is non-zero if anything failed
+
+---
+
+## A repo list in a file
+
+`include` globs live in `config.json`, which is fine for a handful of repos
+and miserable for 200. `include_file` keeps the list in its own file (one
+name per line, `#` comments), so it stays diffable:
+
+```bash
+gitsync routes edit main --from-file ~/repos.txt
+```
+
+or from the TUI: repo browser (`E`) → tick the repos you want → `W` → pick a
+path. The selection is written and attached to the route(s) whose source is
+the platform you were browsing. A missing or empty file means "no filtering"
+— it never silently syncs nothing.
 
 ---
 
@@ -757,7 +802,7 @@ missing falls back to the default shown.
 | `url` | all but `local` | instance URL. Defaults per type (`https://github.com`, `https://gitlab.com`, `https://bitbucket.org`, `http://localhost:3000`) |
 | `token` | all but `local` | API token. **Empty on GitHub** means "use the `gh` CLI" |
 | `owner` | all but `local` | your username / workspace / namespace. Blank = auto-detected |
-| `auth` | github | `gh` (use the CLI) or `token`. Set automatically when no token is given |
+| `auth` | github, gitlab | `gh` (GitHub CLI) or `token`; `glab` (GitLab CLI) or `token`. Set automatically when no token is given. With `glab`/`gh`, git gets a `GIT_ASKPASS` helper instead of a token in the URL |
 | `affiliation` | github | which repos to list: `owner` (default) or `owner,organization_member`. **Org repos stay invisible until this is set**, even with the `read:org` scope |
 | `ns_id` | gitlab | target namespace id. Blank = your personal namespace (never a group, unless you set it) |
 | `protocol` | all but `local` | `http` (default) or `ssh`. SSH needs a key on the host |
@@ -779,6 +824,7 @@ missing falls back to the default shown.
 | `workers` / `mode` / `mesh_conflict` | per-route override of the global value |
 | `schedule` | per-route frequency; the timer fires at the finest one |
 | `include` / `exclude` | glob lists, e.g. `["Sea*"]` / `["tradex"]` |
+| `include_file` | path to a file of exact repo names (one per line, `#` comments) — replaces `include`. A missing file means "no filtering" |
 
 You can enable **several platforms of the same type** — two Forgejo servers,
 GitHub plus a self-hosted Gitea, each with its own token and route.

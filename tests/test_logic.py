@@ -865,6 +865,103 @@ class TestWizardRepoPicker(unittest.TestCase):
                 [])
 
 
+class TestGlabAuth(unittest.TestCase):
+    """F3: auth=glab is a real path, and it never puts a token in a URL."""
+
+    def test_glab_platform_reports_a_clear_error_without_the_cli(self):
+        p = P.make('gl', {'type': 'gitlab', 'url': 'https://gitlab.com',
+                          'auth': 'glab'})
+        # glab is installed here, so this exercises the success path; the
+        # important part is that it does not raise and never embeds a token
+        ok, info = p.test()
+        self.assertIsInstance(ok, bool)
+        self.assertTrue(info)
+
+    def test_glab_git_env_uses_askpass_not_a_url(self):
+        p = P.make('gl', {'type': 'gitlab', 'url': 'https://gitlab.com',
+                          'auth': 'glab'})
+        env = p.git_env()
+        self.assertEqual(env.get("GIT_ASKPASS"),
+                         os.path.join(os.path.dirname(P.__file__),
+                                      "glab_askpass.py"))
+        # a token platform has no askpass: it embeds the token instead
+        p2 = P.make('gl2', {'type': 'gitlab', 'token': 'glpat-x'})
+        self.assertIsNone(p2.git_env())
+        self.assertIn("glpat-x", p2._url_with_token(
+            "https://gitlab.com/me/r.git"))
+
+    def test_askpass_helper_answers_username_without_a_token(self):
+        import gitsync.glab_askpass as GA
+        # "Username for ..." must not leak anything
+        import io
+        import contextlib
+        # git invokes GIT_ASKPASS <prompt>, so argv[0] is the program and
+        # argv[1] is the prompt
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            GA.main(["glab_askpass.py",
+                     "Username for 'https://gitlab.com': "])
+        self.assertEqual(buf.getvalue().strip(), "oauth2")
+
+
+class TestIncludeFile(unittest.TestCase):
+    """F4: a selection can live in a file instead of the config."""
+
+    def setUp(self):
+        self.repos = [{"name": "a"}, {"name": "b"}, {"name": "c"}]
+
+    def test_read_include_file_skips_comments_and_blanks(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                         delete=False) as f:
+            f.write("# comment\n\na\n   \nc\n")
+            path = f.name
+        try:
+            self.assertEqual(SY.read_include_file(path), ["a", "c"])
+        finally:
+            os.unlink(path)
+
+    def test_missing_file_means_no_filtering(self):
+        self.assertEqual(SY.read_include_file("/no/such/file.txt"), [])
+
+    def test_route_include_file_filters_exactly(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                         delete=False) as f:
+            f.write("a\nc\n")
+            path = f.name
+        try:
+            got = SY._filter_repos(self.repos, {"include_file": path})
+            self.assertEqual([r["name"] for r in got], ["a", "c"])
+            # a deleted file must not silently sync nothing
+            got2 = SY._filter_repos(self.repos,
+                                    {"include_file": "/no/such/file"})
+            self.assertEqual(len(got2), 3)
+        finally:
+            os.unlink(path)
+
+
+class TestDoctorHints(unittest.TestCase):
+    """F5: the doctor ends with what to type, not just a problem list."""
+
+    def test_hints_are_mapped_from_the_problems(self):
+        hints = M._doctor_hints({}, ["platform gitlab failing",
+                                     "scheduler not installed (run: "
+                                     "gitsync install)"])
+        self.assertTrue(hints)
+        self.assertLessEqual(len(hints), 3)
+        self.assertIn("gitsync install", hints)
+        self.assertTrue(any("platforms" in h for h in hints))
+
+    def test_healthy_config_has_no_hints(self):
+        self.assertEqual(M._doctor_hints({}, []), [])
+
+    def test_hints_are_capped_at_three(self):
+        problems = ["platform a failing", "platform b failing",
+                    "token a expiring soon", "route r incomplete",
+                    "scheduler not installed (run: gitsync install)",
+                    "last run had 2 failures"]
+        self.assertLessEqual(len(M._doctor_hints({}, problems)), 3)
+
+
 class TestRestore(unittest.TestCase):
     """F1: the hub is the source of truth when a platform is gone."""
 

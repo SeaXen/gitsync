@@ -51,7 +51,11 @@ python3 -m gitsync routes remove dev
 python3 -m gitsync platforms remove devbak --force
 ```
 
-CI runs the syntax check plus a CLI smoke test on every push.
+CI runs `python3 -m gitsync ci` (python syntax, shell syntax, and a
+CLI smoke block that performs a real offline sync and asserts both
+push modes), plus `python3 -m unittest tests.test_logic` in all three
+workflows. A `pre-push` hook runs the same locally
+(`gitsync ci --install-hook`).
 
 ## Adding a platform
 

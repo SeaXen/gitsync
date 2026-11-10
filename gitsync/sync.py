@@ -40,11 +40,29 @@ def log(msg):
         print(line, flush=True)
         try:
             C.ensure_dirs()
+            _rotate_log()
             with open(C.LOG_FILE, "a") as f:
                 f.write(line + "\n")
             os.chmod(C.LOG_FILE, 0o600)
         except OSError:
             pass
+
+
+LOG_MAX_BYTES = 2 * 1024 * 1024      # 2 MB, one backup
+
+
+def _rotate_log():
+    """cap gitsync.log at 2 MB by renaming it to gitsync.log.1.
+
+    A sync runs every few hours forever; without this the log grows without
+    bound and `read_log_tail` pays for it on every TUI frame.
+    """
+    try:
+        if os.path.getsize(C.LOG_FILE) < LOG_MAX_BYTES:
+            return
+        os.replace(C.LOG_FILE, C.LOG_FILE + ".1")
+    except OSError:
+        pass
 
 
 def hub_rel(repo_id):
@@ -113,16 +131,17 @@ def sync_repo(repo, source, targets, mode, claimants=None, relax=False):
     if os.path.isdir(hub) and not mirror_is_valid(hub):
         log("  removing incomplete mirror for %s" % name)
         P.run(["rm", "-rf", hub])
+    genv = source.git_env() if hasattr(source, "git_env") else None
     if os.path.isdir(hub):
         P.run(["git", "remote", "set-url", "origin", src_url], cwd=hub)
         _secure_hub_config(hub)
         rc, _, err = P.run(["git", "remote", "update", "--prune"], cwd=hub,
-                            timeout=P.GIT_TIMEOUT)
+                            timeout=P.GIT_TIMEOUT, env=genv)
         if rc != 0:
             return "mirror-update-failed", _redact(err.strip())[:200], []
     else:
         rc, _, err = P.run(["git", "clone", "--mirror", src_url, hub],
-                            timeout=P.GIT_TIMEOUT)
+                            timeout=P.GIT_TIMEOUT, env=genv)
         if rc != 0:
             P.run(["rm", "-rf", hub])
             return "clone-failed", err.strip()[:200], []
@@ -197,7 +216,8 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
         cmd = push_args(mode, tplat.ptype, push_url, refspecs)
         if not cmd:
             return None
-        rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
+        tenv = tplat.git_env() if hasattr(tplat, "git_env") else None
+        rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT, env=tenv)
         if rc != 0 and _protection_error(err):
             # A protected branch refused the push. Turning on force-push
             # there is a lasting security change on the destination, so it
@@ -210,7 +230,8 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
             try:
                 for note in tplat.prepare_push(repo, push_url) or []:
                     log("    %s" % note)
-                rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT)
+                rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT,
+                                   env=tenv)
             except Exception as e:
                 log("    %s: prepare_push failed: %s"
                     % (tname, str(e)[:100]))
@@ -374,11 +395,12 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
 
     # 1. fetch every reachable peer into the private namespace
     for pname, (url, _refs) in reachable.items():
+        penv = plat.git_env() if hasattr(plat, "git_env") else None
         rc, _, err = P.run(
             ["git", "fetch", "--prune", "--force", "--no-tags", url,
              "+refs/heads/*:%s/%s/heads/*" % (MESH_NS, pname),
              "+refs/tags/*:%s/%s/tags/*" % (MESH_NS, pname)],
-            cwd=hub, timeout=P.GIT_TIMEOUT)
+            cwd=hub, timeout=P.GIT_TIMEOUT, env=penv)
         if rc != 0:
             errors.append("%s: fetch failed: %s" % (pname,
                                                     _short_error(err)))
@@ -519,10 +541,36 @@ def route_peers(cfg, route):
     return out
 
 
+def read_include_file(path):
+    """repo names from a file: one per line, '#' comments, blanks ignored.
+
+    Returns [] when the file is missing or empty — a route whose include
+    file was deleted must not silently sync nothing.
+    """
+    try:
+        with open(os.path.expanduser(path)) as f:
+            return [l.strip() for l in f
+                    if l.strip() and not l.strip().startswith("#")]
+    except OSError:
+        return []
+
+
 def _filter_repos(repos, route, only=None):
     """route-level include/exclude globs on repo names, plus an exact
-    'only' list (comma-separated names) for one-off selective syncs"""
+    'only' list (comma-separated names) for one-off selective syncs.
+
+    `include_file` is an alternative to `include`: a path whose lines are
+    exact repo names. Kept out of the config so a 500-repo selection stays
+    diffable in git.
+    """
     inc = route.get("include") or []
+    inc_file = route.get("include_file")
+    if inc_file:
+        names = read_include_file(inc_file)
+        if names:
+            wanted = {n.lower() for n in names}
+            repos = [r for r in repos if r["name"].lower() in wanted]
+        inc = []                     # the file replaces the inline globs
     exc = route.get("exclude") or []
     if inc:
         repos = [r for r in repos

@@ -4,6 +4,47 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-11-10
+
+The features the review deferred until the fixes were in, plus the P2 polish.
+
+### Added
+
+- **F1 `gitsync restore`** — when the source host is gone, no route can list
+  its repos, but the hub still holds every mirror. `restore --to PLATFORM`
+  pushes them back out: creates missing repos (private unless `--public`),
+  skips empty mirrors with a log line, deletes nothing unless `mode: full`
+  and `--prune`, exits non-zero on any failure. Verified live over the real
+  53-mirror hub.
+- **F2 pick repos in the wizard** — step 3 lists the source's repos (capped
+  at 50 with a count) and accepts Enter for all, a comma list, or globs,
+  stored as the route's include. No more silently mirroring the whole
+  account.
+- **F3 `glab` auth, for real** — `"auth": "glab"` on a GitLab platform uses
+  `glab api` for the API and a `GIT_ASKPASS` helper for git, so the token is
+  read at call time and never written into a remote URL, a hub config or a
+  log. If `glab` is missing or not logged in, `platforms test` says so.
+  Verified end-to-end against the live GitLab account.
+- **F4 `include_file`** — `gitsync routes edit NAME --from-file repos.txt`
+  (one repo per line, `#` comments), or `W` in the repo browser. A missing
+  file means "no filtering", never "sync nothing".
+- **F5 plain-language doctor** — ends with "what to type next": at most
+  three commands mapped from the problems actually found.
+- **F6 activity summary** — `gitsync status` gains hub size, mirror count,
+  last successful run, and next due route.
+- **P2** — log rotation at 2 MB (one backup), `platforms test` says
+  `disabled` instead of `FAIL` for a disabled platform, the mesh heuristic
+  in `routes add` prints "interpreted as a two-way (mesh) route",
+  `CONTRIBUTING.md` describes the real CI, `import json` moved to the top of
+  `sync.py`.
+
+### Changed
+
+- 100 unit tests (was 91).
+- README gains "If the source host disappears" and "A repo list in a file",
+  plus rows for every new command and key; `docs/OPTIONS.md` gains the repo
+  selection, `glab` and restore sections.
+
 ## [1.7.1] - 2026-11-10
 
 ### Documentation

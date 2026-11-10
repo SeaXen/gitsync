@@ -133,6 +133,33 @@ def cmd_status(args):
     print("settings: workers=%s mode=%s schedule=%s forks=%s"
           % (C.setting(cfg, "workers"), C.setting(cfg, "mode"),
              C.setting(cfg, "schedule"), C.setting(cfg, "include_forks")))
+    # F6: four lines of activity, no new analyzer - diskutil and the run
+    # records already compute all of it.
+    try:
+        from . import diskutil as D
+        ms = D.mirrors()
+        free, tot = D.fs_free(C.MIRROR_DIR)
+        print("hub      : %d mirrors, %s used%s"
+              % (len(ms), D.human(sum(m[2] for m in ms)),
+                 ", disk %s free" % D.human(free) if free else ""))
+    except Exception:
+        pass
+    recs = SYNC.last_records(1)
+    if recs:
+        r = recs[-1]
+        when = r.get("finished_at") or "?"
+        clean = (not (r.get("failed") or r.get("partial"))
+                 and (r.get("ok") or 0) > 0)
+        if clean:
+            print("last ok  : %s (%d repos, %ss)"
+                  % (when, r.get("ok", 0), r.get("elapsed_sec", "?")))
+        else:
+            # a 0-repo run is not a success - say what actually happened
+            print("last run : %s - %d ok, %d partial, %d failed of %d"
+                  % (when, r.get("ok", 0), r.get("partial", 0),
+                     r.get("failed", 0), r.get("repos", 0)))
+    else:
+        print("last ok  : never (run: gitsync sync)")
     print("scheduler: %s" % S.status())
     nxt = S.next_run()
     if nxt:
@@ -314,6 +341,11 @@ def _test_one(name, p):
     if not p:
         print("no such platform: %s" % name)
         return 2
+    if not p.get("enabled", True):
+        # a disabled platform is not a broken one - say so instead of FAIL
+        print("%-14s %-5s disabled (enable: gitsync platforms edit %s "
+              "--enable)" % (name, "off", name))
+        return 0
     try:
         ok, info = P.make(name, p).test()
     except Exception as e:
@@ -339,6 +371,9 @@ def cmd_routes(args):
         # without targets would do nothing, so it can only mean peers
         mesh = bool(getattr(args, "mesh", False)) or (
             len(args.rest) == 2 and "," in args.rest[1])
+        if mesh and not getattr(args, "mesh", False):
+            # say what the heuristic decided, instead of surprising people
+            print("interpreted as a two-way (mesh) route")
         if mesh and len(args.rest) == 2:
             # mesh form: NAME peer1,peer2,peer3
             peers = [t.strip() for t in args.rest[1].split(",") if t.strip()]
@@ -429,6 +464,48 @@ def cmd_routes(args):
                              ", ".join(sorted(want))))
         if cur:
             print("  still paused: %s" % ", ".join(sorted(cur)))
+        return 0
+
+    if action == "edit":
+        if not args.rest:
+            print("usage: gitsync routes edit NAME [--include a,b] "
+                  "[--exclude a,b] [--from-file repos.txt] [--clear-filters]")
+            return 2
+        name = args.rest[0]
+        route = next((r for r in cfg.get("routes", [])
+                      if r.get("name") == name), None)
+        if not route:
+            print("no such route: %s" % name)
+            return 2
+        changed = []
+        if args.from_file:
+            path = os.path.expanduser(args.from_file)
+            names = SYNC.read_include_file(path)
+            if not names:
+                print("no repo names in %s" % path)
+                return 2
+            route["include_file"] = path
+            route.pop("include", None)
+            changed.append("include_file=%s (%d repos)" % (path, len(names)))
+        if args.include is not None:
+            route["include"] = [p.strip() for p in args.include.split(",")
+                                if p.strip()]
+            route.pop("include_file", None)
+            changed.append("include")
+        if args.exclude is not None:
+            route["exclude"] = [p.strip() for p in args.exclude.split(",")
+                                if p.strip()]
+            changed.append("exclude")
+        if args.clear_filters:
+            route.pop("include", None)
+            route.pop("include_file", None)
+            route.pop("exclude", None)
+            changed.append("filters cleared")
+        if not changed:
+            print("nothing to change")
+            return 2
+        C.save_config(cfg)
+        print("%s: %s" % (name, ", ".join(changed)))
         return 0
 
     if action == "remove":
@@ -1099,7 +1176,51 @@ def cmd_doctor(args):
 
     print("\n" + ("ALL HEALTHY" if not problems
                   else "ISSUES: " + "; ".join(problems)))
+    # F5: what to type next, in plain language, chosen from what was found.
+    # At most three commands - a newbie should not be handed a manual.
+    hints = _doctor_hints(cfg, problems)
+    if hints:
+        print("\nwhat to type next:")
+        for h in hints[:3]:
+            print("  %s" % h)
     return 0 if not problems else 1
+
+
+def _doctor_hints(cfg, problems):
+    """at most three plain-language next steps, mapped from the problems"""
+    text = " ".join(problems).lower()
+    hints = []
+    if "no config" in text:
+        hints.append("gitsync setup")
+    if "platform" in text and "failing" in text:
+        names = [p.split()[1] for p in problems
+                 if p.startswith("platform ") and "failing" in p]
+        if names:
+            hints.append("gitsync platforms test %s   # see the exact error"
+                         % names[0])
+            hints.append("gitsync platforms edit %s   # fix url/token"
+                         % names[0])
+    if "token" in text:
+        hints.append("gitsync tokens   # which credential, and when it dies")
+    if "route" in text and "incomplete" in text:
+        hints.append("gitsync routes   # then: gitsync platforms add ...")
+    if "scheduler" in text:
+        hints.append("gitsync install")
+    if "last run" in text:
+        hints.append("gitsync records -n 1   # what failed")
+        hints.append("gitsync log -n 40      # the detail")
+    if "no routes" in text:
+        hints.append("gitsync routes add main github gitlab,backup")
+    if "orphan" in text:
+        hints.append("gitsync disk --orphans")
+    # de-duplicate, keep order, and never hand a newbie more than three
+    # things to type
+    seen, out = set(), []
+    for h in hints:
+        if h not in seen:
+            seen.add(h)
+            out.append(h)
+    return out[:3]
 
 
 def _doctor_fix():
@@ -1639,13 +1760,19 @@ def main(argv=None):
 
     sp = sub.add_parser("routes", help="list / add / remove sync routes")
     sp.add_argument("action", nargs="?",
-                    choices=["list", "add", "remove", "pause", "resume"],
+                    choices=["list", "add", "remove", "edit", "pause",
+                             "resume"],
                     default="list")
     sp.add_argument("rest", nargs="*",
                     help="add: NAME SOURCE t1,t2 | remove: NAME | "
-                         "pause/resume: NAME [TARGET...]")
+                         "edit: NAME | pause/resume: NAME [TARGET...]")
     sp.add_argument("--include", help="comma-separated globs to include")
     sp.add_argument("--exclude", help="comma-separated globs to skip")
+    sp.add_argument("--from-file", dest="from_file",
+                    help="read the include list from a file (one repo per "
+                         "line, # comments)")
+    sp.add_argument("--clear-filters", action="store_true",
+                    help="drop include/exclude/include_file")
     sp.add_argument("--mesh", action="store_true",
                     help="all-direction route: NAME --mesh p1,p2,p3")
     sp.add_argument("--schedule", choices=sorted(C.SCHEDULES),
