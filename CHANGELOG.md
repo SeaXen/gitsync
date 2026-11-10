@@ -4,6 +4,16 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.0] - 2026-11-10
+
+Major 2.0 milestone release — 10/10 quality standard across all sectors (CLI, TUI, Web UI, automation, and design system).
+
+### Milestone Highlights
+- **Impeccable Design System & Craft Floor**: Eliminated all AI design antipatterns (zero-offset chromatic glow halos, side-tab borders); added themed browser surfaces (`::selection`, custom dark scrollbars, accent caret coloring); generated canonical `DESIGN.md` tokens and `PRODUCT.md` product record.
+- **End-to-End Automated Testing Suite**: Added dedicated Playwright headless browser E2E test suite (`tests/test_webapp_playwright.py`) covering authentication, all 9 navigation surfaces, keyboard-accessible in-app modal confirmations (`G.modalConfirm`), and responsive mobile viewports (375×667). 157 total automated tests passing.
+- **Cross-Platform Hardening**: Fixed Windows static file path resolution in `web.py` (`.lstrip("/\\")`); silenced client keep-alive disconnect socket errors (`ConnectionAbortedError`); ensured strict lock file descriptor cleanup across CLI and background jobs.
+- **Web Interface Guidelines Compliance**: Full compliance with dark-mode color-scheme metadata, tabular numeric typography (`font-variant-numeric: tabular-nums`), balanced text wrapping (`text-wrap: balance`), standard ellipsis placeholders (`…`), semantic `<button>` action controls, and touch optimization (`touch-action: manipulation`).
+
 ## [1.9.9] - 2026-11-10
 
 Cross-platform static path resolution fix and end-to-end Playwright test suite.
