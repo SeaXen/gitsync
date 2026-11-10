@@ -54,26 +54,27 @@ def ask_secret(prompt):
     """
     tty = _tty()
     try:
-        if tty is None:
-            return ""
-        if tty is sys.stdin:
-            import getpass
+        import getpass
+        if tty is None or tty is sys.stdin:
             return getpass.getpass(prompt + " ").strip()
-        tty.write(prompt + " ")
-        tty.flush()
-        import termios
-        fd = tty.fileno()
-        old_attrs = termios.tcgetattr(fd)
         try:
-            new = termios.tcgetattr(fd)
-            new[3] = new[3] & ~termios.ECHO      # lflags
-            termios.tcsetattr(fd, termios.TCSADRAIN, new)
-            line = tty.readline()
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
-            tty.write("\n")
-            tty.flush()
-        return line.strip()
+            import termios
+            fd = tty.fileno()
+            old_attrs = termios.tcgetattr(fd)
+            try:
+                tty.write(prompt + " ")
+                tty.flush()
+                new = termios.tcgetattr(fd)
+                new[3] = new[3] & ~termios.ECHO      # lflags
+                termios.tcsetattr(fd, termios.TCSADRAIN, new)
+                line = tty.readline()
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old_attrs)
+                tty.write("\n")
+                tty.flush()
+            return line.strip()
+        except (ImportError, Exception):
+            return getpass.getpass(prompt + " ").strip()
     except Exception:
         return ""
     finally:
@@ -190,6 +191,24 @@ def run_wizard():
                 if p["auth"] == "token":
                     p["token"] = ask_secret(
                         "GitHub token (hidden; ghp_/github_pat_):")
+            elif ptype == "gitlab":
+                p["auth"] = "glab" if ask_yes(
+                        "Use the glab CLI? (No = use a personal access token)",
+                        False) else "token"
+                if p["auth"] == "token":
+                    while True:
+                        p["token"] = ask_secret("GitLab token (hidden; glpat-):")
+                        if p["token"]:
+                            break
+                        print("  a token is required for gitlab")
+                        if not ask_yes("Try again?", True):
+                            print("  skipping %s" % name)
+                            break
+                    if not p["token"]:
+                        cfg["platforms"].pop(name, None)
+                        continue
+                p["ns_id"] = ask("Target namespace id (blank = your "
+                                 "personal namespace)", "")
             else:
                 # a blank token is not a saved blank: every API call would
                 # fail with a confusing error. Re-prompt instead.
@@ -204,9 +223,6 @@ def run_wizard():
                 if not p["token"]:
                     cfg["platforms"].pop(name, None)
                     continue
-                if ptype == "gitlab":
-                    p["ns_id"] = ask("Target namespace id (blank = your "
-                                     "personal namespace)", "")
         cfg["platforms"][name] = p
 
     # ---- test connections ----

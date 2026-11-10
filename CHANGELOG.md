@@ -4,6 +4,30 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.7] - 2026-11-10
+
+Comprehensive 10/10 quality and hardening pass across all sectors.
+
+### Fixed — correctness & platforms
+- **Platform token URLs are percent-encoded**: `GitHubPlatform` and `GitLabPlatform` now properly quote tokens containing reserved characters (`@`, `:`, `/`) via `urllib.parse.quote()`, preventing malformed git push URLs.
+- **GitHub HTTP URLs handled cleanly**: Local or self-hosted GitHub Enterprise instances using `http://` URLs are cleanly parsed without mangled hosts.
+- **GitLab `glab` CLI option in wizard**: The setup wizard now allows selecting `glab` CLI authentication for GitLab instead of forcing manual personal access token entry.
+- **Fallback in `ask_secret`**: When `termios` is unavailable, `ask_secret` falls back cleanly to `getpass.getpass()`, preventing crashes and infinite retry loops.
+
+### Fixed — install & scheduling
+- **Webhook service installation for unprivileged users**: `install_webhooks()` and `uninstall_webhooks()` now default to unprivileged systemd user units (`~/.config/systemd/user/`) and support `--system`, matching `install_systemd_web()` and eliminating non-root `PermissionError` crashes.
+- **Removed hardcoded root `%h` in system units**: Webhook service template no longer sets `Environment=HOME=%h` on system units.
+- **`webhooks_active()` checks both scopes**: Correctly probes user-level systemd units as well as system-level services.
+
+### Fixed — TUI & anti-slop architecture
+- **Unified progress parsing**: Eliminated duplicate `_REPO_RE` regex in `gitsync/tui.py`; TUI now imports and reuses `sync.parse_progress_line()`.
+- **Deduplicated `_app_dir()`**: Replaced redundant local implementations across `tui.py`, `web.py`, and `webhooks.py` with `config.APP_DIR`.
+- **Refined TUI log coloring**: Log level detection uses word-boundary matching instead of naive substring containment, preventing false positive colorings on repository or branch names.
+- **Curses & POSIX graceful fallbacks**: Safe fallbacks allow module imports, testing, and informative messaging on environments where `curses` or `fcntl` are not installed.
+
+### Fixed — Web UI LAN access
+- **DNS rebinding guard supports LAN & mDNS**: When bound to `0.0.0.0`, `web.py` host validation allows `.local`, `.lan`, `.home.arpa`, and single-label local hostnames.
+
 ## [1.9.6] - 2026-11-10
 
 Web UI review pass (a fleet of correctness, security, architecture,

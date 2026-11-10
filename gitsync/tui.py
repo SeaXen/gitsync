@@ -7,7 +7,37 @@ Keys:  S sync now | E repos (browse + selective sync) | / search |
        N notify | W wizard | Q quit
 """
 
-import curses
+try:
+    import curses
+except ImportError:
+    curses = None
+
+if curses is None:
+    class _CursesFallback:
+        COLOR_BLACK = 0
+        COLOR_RED = 1
+        COLOR_GREEN = 2
+        COLOR_YELLOW = 3
+        COLOR_BLUE = 4
+        COLOR_MAGENTA = 5
+        COLOR_CYAN = 6
+        COLOR_WHITE = 7
+        KEY_DOWN = 258
+        KEY_UP = 259
+        KEY_LEFT = 260
+        KEY_RIGHT = 261
+        KEY_HOME = 262
+        KEY_END = 358
+        KEY_NPAGE = 338
+        KEY_PPAGE = 339
+        KEY_MOUSE = 409
+        A_BOLD = 1
+        A_DIM = 2
+        A_REVERSE = 4
+        class error(Exception):
+            pass
+    curses = _CursesFallback()
+
 import json
 import os
 import re
@@ -256,27 +286,24 @@ def run_sync(dry_run=False):
     threading.Thread(target=worker, daemon=True).start()
 
 
-_REPO_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]\s+(\S+)\s+(\S+)")
-
-
 def sync_progress():
     """(done, total, current_repo) read from the child sync's own output.
 
     The sync runs in a subprocess, so SYNC.progress in *this* process is
     always empty — the bar used to show "starting..." forever. The child
-    prints "[12/54] OK   repo -> targets", which is just as good a feed.
+    prints "[12/54] OK   repo -> targets", which is parsed via SYNC.parse_progress_line.
     """
     done = total = 0
     current = ""
     for line in state.get("sync_lines") or []:
-        m = _REPO_RE.search(line)
-        if not m:
+        parsed = SYNC.parse_progress_line(line)
+        if not parsed:
             continue
-        d, t = int(m.group(1)), int(m.group(2))
+        d, t, _status, repo = parsed
         if t:
             total = t
         done = max(done, d)
-        current = m.group(4)
+        current = repo
     return done, total, current
 
 
@@ -291,7 +318,7 @@ def _merged_refs(lines):
 
 
 def _app_dir():
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return C.APP_DIR
 
 
 # ---------------------------------------------------------------- draw
@@ -2502,9 +2529,9 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         avail = max(0, h - row - 1)
         for i, line in enumerate(lines[-avail:][:avail] if avail else []):
             attr = 0
-            if "FAIL" in line or "failed" in line.lower():
+            if re.search(r"\b(FAIL|failed|error)\b", line, re.I):
                 attr = R
-            elif " OK " in line or "done" in line:
+            elif " OK " in line or re.search(r"\b(success|finished)\b", line, re.I):
                 attr = G
             safe_add(stdscr, row + i, 0, line[:w - 1], attr)
         return
@@ -2594,9 +2621,9 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
     log_rows = []
     for line in lines[-(h - top3 - 3):][:h - top3 - 3]:
         attr = 0
-        if "FAIL" in line or "failed" in line.lower():
+        if re.search(r"\b(FAIL|failed|error)\b", line, re.I):
             attr = R
-        elif " OK " in line or "done" in line:
+        elif " OK " in line or re.search(r"\b(success|finished)\b", line, re.I):
             attr = G
         elif "===" in line:
             attr = curses.A_BOLD
@@ -2659,6 +2686,11 @@ def snapshot():
 
 def main():
     if not sys.stdout.isatty():
+        snapshot()
+        return
+    if not hasattr(curses, "wrapper"):
+        print("curses is required for the interactive terminal UI.")
+        print("(On Windows: run 'pip install windows-curses', or use the web dashboard: 'gitsync web')")
         snapshot()
         return
     try:

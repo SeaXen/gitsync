@@ -945,15 +945,19 @@ def cmd_disk(args):
 
     if args.gc:
         # a gc rewrites the same objects a sync is pushing: take the lock
-        import fcntl
+        try:
+            import fcntl
+        except ImportError:
+            fcntl = None
         _lock = os.path.join(C.DATA_DIR, "sync.lock")
         C.ensure_dirs()
         _fh = open(_lock, "w")
-        try:
-            fcntl.flock(_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            print("a sync is running - not gc-ing")
-            return 2
+        if fcntl:
+            try:
+                fcntl.flock(_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                print("a sync is running - not gc-ing")
+                return 2
         older = args.older_than
         todo = ms
         if older:
@@ -1003,20 +1007,22 @@ def cmd_webhooks(args):
         return 2
 
     if args.uninstall:
-        ok = S.uninstall_webhooks()
+        ok = S.uninstall_webhooks(system=getattr(args, "system", False))
         print("webhook service removed" if ok else
               "webhook service not installed")
         return 0
 
     if args.install:
-        ok = S.install_webhooks(port=args.port, bind=args.bind)
+        ok = S.install_webhooks(port=args.port, bind=args.bind,
+                                system=getattr(args, "system", False))
         if not ok:
-            print("install failed (needs root + systemd)")
+            print("install failed (needs systemd)")
             return 1
         print("webhook receiver installed and started")
         print("  port : %d" % args.port)
         print("  bind : %s" % args.bind)
-        print("  log  : journalctl -u gitsync-webhooks -f")
+        log_flag = "" if getattr(args, "system", False) else "--user "
+        print("  log  : journalctl %s-u gitsync-webhooks -f" % log_flag)
         print("\nconfigure each platform to POST to:")
         print("  http://<this-box>:%d/hook/<platform-name>" % args.port)
         print("\nset the shared secret first if you have not:")
@@ -1312,17 +1318,21 @@ def _doctor_fix():
     # removing the file.
     lock = os.path.join(C.DATA_DIR, "sync.lock")
     if os.path.exists(lock):
-        import fcntl
         try:
-            fh = open(lock, "w")
+            import fcntl
+        except ImportError:
+            fcntl = None
+        if fcntl:
             try:
-                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(fh, fcntl.LOCK_UN)
-                fixed.append("sync lock was stale (no live sync)")
+                fh = open(lock, "w")
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                    fixed.append("sync lock was stale (no live sync)")
+                except OSError:
+                    fixed.append("a sync is running - lock left alone")
             except OSError:
-                fixed.append("a sync is running - lock left alone")
-        except OSError:
-            pass
+                pass
     return fixed
 
 
@@ -1916,6 +1926,8 @@ def main(argv=None):
                     help="install + start a systemd service")
     sp.add_argument("--uninstall", action="store_true",
                     help="remove the systemd service")
+    sp.add_argument("--system", action="store_true",
+                    help="install as a root system unit instead of a user unit")
     sp.add_argument("--status", action="store_true",
                     help="is the receiver running?")
     sp.add_argument("--port", type=int, default=WH_PORT,

@@ -178,7 +178,7 @@ def _run_sync(platform, repo, routes):
         cmd = [sys.executable, "-m", "gitsync", "sync",
                "--route", r.get("name"), "--repos", repo, "--quiet"]
         try:
-            subprocess.Popen(cmd, env=env, cwd=_app_dir(),
+            subprocess.Popen(cmd, env=env, cwd=C.APP_DIR,
                              start_new_session=True,
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
@@ -188,7 +188,7 @@ def _run_sync(platform, repo, routes):
 
 
 def _app_dir():
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return C.APP_DIR
 
 
 # ---------------------------------------------------------------- handler

@@ -31,7 +31,7 @@ def dir_size(path):
                         if e.is_dir(follow_symlinks=False):
                             stack.append(e.path)
                         else:
-                            total += st.st_blocks * 512
+                            total += (getattr(st, "st_blocks", 0) * 512) if hasattr(st, "st_blocks") else getattr(st, "st_size", 0)
                     except OSError:
                         pass
         except OSError:
@@ -64,7 +64,7 @@ def mirrors():
             if not entry.endswith(".git"):
                 continue
             full = os.path.join(dirpath, entry)
-            rel = os.path.relpath(full, root)[:-4]      # type/id or name
+            rel = os.path.relpath(full, root)[:-4].replace("\\", "/")      # type/id or name
             try:
                 mtime = os.path.getmtime(full)
             except OSError:

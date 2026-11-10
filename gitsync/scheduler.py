@@ -18,7 +18,6 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-Environment=HOME=%h
 Environment=GH_CONFIG_DIR=%h/.config/gh
 Environment=XDG_CONFIG_HOME=%h/.config
 ExecStart={gitsync} webhooks --serve --port {port} --bind {bind}
@@ -28,7 +27,7 @@ StandardOutput=journal
 StandardError=journal
 
 [Install]
-WantedBy=multi-user.target
+WantedBy={wantedby}
 """
 
 SERVICE_TEMPLATE = """[Unit]
@@ -237,40 +236,62 @@ def install_cron(schedule_key=None):
 
 
 
-def install_webhooks(port=8791, bind="127.0.0.1"):
+def install_webhooks(port=8791, bind="127.0.0.1", system=False):
     """write + enable the webhook receiver service"""
     if not have_systemd():
         return False
-    path = os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE)
-    with open(path, "w") as f:
-        f.write(WEBHOOK_TEMPLATE.format(gitsync=gitsync_bin(), port=port,
-                                        bind=bind))
-    _sh(["systemctl", "daemon-reload"])
-    _sh(["systemctl", "enable", "--now", WEBHOOK_SERVICE])
-    return True
-
-
-def uninstall_webhooks():
-    if not os.path.exists(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE)):
-        return False
-    _sh(["systemctl", "disable", "--now", WEBHOOK_SERVICE])
+    wantedby = "multi-user.target" if system else "default.target"
+    text = WEBHOOK_TEMPLATE.format(gitsync=gitsync_bin(), port=port,
+                                    bind=bind, wantedby=wantedby)
+    if system:
+        with open(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE), "w") as f:
+            f.write(text)
+        _sh(["systemctl", "daemon-reload"])
+        _sh(["systemctl", "enable", "--now", WEBHOOK_SERVICE])
+        return True
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
+                            "user")
     try:
-        os.unlink(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE))
+        os.makedirs(unit_dir, exist_ok=True)
+        with open(os.path.join(unit_dir, WEBHOOK_SERVICE), "w") as f:
+            f.write(text)
+    except OSError:
+        return False
+    _sh(["systemctl", "--user", "daemon-reload"])
+    ok = _sh(["systemctl", "--user", "enable", "--now", WEBHOOK_SERVICE])
+    return ok.returncode == 0
+
+
+def uninstall_webhooks(system=False):
+    if system:
+        if not os.path.exists(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE)):
+            return False
+        _sh(["systemctl", "disable", "--now", WEBHOOK_SERVICE])
+        try:
+            os.unlink(os.path.join(SYSTEMD_DIR, WEBHOOK_SERVICE))
+        except OSError:
+            pass
+        _sh(["systemctl", "daemon-reload"])
+        return True
+    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
+                            "user")
+    existed = os.path.exists(os.path.join(unit_dir, WEBHOOK_SERVICE))
+    _sh(["systemctl", "--user", "disable", "--now", WEBHOOK_SERVICE])
+    try:
+        os.unlink(os.path.join(unit_dir, WEBHOOK_SERVICE))
     except OSError:
         pass
-    _sh(["systemctl", "daemon-reload"])
-    return True
+    _sh(["systemctl", "--user", "daemon-reload"])
+    return existed
 
 
 def webhooks_active():
-    """is the webhook receiver service running?
-
-    _sh() returns a CompletedProcess (it is also used where only the return
-    code matters), so read .returncode/.stdout rather than unpacking it —
-    the old tuple unpack raised "cannot unpack non-iterable
-    CompletedProcess" the moment anything asked.
-    """
+    """is the webhook receiver service running? Checks user unit then system."""
     try:
+        r = _sh(["systemctl", "--user", "is-active", WEBHOOK_SERVICE])
+        if ((r.stdout or "").strip() == "active"
+                and getattr(r, "returncode", 1) == 0):
+            return True
         r = _sh(["systemctl", "is-active", WEBHOOK_SERVICE])
         return ((r.stdout or "").strip() == "active"
                 and getattr(r, "returncode", 1) == 0)

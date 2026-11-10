@@ -40,7 +40,10 @@ def parse_progress_line(line):
 def engine_busy():
     """is a sync (this process, the timer, or the webhook receiver) holding
     the engine lock? Read-only probe; never blocks."""
-    import fcntl
+    try:
+        import fcntl
+    except ImportError:
+        return False
     path = os.path.join(C.DATA_DIR, SYNC_LOCK)
     try:
         fh = open(path, "a+")
@@ -850,17 +853,21 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
     """
     global _start
     # one run at a time — the timer and manual runs must never overlap
-    import fcntl
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
     C.ensure_dirs()
     lockf = open(os.path.join(C.DATA_DIR, "sync.lock"), "w")
-    try:
-        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        log("another gitsync run is already active — exiting")
-        return {"repos": 0, "ok": 0, "partial": 0, "failed": 0,
-                "failures": [], "elapsed_sec": 0,
-                "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "routes": 0, "skipped": "locked"}
+    if fcntl:
+        try:
+            fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            log("another gitsync run is already active — exiting")
+            return {"repos": 0, "ok": 0, "partial": 0, "failed": 0,
+                    "failures": [], "elapsed_sec": 0,
+                    "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "routes": 0, "skipped": "locked"}
 
     _start = time.time()
     reset_progress()

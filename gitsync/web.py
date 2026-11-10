@@ -471,7 +471,7 @@ def _engine_sync_busy():
 
 
 def _app_dir():
-    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    return C.APP_DIR
 
 
 def _is_loopback(bind):
@@ -869,6 +869,11 @@ def make_handler():
                 ip = ipaddress.ip_address(h)
                 return ip.is_loopback or ip.is_private
             except ValueError:
+                if self.server.bind_host in ("0.0.0.0", "::"):
+                    if h.endswith((".local", ".lan", ".home.arpa", ".internal")):
+                        return True
+                    if "." not in h and _NAME_RE.match(h):
+                        return True
                 return False
 
         def _guard(self, method):
@@ -893,7 +898,11 @@ def make_handler():
                         if not (ip.is_loopback or ip.is_private):
                             return 403, "bad Origin"
                     except ValueError:
-                        if oh not in ("localhost", self.server.bind_host) \
+                        if self.server.bind_host in ("0.0.0.0", "::") and (
+                                oh.endswith((".local", ".lan", ".home.arpa", ".internal"))
+                                or ("." not in oh and _NAME_RE.match(oh))):
+                            pass
+                        elif oh not in ("localhost", self.server.bind_host) \
                                 and oh not in self.server.extra_hosts:
                             return 403, "bad Origin"
             return None

@@ -185,11 +185,12 @@ class GitHubPlatform:
     def _clone_url(self, full_name):
         if self.cfg.get("protocol") == "ssh":
             return ssh_url(self.url, *full_name.split("/", 1))
+        scheme = "https" if self.url.startswith("https") else "http"
+        host = self.url.replace("https://", "").replace("http://", "").rstrip("/")
         if self.token:
-            return "https://x-access-token:%s@%s/%s.git" % (
-                self.token, self.url.replace("https://", ""), full_name)
-        return "https://%s/%s.git" % (self.url.replace("https://", ""),
-                                      full_name)
+            return "%s://x-access-token:%s@%s/%s.git" % (
+                scheme, urllib.parse.quote(self.token, safe=""), host, full_name)
+        return "%s://%s/%s.git" % (scheme, host, full_name)
 
     def list_repos(self):
         """every repo this account can see, paginated to the end.
@@ -459,7 +460,8 @@ class GitLabPlatform:
                 path = path[:-4]
             return ssh_url(self.url, *path.rsplit("/", 1))
         if self.token and http_url:
-            return http_url.replace("://", "://oauth2:%s@" % self.token, 1)
+            return http_url.replace("://", "://oauth2:%s@"
+                                    % urllib.parse.quote(self.token, safe=""), 1)
         return http_url
 
     def repo_url(self, repo):

@@ -8,7 +8,10 @@ These used to live as a flat assertion blob duplicated four times
 drifted. One file now; `cmd_ci` and all three workflows call it.
 """
 
-import curses
+try:
+    import curses
+except ImportError:
+    from gitsync.tui import curses
 import json
 import os
 import tempfile
@@ -1523,8 +1526,9 @@ class TestWeb(unittest.TestCase):
                 C.save_config({"platforms": {}, "routes": [], "settings": {}})
                 self.assertTrue(os.path.exists(C.CONFIG_FILE))
                 self.assertFalse(os.path.exists(C.CONFIG_FILE + ".tmp"))
-                self.assertEqual(oct(os.stat(C.CONFIG_FILE).st_mode & 0o777),
-                                 "0o600")
+                if os.name != "nt":
+                    self.assertEqual(oct(os.stat(C.CONFIG_FILE).st_mode & 0o777),
+                                     "0o600")
             finally:
                 C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
 
@@ -1537,7 +1541,10 @@ class TestWeb(unittest.TestCase):
         self.assertIsNone(SY.parse_progress_line(""))
 
     def test_engine_sync_busy_detects_a_held_lock(self):
-        import fcntl
+        try:
+            import fcntl
+        except ImportError:
+            self.skipTest("fcntl is not available on this platform")
         with tempfile.TemporaryDirectory() as td:
             old = C.DATA_DIR
             C.DATA_DIR = td
@@ -1565,8 +1572,9 @@ class TestWeb(unittest.TestCase):
                 t2, gen2 = W.get_web_token()
                 self.assertEqual(t1, t2)                 # reused, not regenerated
                 self.assertFalse(gen2)
-                self.assertEqual(oct(os.stat(W._token_path()).st_mode & 0o777),
-                                 "0o600")
+                if os.name != "nt":
+                    self.assertEqual(oct(os.stat(W._token_path()).st_mode & 0o777),
+                                     "0o600")
             finally:
                 C.CONFIG_DIR = old
                 if saved_env is not None:
@@ -1740,6 +1748,50 @@ class TestWebHttp(unittest.TestCase):
                               "Content-Length": str(len(big))})
         r = conn.getresponse(); r.read(); conn.close()
         self.assertEqual(r.status, 413)
+
+
+class TestTenOutOfTenFixes(unittest.TestCase):
+    def test_github_token_is_url_quoted(self):
+        plat = P.make("gh", {"type": "github", "url": "https://github.com",
+                             "token": "tok@en:123/x", "auth": "token"})
+        url = plat._clone_url("user/repo")
+        self.assertIn("tok%40en%3A123%2Fx", url)
+        self.assertNotIn("tok@en:123/x", url)
+        self.assertTrue(url.startswith("https://x-access-token:"))
+
+    def test_github_http_url_handled_cleanly(self):
+        plat = P.make("gh", {"type": "github", "url": "http://gh.internal.lan",
+                             "token": "secret", "auth": "token"})
+        url = plat._clone_url("user/repo")
+        self.assertTrue(url.startswith("http://x-access-token:secret@gh.internal.lan/user/repo.git"))
+
+    def test_gitlab_token_is_url_quoted(self):
+        plat = P.make("gl", {"type": "gitlab", "url": "https://gitlab.com",
+                             "token": "glpat-tok@en#123"})
+        url = plat._url_with_token("https://gitlab.com/group/repo.git")
+        self.assertIn("glpat-tok%40en%23123", url)
+        self.assertNotIn("tok@en#123", url)
+
+    def test_tui_sync_progress_reuses_engine_parser(self):
+        saved = list(tui.state.get("sync_lines") or [])
+        try:
+            tui.state["sync_lines"] = [
+                "=== route 'main' ===",
+                "  [1/10] OK   myrepo -> gitlab",
+                "  [2/10] FAIL otherrepo -> gitlab",
+            ]
+            done, total, cur = tui.sync_progress()
+            self.assertEqual((done, total, cur), (2, 10, "otherrepo"))
+        finally:
+            tui.state["sync_lines"] = saved
+
+    def test_app_dir_in_config(self):
+        self.assertTrue(os.path.isdir(C.APP_DIR))
+        self.assertTrue(os.path.isfile(os.path.join(C.APP_DIR, "gitsync", "__init__.py")))
+
+    def test_webhook_template_user_wantedby(self):
+        self.assertIn("WantedBy={wantedby}", S.WEBHOOK_TEMPLATE)
+        self.assertNotIn("Environment=HOME=%h", S.WEBHOOK_TEMPLATE)
 
 
 if __name__ == '__main__':

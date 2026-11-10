@@ -13,6 +13,7 @@ from . import __version__
 
 APP = "gitsync"
 VERSION = __version__      # one source of truth
+APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 CONFIG_DIR = os.environ.get(
     "GITSYNC_CONFIG_DIR",
@@ -165,22 +166,27 @@ def update(fn):
     clobber each other's in-memory copy). fn(cfg) mutates cfg in place and may
     return a value, which update() passes back.
     """
-    import fcntl
+    try:
+        import fcntl
+    except ImportError:
+        fcntl = None
     ensure_dirs()
     lock_path = os.path.join(DATA_DIR, "config.lock")
     with _save_lock:
         fh = open(lock_path, "a+")
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+            if fcntl:
+                fcntl.flock(fh, fcntl.LOCK_EX)
             cfg = load_config()
             result = fn(cfg)
             save_config(cfg)
             return result
         finally:
-            try:
-                fcntl.flock(fh, fcntl.LOCK_UN)
-            except OSError:
-                pass
+            if fcntl:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                except OSError:
+                    pass
             try:
                 fh.close()
             except OSError:
