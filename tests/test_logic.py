@@ -1349,15 +1349,18 @@ class TestWeb(unittest.TestCase):
                 C.CONFIG_FILE = old
 
     def test_public_record_redacts_failure_errors(self):
-        with W.REDACTOR._lock:
-            W.REDACTOR._secrets = {"TOPSECRET"}
+        r = W._redactor()
+        with r._lock:
+            saved = set(r._secrets)
+            r._secrets = {"TOPSECRET"}
         try:
             rec = {"finished_at": "t", "ok": 1,
                    "failures": [{"route": "r", "repo": "x",
                                  "error": "failed TOPSECRET"}]}
             self.assertNotIn("TOPSECRET", json.dumps(W._public_record(rec)))
         finally:
-            W.REDACTOR.reload()
+            with r._lock:
+                r._secrets = saved
 
     def test_tool_argv_builds_the_right_command(self):
         self.assertEqual(W._tool_argv("compare", {}), (["compare"], False))
@@ -1366,7 +1369,11 @@ class TestWeb(unittest.TestCase):
         self.assertEqual(W._tool_argv("fix", {"route": "main"}),
                          (["fix", "--route", "main"], True))
         self.assertEqual(W._tool_argv("doctor", {"fix": True}),
-                         (["doctor", "--fix"], False))
+                         (["doctor", "--fix"], True))
+        # the Tools page's "doctorfix" card id is accepted as an alias, so the
+        # frontend contract can never silently drift again
+        self.assertEqual(W._tool_argv("doctorfix", {}),
+                         (["doctor", "--fix"], True))
         self.assertEqual(W._tool_argv("restore", {"to": "backup",
                                                   "dry_run": True}),
                          (["restore", "--to", "backup", "--dry-run"], True))
@@ -1497,13 +1504,15 @@ class TestWeb(unittest.TestCase):
 
     def test_login_throttle_locks_after_failures(self):
         t = W._Throttle(max_fails=3, window=120)
-        self.assertFalse(t.locked())
-        t.fail(); t.fail()
-        self.assertFalse(t.locked())
-        t.fail()
-        self.assertTrue(t.locked())
-        t.reset()
-        self.assertFalse(t.locked())
+        self.assertFalse(t.locked("1.2.3.4|alice"))
+        t.fail("1.2.3.4|alice"); t.fail("1.2.3.4|alice")
+        self.assertFalse(t.locked("1.2.3.4|alice"))
+        t.fail("1.2.3.4|alice")
+        self.assertTrue(t.locked("1.2.3.4|alice"))
+        # a different client/account is independent
+        self.assertFalse(t.locked("5.6.7.8|alice"))
+        t.reset("1.2.3.4|alice")
+        self.assertFalse(t.locked("1.2.3.4|alice"))
 
     def test_config_write_is_atomic_and_0600(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1518,6 +1527,219 @@ class TestWeb(unittest.TestCase):
                                  "0o600")
             finally:
                 C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+
+
+    def test_parse_progress_line(self):
+        self.assertEqual(
+            SY.parse_progress_line("  [12/54] OK   repo -> a,b"),
+            (12, 54, "OK", "repo"))
+        self.assertIsNone(SY.parse_progress_line("=== route 'x' ==="))
+        self.assertIsNone(SY.parse_progress_line(""))
+
+    def test_engine_sync_busy_detects_a_held_lock(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as td:
+            old = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                self.assertFalse(SY.engine_busy())
+                fh = open(os.path.join(td, "sync.lock"), "a+")
+                fcntl.flock(fh, fcntl.LOCK_EX)
+                try:
+                    self.assertTrue(SY.engine_busy())    # locked case
+                finally:
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                    fh.close()
+                self.assertFalse(SY.engine_busy())
+            finally:
+                C.DATA_DIR = old
+
+    def test_web_token_is_reused_and_0600(self):
+        with tempfile.TemporaryDirectory() as td:
+            old = C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            saved_env = os.environ.pop("GITSYNC_WEB_TOKEN", None)
+            try:
+                t1, gen1 = W.get_web_token()
+                self.assertTrue(gen1)
+                t2, gen2 = W.get_web_token()
+                self.assertEqual(t1, t2)                 # reused, not regenerated
+                self.assertFalse(gen2)
+                self.assertEqual(oct(os.stat(W._token_path()).st_mode & 0o777),
+                                 "0o600")
+            finally:
+                C.CONFIG_DIR = old
+                if saved_env is not None:
+                    os.environ["GITSYNC_WEB_TOKEN"] = saved_env
+
+    def test_public_settings_never_leaks_notify_secrets(self):
+        cfg = {"settings": {"notify": {
+            "discord_webhook": "https://discord.com/api/webhooks/SECRETXYZ",
+            "telegram_token": "BOTTOKEN123", "telegram_chat_id": "1",
+            "on": "failure"}}}
+        out = W._public_settings(cfg)
+        blob = json.dumps(out)
+        self.assertNotIn("SECRETXYZ", blob)
+        self.assertNotIn("BOTTOKEN123", blob)
+        self.assertTrue(out["notify"]["discord_set"])
+        self.assertTrue(out["notify"]["telegram_set"])
+
+    def test_apply_setting_rejects_a_bad_choice(self):
+        st = {}
+        with self.assertRaises(W._Http) as cm:
+            W._apply_setting(st, "mode", {"mode": "nonsense"}, str,
+                             ["safe", "full"])
+        self.assertEqual(cm.exception.code, 400)
+        W._apply_setting(st, "mode", {"mode": "safe"}, str, ["safe", "full"])
+        self.assertEqual(st["mode"], "safe")
+
+    def test_resolve_port_survives_a_corrupt_saved_value(self):
+        bind, port = W.resolve_bind_port(
+            None, None, {"settings": {"web": {"port": "abc"}}})
+        self.assertEqual(port, W.DEFAULT_PORT)
+
+    def test_every_tools_page_kind_maps_to_a_backend_tool(self):
+        # regression guard: the Tools page's card ids must all be accepted by
+        # _tool_argv (this is the class of bug that made "doctorfix" dead)
+        import re as _re
+        src = open(os.path.join(os.path.dirname(W.__file__), "webui", "pages",
+                                "tools.js")).read()
+        ids = _re.findall(r'toolCard\("(\w+)"', src)
+        self.assertTrue(ids)
+        args = {"restore": {"to": "dst"}, "mirror": {"repos": "hello"}}
+        for kind in ids:
+            argv, _mut = W._tool_argv(kind, args.get(kind, {}))
+            self.assertIn(argv[0], ("compare", "doctor", "fix", "tokens",
+                                    "disk", "restore", "mirror"), kind)
+
+
+class TestWebHttp(unittest.TestCase):
+    """the HTTP/auth surface is the new exit path for platform tokens, so it
+    is exercised against a real server (the pattern TestHttpErrorHeaders
+    already uses)."""
+
+    def setUp(self):
+        import shutil
+        import threading
+        self.td = tempfile.mkdtemp()
+        cfgdir = os.path.join(self.td, "cfg")
+        datadir = os.path.join(self.td, "data")
+        for d in (cfgdir, datadir, os.path.join(self.td, "src"),
+                  os.path.join(self.td, "dst")):
+            os.makedirs(d)
+        with open(os.path.join(cfgdir, "config.json"), "w") as f:
+            json.dump({"platforms": {
+                "src": {"type": "local", "enabled": True,
+                        "path": os.path.join(self.td, "src")},
+                "dst": {"type": "local", "enabled": True,
+                        "path": os.path.join(self.td, "dst")}},
+                "routes": [{"name": "main", "source": "src",
+                            "targets": ["dst"]}],
+                "settings": {}}, f)
+        self._old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR,
+                     C.LOG_FILE)
+        C.CONFIG_DIR = cfgdir
+        C.CONFIG_FILE = os.path.join(cfgdir, "config.json")
+        C.DATA_DIR = datadir
+        C.MIRROR_DIR = os.path.join(datadir, "mirrors")
+        C.LOG_FILE = os.path.join(datadir, "gitsync.log")
+        self.token = "test-token-abcdef123456"
+        self.srv = W._Server(("127.0.0.1", 0), W.make_handler(), self.token,
+                             "127.0.0.1", set())
+        self.port = self.srv.port
+        self._thread = threading.Thread(target=self.srv.serve_forever,
+                                        daemon=True)
+        self._thread.start()
+
+    def tearDown(self):
+        import shutil
+        self.srv.shutdown()
+        self.srv.server_close()
+        C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR, C.LOG_FILE = \
+            self._old
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _req(self, method, path, body=None, headers=None, host=None):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        hdrs = dict(headers or {})
+        if host:
+            hdrs["Host"] = host
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            hdrs["Content-Type"] = "application/json"
+        conn.request(method, path, body=data, headers=hdrs)
+        r = conn.getresponse()
+        payload = r.read().decode()
+        out_headers = {k.lower(): v for k, v in r.getheaders()}
+        conn.close()
+        return r.status, payload, out_headers
+
+    def _auth(self):
+        return {"Authorization": "Bearer " + self.token,
+                "X-Gitsync-Request": "1"}
+
+    def test_unauthenticated_api_is_401(self):
+        code, _, _ = self._req("GET", "/api/status")
+        self.assertEqual(code, 401)
+
+    def test_token_login_sets_cookie_and_gates(self):
+        code, _, hdrs = self._req("POST", "/api/session",
+                                  {"token": self.token})
+        self.assertEqual(code, 200)
+        cookie = hdrs.get("set-cookie", "")
+        self.assertIn("gitsync_session=", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("SameSite=Strict", cookie)
+        sess = cookie.split(";")[0]
+        code, _, _ = self._req("GET", "/api/status", headers={"Cookie": sess})
+        self.assertEqual(code, 200)
+
+    def test_cookie_post_without_csrf_header_is_403(self):
+        _, _, hdrs = self._req("POST", "/api/session", {"token": self.token})
+        sess = hdrs.get("set-cookie", "").split(";")[0]
+        code, _, _ = self._req("POST", "/api/routes/main/pause", {},
+                               headers={"Cookie": sess})   # no X-Gitsync-Request
+        self.assertEqual(code, 403)
+
+    def test_bad_host_is_rejected_even_on_public_routes(self):
+        code, _, _ = self._req("GET", "/api/auth", host="evil.example.com")
+        self.assertEqual(code, 403)
+
+    def test_static_path_traversal_is_blocked(self):
+        for p in ("/../../etc/passwd", "/..%2f..%2fetc/passwd"):
+            code, _, _ = self._req("GET", p)
+            self.assertNotEqual(code, 200)
+
+    def test_pause_endpoint_works(self):
+        code, body, _ = self._req("POST", "/api/routes/main/pause", {},
+                                  headers=self._auth())
+        self.assertEqual(code, 200)
+        self.assertTrue(json.loads(body)["route"]["enabled"] is False)
+
+    def test_doctorfix_tool_is_accepted(self):
+        code, body, _ = self._req("POST", "/api/jobs", {"kind": "doctorfix"},
+                                  headers=self._auth())
+        self.assertEqual(code, 202)
+        self.assertTrue(json.loads(body)["job_id"])
+
+    def test_bad_setting_is_rejected_and_config_unchanged(self):
+        code, _, _ = self._req("PUT", "/api/settings", {"mode": "nonsense"},
+                               headers=self._auth())
+        self.assertEqual(code, 400)
+        saved = json.load(open(C.CONFIG_FILE))
+        self.assertNotEqual(saved["settings"].get("mode"), "nonsense")
+
+    def test_oversized_body_is_413(self):
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        big = b'{"x":"' + b"a" * (W.MAX_BODY + 10) + b'"}'
+        conn.request("POST", "/api/session", body=big,
+                     headers={"Content-Type": "application/json",
+                              "Content-Length": str(len(big))})
+        r = conn.getresponse(); r.read(); conn.close()
+        self.assertEqual(r.status, 413)
 
 
 if __name__ == '__main__':

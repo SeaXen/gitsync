@@ -3,18 +3,7 @@
   var G = window.Gitsync;
   var S = null;   // loaded settings
 
-  function opt(id, cur, opts) {
-    return '<select id="' + id + '">' + opts.map(function (o) {
-      var v = (o && typeof o === "object") ? o.v : o;
-      var l = (o && typeof o === "object") ? o.l : o;
-      return '<option value="' + G.esc(v) + '"' + (String(cur) === String(v) ? " selected" : "") + ">" +
-        G.esc(l) + "</option>";
-    }).join("") + "</select>";
-  }
-  function f(label, inner, hint) {
-    return '<div class="field"><label>' + G.esc(label) + "</label>" + inner +
-      (hint ? '<div class="hint">' + G.esc(hint) + "</div>" : "") + "</div>";
-  }
+  function f(label, inner, hint) { return G.field(label, inner, hint); }
 
   function render(main) {
     main.innerHTML = G.bar("Settings", "Global defaults — a route can override most of these.") +
@@ -28,7 +17,7 @@
         '<button class="btn primary" id="pw-save">Set password</button></div></div>' +
         '<div class="muted sub" id="pw-state">' + G.loading() + "</div>" +
         '<div class="form-grid mt">' +
-        f("Username", '<input type="text" id="pw-user" autocomplete="off" placeholder="e.g. admin">') +
+        f("Username", '<input type="text" id="pw-user" autocomplete="username" placeholder="e.g. admin">') +
         f("New password", '<input type="password" id="pw-pass" autocomplete="new-password" placeholder="at least 8 characters">') +
         f("Confirm password", '<input type="password" id="pw-confirm" autocomplete="new-password" placeholder="repeat">') +
         "</div>" +
@@ -37,15 +26,14 @@
 
       '<section class="card"><div class="bar"><span class="route-title">Scheduler</span>' +
         '<div class="actions"><button class="btn primary" id="install-sched">Install / update</button></div></div>' +
-        '<div class="form-grid mt">' +
-        f("Schedule", opt("sched-schedule", "", []), "how often the timer runs") +
-        f("Status", '<div class="mono" id="sched-status">—</div>', "systemd timer (or cron)") +
-        "</div></section>" +
+        '<div class="muted" id="sched-status">—</div>' +
+        '<div class="muted mt" style="font-size:12.5px">Uses the Schedule chosen in Options above. Runs <span class="mono">gitsync sync --scheduled</span> on a systemd timer (or cron).</div>' +
+        "</section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Notifications</span>' +
         '<div class="actions"><button class="btn" id="notify-test">Send test</button></div></div>' +
         '<div class="form-grid mt">' +
-        f("Notify on", opt("n-on", "", ["failure", "success", "always", "never"])) +
+        f("Notify on", G.select("n-on", "", ["failure", "success", "always", "never"])) +
         f("Discord webhook", '<input type="password" id="n-discord" autocomplete="off" placeholder="leave blank to keep">', "write-only; validated on save") +
         f("Telegram bot token", '<input type="password" id="n-tgtoken" autocomplete="off" placeholder="leave blank to keep">', "write-only") +
         f("Telegram chat id", '<input type="text" id="n-tgchat" placeholder="required with token">') +
@@ -61,22 +49,21 @@
         '<span class="mono">http://&lt;this-box&gt;:8791/hook/&lt;platform&gt;</span>. ' +
         "Push events then trigger an instant sync.</div></section>" +
 
-      '<section class="card" id="scopes"><div class="bar"><span class="route-title">Token scopes</span></div>' +
+      '<section class="card" id="scopes" tabindex="-1"><div class="bar"><span class="route-title">Token scopes</span></div>' +
         '<div id="scopes-body" class="mt">' + G.loading() + "</div></section>" +
 
       '<section class="card"><p class="label">Paths</p><div class="mono" id="paths">—</div></section>';
 
-    document.getElementById("save-settings").addEventListener("click", saveSettings);
+    document.getElementById("save-settings").addEventListener("click", function () { G.busy(this, saveSettings); });
     document.getElementById("install-sched").addEventListener("click", installSched);
     document.getElementById("notify-test").addEventListener("click", notifyTest);
-    document.getElementById("pw-save").addEventListener("click", savePassword);
+    document.getElementById("pw-save").addEventListener("click", function () { G.busy(this, savePassword); });
     document.getElementById("pw-disable").addEventListener("click", disablePassword);
     document.getElementById("wh-rotate").addEventListener("click", function () { wh("rotate"); });
     document.getElementById("wh-install").addEventListener("click", function () { wh("install"); });
     document.getElementById("wh-stop").addEventListener("click", function () { wh("stop"); });
 
     load();
-    loadSignin();
     loadWebhooks();
     loadScopes();
   }
@@ -88,30 +75,45 @@
         return { v: k, l: S.schedules[k] };
       });
       document.getElementById("settings-form").innerHTML =
-        f("Parallel workers", opt("s-workers", S.workers, [1, 2, 4, 8]), "repos synced in parallel") +
-        f("Mirror mode", opt("s-mode", S.mode, [{ v: "safe", l: "safe (never delete)" }, { v: "full", l: "full (prunes)" }])) +
-        f("Mesh conflicts", opt("s-conflict", S.mesh_conflict, [{ v: "newest", l: "newest wins" }, { v: "skip", l: "skip (report)" }])) +
-        f("Schedule", opt("s-schedule", S.schedule, scheduleOpts)) +
+        f("Parallel workers", G.select("s-workers", S.workers, [1, 2, 4, 8]), "repos synced in parallel") +
+        f("Mirror mode", G.select("s-mode", S.mode, [{ v: "safe", l: "safe (never delete)" }, { v: "full", l: "full (prunes)" }])) +
+        f("Mesh conflicts", G.select("s-conflict", S.mesh_conflict, [{ v: "newest", l: "newest wins" }, { v: "skip", l: "skip (report)" }])) +
+        f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "the timer fires at the finest route schedule") +
         f("Include forks", '<label class="check"><input type="checkbox" id="s-forks"' + (S.include_forks ? " checked" : "") + "> mirror forked repos</label>") +
-        f("Pause between repos", opt("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "seconds — spare laptop heat / disk") +
-        f("Token warning", opt("s-warn", S.token_warn_days || 30, [7, 14, 30, 60, 90]), "days before a credential warns") +
-        f("Theme", opt("s-theme", S.theme, (S.themes || []))) +
+        f("Pause between repos", G.select("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "seconds — spare laptop heat / disk") +
+        f("Token warning", G.select("s-warn", S.token_warn_days || 30, [7, 14, 30, 60, 90]), "days before a credential warns") +
+        f("TUI theme", G.select("s-theme", S.theme, (S.themes || [])), "colours the terminal TUI only") +
         f("Relax protection", '<label class="check"><input type="checkbox" id="s-relax"' + (S.relax_protection ? " checked" : "") + "> allow force-push over branch protection</label>", "hand-edit territory — off by default");
-      // scheduler card mirrors the chosen schedule (its own select)
-      var schedSel = document.getElementById("sched-schedule");
-      schedSel.innerHTML = scheduleOpts.map(function (o) {
-        return '<option value="' + G.esc(o.v) + '"' + (String(S.schedule) === String(o.v) ? " selected" : "") + ">" +
-          G.esc(o.l) + "</option>";
-      }).join("");
       document.getElementById("sched-status").textContent = S.scheduler || "—";
       document.getElementById("n-on").value = (S.notify && S.notify.on) || "failure";
       document.getElementById("paths").innerHTML =
         "config " + G.esc(S.paths.config) + "<br>mirrors " + G.esc(S.paths.mirror) +
         "<br>log " + G.esc(S.paths.log) + "<br>data " + G.esc(S.paths.data);
-    }).catch(function (e) { document.getElementById("settings-form").innerHTML = G.errorBox(e); });
+      renderSignin(S.auth || {});
+    }).catch(function (e) {
+      document.getElementById("settings-form").innerHTML = G.errorBox(e);
+    });
+  }
+
+  function renderSignin(auth) {
+    var el = document.getElementById("pw-state");
+    el.innerHTML = auth.password_set
+      ? 'Password sign-in is <span class="ok">on</span> for user ' +
+        '<span class="mono">' + G.esc(auth.username) + "</span>."
+      : 'Password sign-in is <span class="warn">off</span> — you are using ' +
+        "the access token. Set a username &amp; password to enable it.";
+    if (auth.password_set && auth.username) {
+      document.getElementById("pw-user").value = auth.username;
+    }
   }
 
   function saveSettings() {
+    if (!S) { G.toast("settings not loaded — retry", "warn"); return Promise.resolve(); }
+    var form = document.getElementById("settings-form");
+    if (!document.getElementById("s-workers")) {
+      G.toast("settings form not ready — reload the page", "warn");
+      return Promise.resolve();
+    }
     var body = {
       workers: document.getElementById("s-workers").value,
       mode: document.getElementById("s-mode").value,
@@ -129,40 +131,28 @@
     var tv = document.getElementById("n-tgtoken").value.trim();
     var cv = document.getElementById("n-tgchat").value.trim();
     if (tv) { body.telegram_token = tv; body.telegram_chat_id = cv; }
-    G.api("PUT", "/api/settings", body).then(function () {
+    return G.api("PUT", "/api/settings", body).then(function () {
       G.toast("settings saved", "ok");
       document.getElementById("n-discord").value = "";
       document.getElementById("n-tgtoken").value = "";
-    }).catch(function (e) { G.toast(e.error, "bad"); });
+      G.refreshStatus();
+    }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function installSched() {
-    var sched = document.getElementById("sched-schedule").value;
-    G.api("POST", "/api/scheduler/install", { schedule: sched })
+    var sel = document.getElementById("s-schedule");
+    var sched = sel ? sel.value : undefined;
+    return G.api("POST", "/api/scheduler/install", sched ? { schedule: sched } : {})
       .then(function (d) {
-        G.toast(d.status, "ok");
+        G.toast(d.status, d.ok ? "ok" : "warn");
         document.getElementById("sched-status").textContent = d.status;
-      }).catch(function (e) { G.toast(e.error, "bad"); });
+      }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function notifyTest() {
-    G.api("POST", "/api/notify/test").then(function (d) {
+    return G.api("POST", "/api/notify/test").then(function (d) {
       G.toast(d.message, d.ok ? "ok" : "bad");
-    }).catch(function (e) { G.toast(e.error, "bad"); });
-  }
-
-  function loadSignin() {
-    G.api("GET", "/api/auth").then(function (d) {
-      var el = document.getElementById("pw-state");
-      el.innerHTML = d.password_set
-        ? 'Password sign-in is <span class="ok">on</span> for user ' +
-          '<span class="mono">' + G.esc(d.username) + "</span>."
-        : 'Password sign-in is <span class="warn">off</span> — you are using ' +
-          "the access token. Set a username &amp; password to enable it.";
-      if (d.password_set && d.username) {
-        document.getElementById("pw-user").value = d.username;
-      }
-    }).catch(function () {});
+    }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function savePassword() {
@@ -172,33 +162,34 @@
     if (!u) return G.toast("enter a username", "warn");
     if (p.length < 8) return G.toast("password must be at least 8 characters", "warn");
     if (p !== c) return G.toast("passwords do not match", "warn");
-    G.api("POST", "/api/auth/password", { username: u, password: p })
+    return G.api("POST", "/api/auth/password", { username: u, password: p })
       .then(function (d) {
         G.toast(d.message || "password set", "ok");
         document.getElementById("pw-pass").value = "";
         document.getElementById("pw-confirm").value = "";
-        loadSignin();
-      }).catch(function (e) { G.toast(e.error, "bad"); });
+        load();
+      }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function disablePassword() {
-    if (!confirm("Disable password sign-in? The access token will be the only way in.")) return;
-    G.api("POST", "/api/auth/password", { disable: true })
-      .then(function (d) { G.toast(d.message || "disabled", "ok"); loadSignin(); })
-      .catch(function (e) { G.toast(e.error, "bad"); });
+    if (!confirm("Disable password sign-in? The access token will be the only way in.")) return Promise.resolve();
+    return G.api("POST", "/api/auth/password", { disable: true })
+      .then(function (d) { G.toast(d.message || "disabled", "ok"); load(); })
+      .catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function wh(action) {
-    G.api("POST", "/api/webhooks", { action: action }).then(function (d) {
-      G.toast(d.note || d.status || action, d.ok ? "ok" : "bad");
+    return G.api("POST", "/api/webhooks", { action: action }).then(function (d) {
+      G.toast(d.note || d.status || action, d.ok ? "ok" : "warn");
       loadWebhooks();
-    }).catch(function (e) { G.toast(e.error, "bad"); });
+    }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function loadWebhooks() {
     G.api("GET", "/api/webhooks").then(function (d) {
       var eps = (d.endpoints || []).map(function (e) {
-        return '<div>http://&lt;this-box&gt;:8791' + G.esc(e.path) + " <span class='muted'>(" + G.esc(e.type) + ")</span></div>";
+        return "<div>http://&lt;this-box&gt;:8791" + G.esc(e.path) +
+          " <span class='muted'>(" + G.esc(e.type) + ")</span></div>";
       }).join("");
       document.getElementById("wh-status").innerHTML =
         "secret: " + (d.secret_set ? '<span class="ok">set</span>' : '<span class="warn">not set</span>') +
@@ -213,13 +204,15 @@
         var scopes = (g.scopes || []).map(function (s) {
           return '<div class="mono muted">· ' + G.esc(s.scope) + " — " + G.esc(s.why) + "</div>";
         }).join("");
-        return '<div class="mb"><strong>' + G.esc(g.title) + '</strong> ' +
+        return '<div class="mb"><strong>' + G.esc(g.title) + "</strong> " +
           '<span class="badge muted">min: ' + G.esc(g.minimum) + "</span>" +
           (g.env ? ' <span class="badge muted">env ' + G.esc(g.env) + "</span>" : "") +
           (g.token_url ? '<div class="muted" style="font-size:12px">create at ' + G.esc(g.token_url) + "</div>" : "") +
           scopes + "</div>";
       }).join("");
-    }).catch(function (e) { document.getElementById("scopes-body").innerHTML = G.errorBox(e); });
+    }).catch(function (e) {
+      document.getElementById("scopes-body").innerHTML = G.errorBox(e);
+    });
   }
 
   G.mount("settings", render);

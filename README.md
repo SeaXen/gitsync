@@ -218,7 +218,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync install` | install the scheduler for the **finest** route schedule |
 | `gitsync install --schedule weekly --user` | user timer, weekly (never writes `/etc` without `--system`) |
 | `gitsync install --cron` | use cron instead of systemd |
-| `gitsync ci` | run the same checks CI runs (syntax, smoke, 124 unit tests) |
+| `gitsync ci` | run the same checks CI runs (syntax, smoke, 142 unit tests) |
 | `gitsync ci --install-hook` | add a `pre-push` hook so every push runs them first |
 | `gitsync restore --to gitlab` | **push the hub back out** — the source host is gone |
 | `gitsync restore --to backup --dry-run` | preview a restore (nothing is modified) |
@@ -705,8 +705,12 @@ password so you don't depend on that one-time token:
 - CSRF guard (a custom header on cookie sessions) and a DNS-rebinding guard
   (Host/Origin allowlist; loopback + private IPs are allowed for LAN access —
   add a proxy domain with `--allowed-host` or `GITSYNC_ALLOWED_HOSTS`)
-- all subprocesses are argv lists (never a shell); names/paths are validated;
-  static files and local paths are confined (no traversal)
+- all subprocesses are argv lists (never a shell); names/paths/URLs are
+  validated; static files and local-folder targets are confined (no traversal)
+- config writes are serialized (a process lock + `flock`, so the web server and
+  the TUI never clobber each other) and atomic at mode `0600`; the first-run
+  token is **not** printed to the journal/pipe (read `web.token`); auth
+  failures, guard rejections, 5xx and mutations are audit-logged (redacted)
 - one sync at a time: the web layer respects the engine's `sync.lock` and
   reports "already running" cleanly
 

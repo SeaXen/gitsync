@@ -1,8 +1,9 @@
 """gitsync web UI — a browser dashboard for everything the TUI does.
 
-    gitsync web                       # http://127.0.0.1:7765
+    gitsync web                       # http://127.0.0.1:7765 (this machine)
     gitsync web --port 7765 --bind 127.0.0.1
     gitsync web --bind 0.0.0.0        # LAN/proxy — auth is always required
+    gitsync web --install             # always-on systemd service (binds 0.0.0.0)
 
 Zero dependencies: Python standard library only (http.server, like
 webhooks.py). The engine (config/sync/platforms/stars/tokencheck/diskutil/
@@ -17,16 +18,21 @@ Security model (the config holds platform tokens, so this is the priority):
     the always-on service (`gitsync web --install`) and Docker bind 0.0.0.0
     (LAN). Authentication is ALWAYS required on every request, whatever the
     bind; the chosen bind/port is remembered in settings.web
-  * a random access token (CONFIG_DIR/web.token, 0600) guards every /api
-    call — via `Authorization: Bearer` or an HttpOnly, SameSite=Strict cookie
-  * a token is NEVER returned in any response, log line or page; responses
-    only ever carry token *state* (set/missing/gh/glab)
+  * a random access token (CONFIG_DIR/web.token, 0600) plus an optional
+    username + password (PBKDF2 hash, 0600) guard every /api call — via
+    `Authorization: Bearer` or an HttpOnly, SameSite=Strict cookie
+    (hmac.compare_digest on bytes)
+  * a token is NEVER returned in any API response or HTML page — only state
+    (set/missing/gh/glab). The first-run token is not printed when stdout is
+    the systemd journal or a pipe (read CONFIG_DIR/web.token instead)
   * state-changing requests are CSRF-guarded (custom header for cookie
-    sessions) and DNS-rebinding-guarded (Host allowlist)
+    sessions) and DNS-rebinding-guarded (Host/Origin allowlist on every
+    request, including the public login/auth routes)
   * every outgoing body/SSE line is passed through a redactor that strips
-    any known token, on top of the engine's own _redact()
-  * all subprocesses are argv lists (never a shell); all names/paths are
-    validated; static files and local paths are confined (no traversal)
+    any known secret, on top of the engine's own sync.redact()
+  * all subprocesses are argv lists (never a shell); all names/paths/URLs are
+    validated; static files and local-folder targets are confined (no
+    traversal); config writes are serialized and atomic
 """
 
 import hashlib
@@ -42,6 +48,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -68,14 +75,14 @@ LAN_BIND = "0.0.0.0"
 WEBUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
 MAX_BODY = 1 << 20                      # 1 MB request cap
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
-# "[12/54] OK   repo -> targets" — the progress line the sync engine prints
-_PROGRESS_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]\s+(\S+)\s+(\S+)")
+_REPO_RE = re.compile(r"^[A-Za-z0-9._/*?-]{1,128}$")
 
 _TTY = sys.stdout.isatty()
+_UNDER_SYSTEMD = bool(os.environ.get("JOURNAL_STREAM")
+                      or os.environ.get("INVOCATION_ID"))
 
 
 def _c(code, text):
-    """terminal colour, disabled when stdout is not a TTY (docker logs)"""
     if not _TTY:
         return text
     return "\033[%sm%s\033[0m" % (code, text)
@@ -83,6 +90,30 @@ def _c(code, text):
 
 def _say(msg):
     print(msg, flush=True)
+
+
+def _audit(msg):
+    """one redacted, timestamped line to gitsync.log for security-relevant
+    web events (auth failures, guard rejections, 5xx, mutations, job end)."""
+    line = "[%s] web: %s" % (
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _redactor().redact(msg))
+    try:
+        C.ensure_dirs()
+        if os.path.exists(C.LOG_FILE) and os.path.getsize(C.LOG_FILE) > (2 << 20):
+            os.replace(C.LOG_FILE, C.LOG_FILE + ".1")
+        with open(C.LOG_FILE, "a") as f:
+            f.write(line + "\n")
+        os.chmod(C.LOG_FILE, 0o600)
+    except OSError:
+        pass
+
+
+class _Http(Exception):
+    """raised inside a config transaction to abort with (code, message)."""
+
+    def __init__(self, code, msg):
+        self.code = code
+        self.msg = msg
 
 
 # ---------------------------------------------------------------- token
@@ -107,19 +138,16 @@ def get_web_token():
     tok = secrets.token_urlsafe(32)
     try:
         C.ensure_dirs()
-        with open(_token_path(), "w") as f:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(_token_path(), flags, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write(tok)
-        os.chmod(_token_path(), 0o600)
     except OSError:
         pass
     return tok, True
 
 
 # ---------------------------------------------------------------- password auth
-#
-# Optional username + password sign-in, stored as a PBKDF2 hash (never the
-# plaintext, never returned). If none is set, the access token is the only
-# way in — so existing installs are unaffected until a password is chosen.
 
 def _auth_path():
     return os.path.join(C.CONFIG_DIR, "web.auth.json")
@@ -153,7 +181,9 @@ def set_password(username, password):
             "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     C.ensure_dirs()
     tmp = _auth_path() + ".tmp"
-    with open(tmp, "w") as f:
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(data, f)
     os.replace(tmp, _auth_path())
     try:
@@ -174,8 +204,8 @@ def check_password(username, password):
     a = get_auth()
     if not a:
         return False
-    if not hmac.compare_digest(str(username or ""),
-                               str(a.get("username", ""))):
+    if not hmac.compare_digest(str(username or "").encode("utf-8"),
+                               str(a.get("username", "")).encode("utf-8")):
         return False
     try:
         salt = bytes.fromhex(a["salt"])
@@ -188,30 +218,33 @@ def check_password(username, password):
 
 
 class _Throttle:
-    """in-memory brake on password guessing: lock after max_fails in window."""
+    """in-memory brake on guessing, keyed per client+account, lost on
+    restart (documented trade-off)."""
 
     def __init__(self, max_fails=8, window=120):
         self.max_fails = max_fails
         self.window = window
-        self._fails = []
+        self._fails = {}
         self._lock = threading.Lock()
 
-    def locked(self):
+    def locked(self, key):
         with self._lock:
             now = time.time()
-            self._fails = [t for t in self._fails if now - t < self.window]
-            return len(self._fails) >= self.max_fails
+            recent = [t for t in self._fails.get(key, []) if now - t < self.window]
+            self._fails[key] = recent
+            return len(recent) >= self.max_fails
 
-    def fail(self):
+    def fail(self, key):
         with self._lock:
-            self._fails.append(time.time())
+            self._fails.setdefault(key, []).append(time.time())
 
-    def reset(self):
+    def reset(self, key):
         with self._lock:
-            self._fails = []
+            self._fails.pop(key, None)
 
 
-_login_throttle = _Throttle()
+_pw_throttle = _Throttle(max_fails=8, window=120)
+_tok_throttle = _Throttle(max_fails=40, window=120)
 
 
 # ---------------------------------------------------------------- redaction
@@ -219,7 +252,7 @@ _login_throttle = _Throttle()
 class Redactor:
     """Strip any known secret from text before it leaves the process.
 
-    The engine already redacts git error text (sync._redact), and it never
+    The engine already redacts git error text (sync.redact), and it never
     serialises a token — but the web layer is a new exit path, so it gets its
     own pass as defence in depth. The unit test plants real token strings and
     greps every response for them.
@@ -245,6 +278,11 @@ class Redactor:
                     secs.add(v)
         except Exception:
             pass
+        try:
+            if WH.get_secret():
+                secs.add(WH.get_secret())
+        except Exception:
+            pass
         for k in ("GITHUB_TOKEN", "GITLAB_TOKEN", "FORGEJO_TOKEN",
                   "GITEA_TOKEN", "BITBUCKET_TOKEN", "GITSYNC_WEB_TOKEN"):
             v = os.environ.get(k)
@@ -263,37 +301,57 @@ class Redactor:
             if s in text:
                 text = text.replace(s, "***")
         try:
-            return SYNC._redact(text)
+            return SYNC.redact(text)
         except Exception:
             return text
 
 
-REDACTOR = Redactor()
+_redactor_singleton = None
+_redactor_lock = threading.Lock()
+
+
+def _redactor():
+    """lazy singleton — constructing at import time would read the live
+    config (and load every real token into memory) merely on `import web`."""
+    global _redactor_singleton
+    with _redactor_lock:
+        if _redactor_singleton is None:
+            _redactor_singleton = Redactor()
+        return _redactor_singleton
 
 
 # ---------------------------------------------------------------- caches
 
-_cache = {"sched": ("unknown", 0.0), "next": (None, 0.0), "health": (None, 0.0)}
+_cache = {"sched": ("unknown", 0.0), "next": (None, 0.0), "health": (None, 0.0),
+          "platforms": (None, 0.0)}
+_cache_lock = threading.Lock()
+
+
+def _cached(key, ttl, fn, default=None):
+    now = time.time()
+    with _cache_lock:
+        val, at = _cache.get(key, (None, 0.0))
+        if val is not None and now - at < ttl:
+            return val
+    val = fn()
+    with _cache_lock:
+        _cache[key] = (val, time.time())
+    return val
 
 
 def _cached_scheduler():
-    now = time.time()
-    if now - _cache["sched"][1] > 15:
-        try:
-            _cache["sched"] = (S.status(), now)
-        except Exception:
-            _cache["sched"] = ("unknown", now)
-    return _cache["sched"][0]
+    return _cached("sched", 15, lambda: _safe(S.status, "unknown"), "unknown")
 
 
 def _cached_next_run():
-    now = time.time()
-    if now - _cache["next"][1] > 15:
-        try:
-            _cache["next"] = (S.next_run(), now)
-        except Exception:
-            _cache["next"] = (None, now)
-    return _cache["next"][0]
+    return _cached("next", 15, lambda: _safe(S.next_run, None), None)
+
+
+def _safe(fn, default):
+    try:
+        return fn()
+    except Exception:
+        return default
 
 
 # ---------------------------------------------------------------- jobs
@@ -301,6 +359,8 @@ def _cached_next_run():
 class Job:
     """one subprocess run (sync or a tool), streamed to any number of
     SSE subscribers via a shared condition variable."""
+
+    MAX_LINES = 20000
 
     def __init__(self, kind, argv, mutating=True):
         self.id = secrets.token_hex(8)
@@ -321,7 +381,9 @@ class Job:
         with self.cond:
             return {"job_id": self.id, "kind": self.kind,
                     "progress": dict(self.progress), "done": self.done,
-                    "exit": self.exit, "error": self.error,
+                    "exit": self.exit,
+                    "error": _redactor().redact(self.error)
+                    if self.error else None,
                     "elapsed": round((self.finished or time.time())
                                      - self.started, 1)}
 
@@ -332,34 +394,34 @@ _mutating_busy = threading.Lock()      # web-level: one mutating job at a time
 _current_sync = None                   # most recent sync job (for /sync/state)
 
 
-def _update_progress(job, line):
-    m = _PROGRESS_RE.search(line)
-    if not m:
-        return
-    d, t = int(m.group(1)), int(m.group(2))
-    if t:
-        job.progress["total"] = t
-    job.progress["done"] = max(job.progress["done"], d)
-    job.progress["status"] = m.group(3)
-    job.progress["repo"] = m.group(4)
-
-
 def _run_job(job):
     try:
         env = dict(os.environ, PYTHONPATH=_app_dir())
+        # detach from the server's session so Ctrl-C on `gitsync web` does not
+        # SIGINT an in-flight push; stdout is still piped for SSE streaming
         job.proc = subprocess.Popen(job.argv, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT, text=True,
-                                    env=env, cwd=_app_dir())
+                                    env=env, cwd=_app_dir(),
+                                    start_new_session=True)
         for line in job.proc.stdout:
-            line = REDACTOR.redact(line.rstrip("\n"))
+            line = _redactor().redact(line.rstrip("\n"))
             with job.cond:
                 job.lines.append(line)
-                _update_progress(job, line)
+                if len(job.lines) > Job.MAX_LINES:
+                    del job.lines[:len(job.lines) - Job.MAX_LINES]
+                parsed = SYNC.parse_progress_line(line)
+                if parsed:
+                    d, t, st, repo = parsed
+                    if t:
+                        job.progress["total"] = t
+                    job.progress["done"] = max(job.progress["done"], d)
+                    job.progress["status"] = st
+                    job.progress["repo"] = repo
                 job.cond.notify_all()
         job.proc.wait()
         job.exit = job.proc.returncode
-    except Exception as e:                                  # noqa: BLE001
-        job.error = str(e)[:200]
+    except Exception as e:
+        job.error = _redactor().redact(str(e)[:200])
         with job.cond:
             job.lines.append("error: %s" % job.error)
     finally:
@@ -370,9 +432,12 @@ def _run_job(job):
         if job.mutating:
             try:
                 _mutating_busy.release()
-            except Exception:                               # noqa: BLE001
+            except Exception:
                 pass
-        REDACTOR.reload()
+        _audit("job %s (%s) finished: exit=%s elapsed=%ss"
+               % (job.kind, job.id, job.exit,
+                  round((job.finished or time.time()) - job.started, 1)))
+        _redactor().reload()
 
 
 def start_job(kind, argv, mutating=True):
@@ -386,29 +451,23 @@ def start_job(kind, argv, mutating=True):
             for old in sorted(_jobs.values(), key=lambda j: j.started)[:25]:
                 if old.done:
                     _jobs.pop(old.id, None)
-    threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+    try:
+        threading.Thread(target=_run_job, args=(job,), daemon=True).start()
+    except Exception:
+        # never leak the mutex if the thread could not start
+        with _jobs_lock:
+            _jobs.pop(job.id, None)
+        if mutating:
+            try:
+                _mutating_busy.release()
+            except Exception:
+                pass
+        raise
     return job
 
 
 def _engine_sync_busy():
-    """is a sync (timer or another process) holding the engine lock?"""
-    import fcntl
-    path = os.path.join(C.DATA_DIR, "sync.lock")
-    try:
-        fh = open(path, "a+")
-    except OSError:
-        return False
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(fh, fcntl.LOCK_UN)
-        return False
-    except OSError:
-        return True
-    finally:
-        try:
-            fh.close()
-        except OSError:
-            pass
+    return SYNC.engine_busy()
 
 
 def _app_dir():
@@ -421,6 +480,228 @@ def _is_loopback(bind):
     except ValueError:
         return bind in ("localhost",)
 
+
+# ---------------------------------------------------------------- validation
+
+def _valid_name(s):
+    return bool(s) and bool(_NAME_RE.match(s))
+
+
+def _clean_repo_list(s):
+    """comma list -> validated names; rejects anything with shell/space junk.
+    Argv lists mean injection is impossible, but nonsense is still rejected."""
+    out = []
+    for part in (s or "").split(","):
+        name = part.strip()
+        if not name:
+            continue
+        if not _REPO_RE.match(name):
+            raise ValueError("bad repo name: %r" % name[:40])
+        out.append(name)
+    return out
+
+
+def _confined_path(path, root):
+    """realpath of path if it sits inside root, else None (no traversal)."""
+    try:
+        full = os.path.realpath(os.path.expanduser(path))
+        root_real = os.path.realpath(root)
+        return full if (full == root_real
+                        or full.startswith(root_real + os.sep)) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _valid_platform_url(url):
+    """http(s) only, with a real host — stops the stored token being relayed
+    to an arbitrary scheme/host (SSRF / confused deputy)."""
+    if not url:
+        return True
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    if not parts.hostname:
+        return False
+    if parts.username or parts.password:
+        return False
+    return True
+
+
+def _valid_local_path(path):
+    """a local-folder target must be absolute-ish and not a sensitive system
+    dir; confined enough to avoid clobbering / , /etc, home config, etc."""
+    if not path:
+        return False
+    full = os.path.realpath(os.path.expanduser(path))
+    if full in ("/",) or full.startswith("/etc") or \
+            full.startswith("/sys") or full.startswith("/proc") or \
+            full.startswith("/boot") or full == os.path.expanduser("~"):
+        return False
+    if _confined_path(full, C.CONFIG_DIR) == full:
+        return False
+    return True
+
+
+# ---------------------------------------------------------------- public views
+
+def _token_state(p):
+    if p.get("type") == "local":
+        return "local"
+    if p.get("token"):
+        return "set"
+    if p.get("auth") == "gh":
+        return "gh"
+    if p.get("auth") == "glab":
+        return "glab"
+    return "missing"
+
+
+def _public_platform(name, p):
+    return {"name": name, "type": p.get("type", "?"),
+            "enabled": bool(p.get("enabled")),
+            "token_state": _token_state(p),
+            "url": p.get("url", ""), "owner": p.get("owner", ""),
+            "path": p.get("path", ""), "protocol": p.get("protocol", "http"),
+            "ssh_port": p.get("ssh_port"),
+            "url_template": p.get("url_template", ""),
+            "user": p.get("user", ""), "ns_id": p.get("ns_id", ""),
+            "affiliation": p.get("affiliation", "")}
+
+
+def _public_settings(cfg):
+    """settings with notify secrets reduced to booleans — the other place raw
+    webhook/telegram credentials live, so it gets the same care as platforms."""
+    st = dict(cfg.get("settings") or {})
+    notify = dict(st.get("notify") or {})
+    st["notify"] = {
+        "on": notify.get("on", "failure"),
+        "discord_set": bool(notify.get("discord_webhook")),
+        "telegram_set": bool(notify.get("telegram_token")
+                             and notify.get("telegram_chat_id")),
+    }
+    return st
+
+
+def _route_view(cfg, r):
+    paused = set(r.get("paused_targets") or [])
+    return {"name": r.get("name"), "source": r.get("source"),
+            "targets": list(r.get("targets") or []),
+            "direction": r.get("direction") or "one-way",
+            "enabled": r.get("enabled") is not False,
+            "paused_targets": sorted(paused),
+            "schedule": r.get("schedule"),
+            "effective_schedule": C.route_schedule(cfg, r),
+            "next": SYNC.next_due_text(r, cfg),
+            "include": list(r.get("include") or []),
+            "exclude": list(r.get("exclude") or []),
+            "include_file": r.get("include_file", ""),
+            "workers": r.get("workers"), "mode": r.get("mode"),
+            "mesh_conflict": r.get("mesh_conflict")}
+
+
+def _public_record(r):
+    if not r:
+        return None
+    fails = [{"route": f.get("route"), "repo": f.get("repo"),
+              "error": _redactor().redact(str(f.get("error", ""))[:200])}
+             for f in (r.get("failures") or [])]
+    return {"finished_at": r.get("finished_at"), "ok": r.get("ok", 0),
+            "partial": r.get("partial", 0), "failed": r.get("failed", 0),
+            "repos": r.get("repos", 0), "elapsed_sec": r.get("elapsed_sec"),
+            "routes": r.get("routes", 0), "failures": fails}
+
+
+def _probe(name, p):
+    try:
+        plat = P.make(name, p)
+        ok, info = plat.test()
+        count = None
+        if ok and p.get("enabled"):
+            try:
+                count = len(plat.list_repos())
+            except Exception:
+                count = None
+    except Exception as e:
+        ok, info, count = False, _redactor().redact(str(e)[:120]), None
+    row = _public_platform(name, p)
+    row.update(ok=bool(ok), info=_redactor().redact(info or ""),
+               repo_count=count)
+    return row
+
+
+def _probe_all(cfg):
+    plats = list((cfg.get("platforms") or {}).items())
+    if not plats:
+        return []
+    rows = [None] * len(plats)
+    with ThreadPoolExecutor(max_workers=max(1, len(plats))) as ex:
+        futs = {ex.submit(_probe, n, p): i for i, (n, p) in enumerate(plats)}
+        for f in as_completed(futs):
+            rows[futs[f]] = f.result()
+    return rows
+
+
+def _tool_argv(kind, b):
+    """(argv_after-'gitsync', mutating) for a Tools action — reuses the CLI.
+    Accepts the 'doctorfix' card id as an alias for doctor --fix so the
+    frontend contract can never silently drift again."""
+    route = (b.get("route") or "").strip()
+    if kind in ("compare",):
+        return ["compare"] + (["--route", route] if route else []), False
+    if kind == "doctor":
+        return ["doctor"] + (["--fix"] if b.get("fix") else []), bool(b.get("fix"))
+    if kind == "doctorfix":                     # alias for doctor --fix
+        return ["doctor", "--fix"], True
+    if kind == "fix":
+        return ["fix"] + (["--route", route] if route else []), True
+    if kind == "tokens":
+        return ["tokens"], False
+    if kind == "disk":
+        argv = ["disk"]
+        if b.get("orphans"):
+            argv.append("--orphans")
+        if b.get("top"):
+            argv += ["--top", str(int(b["top"]))]
+        return argv, False
+    if kind == "gc":
+        argv = ["disk", "--gc"]
+        if b.get("older_than"):
+            argv += ["--older-than", str(int(b["older_than"]))]
+        if b.get("aggressive"):
+            argv.append("--aggressive")
+        return argv, True
+    if kind == "restore":
+        to = (b.get("to") or "").strip()
+        if not _valid_name(to.split(",")[0]):
+            raise ValueError("restore needs --to PLATFORM")
+        argv = ["restore", "--to", to]
+        repos = _clean_repo_list(b.get("repos"))
+        if repos:
+            argv += ["--repos", ",".join(repos)]
+        if b.get("dry_run"):
+            argv.append("--dry-run")
+        if b.get("prune"):
+            argv.append("--prune")
+        if b.get("public"):
+            argv.append("--public")
+        return argv, True
+    if kind == "mirror":
+        repos = _clean_repo_list(b.get("repos"))
+        if not repos:
+            raise ValueError("mirror needs at least one repo")
+        argv = ["mirror"] + repos
+        if b.get("src") and _valid_name(b["src"]):
+            argv += ["--from", b["src"]]
+        if b.get("to") and _valid_name(b["to"]):
+            argv += ["--to", b["to"]]
+        return argv, True
+    raise ValueError("unknown tool: %s" % kind)
+
+
+# ---------------------------------------------------------------- bind/port
 
 def resolve_bind_port(cli_bind, cli_port, cfg, default_bind=None):
     """Effective (bind, port): explicit CLI flag > saved preference > default.
@@ -470,7 +751,7 @@ def _local_ips():
         s.close()
         if ip and _usable_ip(ip):
             ips.append(ip)
-    except Exception:                               # noqa: BLE001
+    except Exception:
         pass
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None,
@@ -478,117 +759,23 @@ def _local_ips():
             ip = info[4][0]
             if ip not in ips and _usable_ip(ip):
                 ips.append(ip)
-    except Exception:                               # noqa: BLE001
+    except Exception:
         pass
     return ips
 
 
-# ---------------------------------------------------------------- validation
+# ================================================================ HTTP layer
 
-def _valid_name(s):
-    return bool(s) and bool(_NAME_RE.match(s))
-
-
-def _clean_repo_list(s):
-    """comma list -> validated names; rejects anything with shell/space junk.
-    Argv lists mean injection is impossible, but nonsense is still rejected."""
-    out = []
-    for part in (s or "").split(","):
-        name = part.strip()
-        if not name:
-            continue
-        if not re.match(r"^[A-Za-z0-9._/*?-]{1,128}$", name):
-            raise ValueError("bad repo name: %r" % name[:40])
-        out.append(name)
-    return out
-
-
-# ---------------------------------------------------------------- public views
-
-def _token_state(p):
-    """token *state* only — never the token itself."""
-    if p.get("type") == "local":
-        return "local"
-    if p.get("token"):
-        return "set"
-    if p.get("auth") == "gh":
-        return "gh"
-    if p.get("auth") == "glab":
-        return "glab"
-    return "missing"
-
-
-def _public_platform(name, p):
-    return {"name": name, "type": p.get("type", "?"),
-            "enabled": bool(p.get("enabled")),
-            "token_state": _token_state(p),
-            "url": p.get("url", ""), "owner": p.get("owner", ""),
-            "path": p.get("path", ""), "protocol": p.get("protocol", "http"),
-            "ssh_port": p.get("ssh_port"),
-            "url_template": p.get("url_template", ""),
-            "user": p.get("user", ""), "ns_id": p.get("ns_id", ""),
-            "affiliation": p.get("affiliation", "")}
-
-
-def _probe(name, p):
-    try:
-        plat = P.make(name, p)
-        ok, info = plat.test()
-        count = None
-        if ok and p.get("enabled"):
-            try:
-                count = len(plat.list_repos())
-            except Exception:                               # noqa: BLE001
-                count = None
-    except Exception as e:                                  # noqa: BLE001
-        ok, info, count = False, REDACTOR.redact(str(e)[:120]), None
-    row = _public_platform(name, p)
-    row.update(ok=bool(ok), info=REDACTOR.redact(info or ""), repo_count=count)
-    return row
-
-
-def _probe_all(cfg):
-    plats = list((cfg.get("platforms") or {}).items())
-    if not plats:
-        return []
-    rows = [None] * len(plats)
-    with ThreadPoolExecutor(max_workers=max(1, len(plats))) as ex:
-        futs = {ex.submit(_probe, n, p): i for i, (n, p) in enumerate(plats)}
-        for f in as_completed(futs):
-            rows[futs[f]] = f.result()
-    return [r for r in rows if r]
-
-
-def _route_view(cfg, r):
-    paused = set(r.get("paused_targets") or [])
-    return {"name": r.get("name"), "source": r.get("source"),
-            "targets": list(r.get("targets") or []),
-            "direction": r.get("direction") or "one-way",
-            "enabled": r.get("enabled") is not False,
-            "paused_targets": sorted(paused),
-            "schedule": r.get("schedule"),
-            "effective_schedule": C.route_schedule(cfg, r),
-            "next": SYNC.next_due_text(r, cfg),
-            "include": list(r.get("include") or []),
-            "exclude": list(r.get("exclude") or []),
-            "include_file": r.get("include_file", ""),
-            "workers": r.get("workers"), "mode": r.get("mode"),
-            "mesh_conflict": r.get("mesh_conflict")}
-
-
-# ---------------------------------------------------------------- handler
-
-def make_handler(token, bind, extra_hosts=None):
-    extra_hosts = set(h.lower() for h in (extra_hosts or []))
-
+def make_handler():
     class Handler(BaseHTTPRequestHandler):
         server_version = "gitsync-web"
         protocol_version = "HTTP/1.1"
+        timeout = 30                          # reap half-open connections
 
-        # ---- plumbing ----
-        def log_message(self, *a):        # silence per-request stderr noise
+        def log_message(self, *a):            # silence per-request stderr noise
             pass
 
+        # ---- plumbing ----
         @property
         def _token(self):
             return self.server.token
@@ -598,15 +785,26 @@ def make_handler(token, bind, extra_hosts=None):
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = 0
-            if length <= 0 or length > MAX_BODY:
+            if length <= 0:
                 return {}
+            if length > MAX_BODY:
+                # drain the declared body so the client's send completes and
+                # it reads a clean 413 (rejecting without reading desyncs the
+                # connection and the client sees a reset)
+                self.close_connection = True
+                remaining = min(length, 64 << 20)
+                while remaining > 0:
+                    chunk = self.rfile.read(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+                raise _BodyTooLarge()
             try:
                 return json.loads(self.rfile.read(length).decode() or "{}")
             except ValueError:
-                return {}
+                raise _BadJson()
 
         def _qs(self):
-            import urllib.parse
             if "?" not in self.path:
                 return {}
             return urllib.parse.parse_qs(self.path.split("?", 1)[1])
@@ -616,6 +814,8 @@ def make_handler(token, bind, extra_hosts=None):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body_bytes)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("X-Frame-Options", "DENY")
             for k, v in (extra or {}).items():
                 self.send_header(k, v)
             self.end_headers()
@@ -643,13 +843,27 @@ def make_handler(token, bind, extra_hosts=None):
 
         def _authed(self):
             _kind, tok = self._supplied_token()
-            return bool(tok) and hmac.compare_digest(tok, self._token)
+            if not tok:
+                return False
+            try:
+                return hmac.compare_digest(tok.encode("utf-8"),
+                                           self._token.encode("utf-8"))
+            except (AttributeError, UnicodeError):
+                return False
+
+        def _client_ip(self):
+            try:
+                return self.client_address[0]
+            except Exception:
+                return "?"
 
         def _host_ok(self):
             host = self.headers.get("Host", "")
-            h = host.split(":")[0].strip().strip("[]").lower()
-            if h in ("localhost", "127.0.0.1", "::1", self.server.bind_host,
-                     *extra_hosts):
+            h = host.rsplit(":", 1)[0].strip().strip("[]").lower() \
+                if ":" in host and not host.strip().startswith("[") \
+                else host.split(":")[0].strip().strip("[]").lower()
+            allowed = ("localhost", "127.0.0.1", "::1", self.server.bind_host)
+            if h in allowed or h in self.server.extra_hosts:
                 return True
             try:
                 ip = ipaddress.ip_address(h)
@@ -670,14 +884,17 @@ def make_handler(token, bind, extra_hosts=None):
                     return 403, "missing CSRF header"
                 origin = self.headers.get("Origin", "")
                 if origin:
-                    oh = origin.split("//", 1)[-1].split(":")[0].lower()
+                    oh = origin.split("//", 1)[-1]
+                    oh = oh.rsplit(":", 1)[0].strip().strip("[]").lower() \
+                        if ":" in oh and not oh.startswith("[") \
+                        else oh.split(":")[0].lower()
                     try:
                         ip = ipaddress.ip_address(oh)
                         if not (ip.is_loopback or ip.is_private):
                             return 403, "bad Origin"
                     except ValueError:
-                        if oh not in ("localhost", self.server.bind_host,
-                                      *extra_hosts):
+                        if oh not in ("localhost", self.server.bind_host) \
+                                and oh not in self.server.extra_hosts:
                             return 403, "bad Origin"
             return None
 
@@ -685,35 +902,48 @@ def make_handler(token, bind, extra_hosts=None):
         def _route(self, method):
             path = self.path.split("?", 1)[0]
             path = re.sub(r"/+$", "", path) or "/"
-            if path == "/healthz":
-                if method == "GET":
-                    return self._send(200, b"ok\n", "text/plain")
-                return self._err(405, "method not allowed")
-            if path.startswith("/api"):
-                is_public = ((method == "POST" and path == "/api/session")
-                             or (method == "GET" and path == "/api/auth"))
-                if not is_public:
-                    if not self._authed():
-                        return self._err(401, "unauthorized")
-                    g = self._guard(method)
-                    if g:
-                        return self._err(g[0], g[1])
-                for m, rgx, fn in ROUTES:
-                    if m != method:
-                        continue
-                    mt = rgx.match(path)
-                    if mt:
-                        try:
+            try:
+                if path == "/healthz":
+                    if method == "GET":
+                        return self._send(200, b"ok\n", "text/plain")
+                    return self._err(405, "method not allowed")
+                if path.startswith("/api"):
+                    is_public = ((method == "POST" and path == "/api/session")
+                                 or (method == "GET" and path == "/api/auth"))
+                    # the DNS-rebinding Host guard applies to EVERY request,
+                    # including the public login/auth routes
+                    if not self._host_ok():
+                        return self._err(403, "bad Host header")
+                    if not is_public:
+                        if not self._authed():
+                            _audit("401 %s %s from %s"
+                                   % (method, path, self._client_ip()))
+                            return self._err(401, "unauthorized")
+                        g = self._guard(method)
+                        if g:
+                            _audit("guard %s %s %s from %s"
+                                   % (g[0], method, path, self._client_ip()))
+                            return self._err(g[0], g[1])
+                    for m, rgx, fn in ROUTES:
+                        if m != method:
+                            continue
+                        mt = rgx.match(path)
+                        if mt:
                             return fn(self, **mt.groupdict())
-                        except ValueError as e:
-                            return self._err(400, str(e))
-                        except Exception as e:              # noqa: BLE001
-                            return self._err(500, REDACTOR.redact(
-                                str(e)[:200]))
-                return self._err(404, "no such endpoint")
-            if method != "GET":
-                return self._err(405, "method not allowed")
-            return self._serve_static(path)
+                    return self._err(404, "no such endpoint")
+                if method != "GET":
+                    return self._err(405, "method not allowed")
+                return self._serve_static(path)
+            except _BodyTooLarge:
+                return self._err(413, "request body too large")
+            except _BadJson:
+                return self._err(400, "invalid JSON body")
+            except _Http as h:
+                return self._err(h.code, h.msg)
+            except Exception as e:
+                _audit("500 %s %s: %s" % (method, path,
+                                          _redactor().redact(str(e)[:200])))
+                return self._err(500, "internal error")
 
         def do_GET(self):
             self._route("GET")
@@ -732,8 +962,8 @@ def make_handler(token, bind, extra_hosts=None):
             if path in ("/", ""):
                 path = "/index.html"
             root = os.path.realpath(WEBUI_DIR)
-            full = os.path.realpath(os.path.join(root,
-                                                 os.path.normpath(path).lstrip("/")))
+            full = os.path.realpath(os.path.join(
+                root, os.path.normpath(path).lstrip("/")))
             if full != root and not full.startswith(root + os.sep):
                 return self._err(403, "forbidden")
             if not os.path.isfile(full):
@@ -751,145 +981,191 @@ def make_handler(token, bind, extra_hosts=None):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("X-Accel-Buffering", "no")   # defeat proxy buffer
-            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("Connection", "close")
             self.end_headers()
             self.close_connection = True
-
-            def send(obj):
-                chunk = ("data: " + json.dumps(obj) + "\n\n").encode()
-                try:
-                    self.wfile.write(("%x\r\n" % len(chunk)).encode())
-                    self.wfile.write(chunk)
-                    self.wfile.write(b"\r\n")
-                    self.wfile.flush()
-                    return True
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    return False
-
-            sent = 0
-            with job.cond:
-                while True:
-                    for line in job.lines[sent:]:
-                        if not send({"line": line}):
-                            return
-                    sent = len(job.lines)
-                    if not send({"progress": dict(job.progress),
-                                 "done": job.done, "exit": job.exit,
-                                 "error": job.error,
-                                 "elapsed": round((job.finished or time.time())
-                                                  - job.started, 1)}):
-                        return
-                    if job.done:
-                        break
-                    if not job.cond.wait(timeout=15):
-                        if not send({"ping": True}):
-                            return
             try:
-                self.wfile.write(b"0\r\n\r\n")
-                self.wfile.flush()
+                self.connection.settimeout(90)
             except OSError:
                 pass
 
-    # ---- endpoint handlers (closures over token/bind) ----
+            def send(obj):
+                try:
+                    self.wfile.write(
+                        ("data: " + json.dumps(obj) + "\n\n").encode())
+                    self.wfile.flush()
+                    return True
+                except (socket.timeout, OSError):
+                    return False     # stalled/closed client: drop it
 
-    def h_healthz(self):
-        self._send(200, b"ok\n", "text/plain")
+            # snapshot under the lock, write OUTSIDE it — otherwise a slow
+            # reader blocks the producer, the subprocess stdout pipe fills,
+            # and every mutating job wedges on the mutex until restart
+            sent = 0
+            while True:
+                with job.cond:
+                    lines = job.lines[sent:]
+                    sent = len(job.lines)
+                    snap = dict(job.progress)
+                    done, ex, er = job.done, job.exit, job.error
+                    el = round((job.finished or time.time()) - job.started, 1)
+                for line in lines:
+                    if not send({"line": line}):
+                        return
+                if not send({"progress": snap, "done": done, "exit": ex,
+                             "error": _redactor().redact(er) if er else None,
+                             "elapsed": el}):
+                    return
+                if done:
+                    break
+                with job.cond:
+                    if not job.cond.wait(timeout=15):
+                        if not send({"ping": True}):
+                            return
 
-    def h_login(self):
-        b = self._body()
-        secure = "; Secure" \
-            if self.headers.get("X-Forwarded-Proto") == "https" else ""
-        cookie = "gitsync_session=%s; Path=/; HttpOnly; SameSite=Strict%s" \
-            % (self._token, secure)
-        # username + password sign-in (when a password has been set)
-        if "username" in b or "password" in b:
-            if not get_auth():
-                return self._err(400, "password sign-in is not set up; "
-                                      "use the access token")
-            if _login_throttle.locked():
-                return self._err(429, "too many attempts — wait a minute")
-            if check_password(b.get("username", ""), b.get("password", "")):
-                _login_throttle.reset()
-                return self._send(200, b'{"ok":true}', "application/json",
-                                  {"Set-Cookie": cookie})
-            _login_throttle.fail()
-            time.sleep(0.25)              # slow online guessing
-            return self._err(401, "invalid username or password")
-        # access-token sign-in (always available; also the API credential)
-        tok = (b.get("token") or "").strip()
-        if tok and hmac.compare_digest(tok, self._token):
-            return self._send(200, b'{"ok":true}', "application/json",
-                              {"Set-Cookie": cookie})
-        return self._err(401, "invalid token")
+    return Handler
 
-    def h_auth_info(self):
-        a = get_auth()
-        self._json({"password_set": bool(a),
-                    "username": a.get("username") if a else "",
-                    "token_login": True})
 
-    def h_set_password(self):
-        b = self._body()
-        if b.get("disable"):
-            clear_password()
-            return self._json({"ok": True, "password_set": False,
-                               "message": "password sign-in disabled"})
-        try:
-            set_password(b.get("username", ""), b.get("password", ""))
-        except ValueError as e:
-            return self._err(400, str(e))
-        return self._json({"ok": True, "password_set": True,
-                           "message": "password set — sign in with it next time"})
+class _BodyTooLarge(Exception):
+    pass
 
-    def h_logout(self):
-        self._send(200, b'{"ok":true}', "application/json",
-                   {"Set-Cookie": "gitsync_session=; Path=/; HttpOnly; "
-                                  "SameSite=Strict; Max-Age=0"})
 
-    def h_session(self):
-        self._json({"authed": True, "version": __version__})
+class _BadJson(Exception):
+    pass
 
-    def h_status(self):
-        cfg = C.load_config()
-        recs = SYNC.last_records(1)
-        last = recs[-1] if recs else None
-        syncing = bool(_current_sync and not _current_sync.done)
-        self._json({
-            "version": __version__,
-            "syncing": syncing,
-            "schedule": C.setting(cfg, "schedule", "hourly"),
-            "scheduler": _cached_scheduler(),
-            "next_run": _cached_next_run(),
-            "config_file": C.CONFIG_FILE, "mirror_dir": C.MIRROR_DIR,
-            "log_file": C.LOG_FILE, "bind": self.server.bind_host,
-            "port": self.server.port,
-            "last_run": _public_record(last) if last else None,
-            "counts": {"platforms": len(cfg.get("platforms") or {}),
-                       "routes": len(C.routes(cfg))},
-        })
 
-    def h_platforms(self):
-        cfg = C.load_config()
-        if (self._qs().get("probe") or [None])[0] == "0":
-            # lightweight: names/types/enabled only, no network — for forms
-            rows = [_public_platform(n, p)
-                    for n, p in (cfg.get("platforms") or {}).items()]
-            return self._json({"platforms": rows})
-        self._json({"platforms": _probe_all(cfg)})
+# ---------------------------------------------------------------- endpoint handlers
+# module level (not closures in make_handler) so each is reachable/testable;
+# they talk to the request only through `handler` and read server state via
+# handler.server.
 
-    def h_platform_add(self):
-        b = self._body()
-        name = (b.get("name") or "").strip()
-        ptype = (b.get("type") or "").strip()
-        if not _valid_name(name):
-            raise ValueError("invalid platform name")
-        if ptype not in C.PLATFORM_TYPES:
-            raise ValueError("unknown platform type")
-        cfg = C.load_config()
+def h_healthz(handler):
+    handler._send(200, b"ok\n", "text/plain")
+
+
+def h_auth_info(handler):
+    a = get_auth()
+    authed = handler._authed()
+    handler._json({"password_set": bool(a),
+                   # the username is only revealed to an authenticated caller
+                   "username": a.get("username") if (a and authed) else "",
+                   "token_login": True})
+
+
+def h_login(handler):
+    b = handler._body()
+    ip = handler._client_ip()
+    secure = "; Secure" \
+        if handler.headers.get("X-Forwarded-Proto") == "https" else ""
+    cookie = "gitsync_session=%s; Path=/; HttpOnly; SameSite=Strict%s" \
+        % (handler._token, secure)
+    if "username" in b or "password" in b:
+        if not get_auth():
+            return handler._err(400, "password sign-in is not set up; "
+                                     "use the access token")
+        key = "%s|%s" % (ip, b.get("username", ""))
+        if _pw_throttle.locked(key):
+            _audit("429 password login locked from %s" % ip)
+            return handler._err(429, "too many attempts — wait a minute")
+        if check_password(b.get("username", ""), b.get("password", "")):
+            _pw_throttle.reset(key)
+            return handler._send(200, b'{"ok":true}', "application/json",
+                                 {"Set-Cookie": cookie})
+        _pw_throttle.fail(key)
+        time.sleep(0.25)                     # slow online guessing
+        _audit("401 bad password for '%s' from %s" % (b.get("username"), ip))
+        return handler._err(401, "invalid username or password")
+    tok = b.get("token")
+    if tok is not None and not isinstance(tok, str):
+        return handler._err(400, "invalid token")
+    tok = (tok or "").strip()
+    if _tok_throttle.locked(ip):
+        return handler._err(429, "too many attempts — wait a minute")
+    if tok and hmac.compare_digest(tok.encode("utf-8"),
+                                   handler._token.encode("utf-8")):
+        _tok_throttle.reset(ip)
+        return handler._send(200, b'{"ok":true}', "application/json",
+                             {"Set-Cookie": cookie})
+    _tok_throttle.fail(ip)
+    return handler._err(401, "invalid token")
+
+
+def h_logout(handler):
+    handler._send(200, b'{"ok":true}', "application/json",
+                  {"Set-Cookie": "gitsync_session=; Path=/; HttpOnly; "
+                                 "SameSite=Strict; Max-Age=0"})
+
+
+def h_session(handler):
+    handler._json({"authed": True, "version": __version__})
+
+
+def h_set_password(handler):
+    b = handler._body()
+    if b.get("disable"):
+        clear_password()
+        _audit("web password disabled")
+        return handler._json({"ok": True, "password_set": False,
+                              "message": "password sign-in disabled"})
+    try:
+        set_password(b.get("username", ""), b.get("password", ""))
+    except ValueError as e:
+        return handler._err(400, str(e))
+    _audit("web password set for '%s'" % (b.get("username") or ""))
+    handler._json({"ok": True, "password_set": True,
+                   "message": "password set — sign in with it next time"})
+
+
+def h_status(handler):
+    cfg = C.load_config()
+    recs = SYNC.last_records(1)
+    last = recs[-1] if recs else None
+    syncing = bool(_current_sync and not _current_sync.done) or _engine_sync_busy()
+    handler._json({
+        "version": __version__,
+        "syncing": syncing,
+        "schedule": C.setting(cfg, "schedule", "hourly"),
+        "scheduler": _cached_scheduler(),
+        "next_run": _cached_next_run(),
+        "config_file": C.CONFIG_FILE, "mirror_dir": C.MIRROR_DIR,
+        "log_file": C.LOG_FILE, "bind": handler.server.bind_host,
+        "port": handler.server.port,
+        "last_run": _public_record(last) if last else None,
+        "counts": {"platforms": len(cfg.get("platforms") or {}),
+                   "routes": len(C.routes(cfg))},
+    })
+
+
+def h_platforms(handler):
+    cfg = C.load_config()
+    if (handler._qs().get("probe") or [None])[0] == "0":
+        rows = [_public_platform(n, p)
+                for n, p in (cfg.get("platforms") or {}).items()]
+        return handler._json({"platforms": rows})
+    rows = _cached("platforms", 15,
+                   lambda: _probe_all(C.load_config()), [])
+    handler._json({"platforms": rows})
+
+
+def h_platform_add(handler):
+    b = handler._body()
+    name = (b.get("name") or "").strip()
+    ptype = (b.get("type") or "").strip()
+    if not _valid_name(name):
+        raise _Http(400, "invalid platform name")
+    if ptype not in C.PLATFORM_TYPES:
+        raise _Http(400, "unknown platform type")
+    if not _valid_platform_url(b.get("url", "")):
+        raise _Http(400, "url must be http(s) with a bare host")
+    if ptype == "local":
+        if not _valid_local_path(b.get("path", "")):
+            raise _Http(400, "local path must be a writable, non-system folder")
+    elif not (b.get("path") or "").strip() and ptype == "local":
+        raise _Http(400, "local platforms need a path")
+
+    def do(cfg):
         if name in (cfg.get("platforms") or {}):
-            raise ValueError("platform '%s' already exists" % name)
-        if ptype == "local" and not (b.get("path") or "").strip():
-            raise ValueError("local platforms need a path")
+            raise _Http(400, "platform '%s' already exists" % name)
         spec = C.platform_template(
             ptype, name, url=b.get("url"), token=b.get("token"),
             owner=b.get("owner"), path=b.get("path"),
@@ -902,171 +1178,222 @@ def make_handler(token, bind, extra_hosts=None):
             spec["ns_id"] = b["ns_id"]
         if b.get("affiliation"):
             spec["affiliation"] = b["affiliation"]
-        err = C.add_platform(cfg, name, spec)
-        if err:
-            raise ValueError(err)
-        C.save_config(cfg)
-        REDACTOR.reload()
-        ok, info = False, ""
-        try:
-            ok, info = P.make(name, spec).test()
-        except Exception as e:                              # noqa: BLE001
-            info = str(e)[:120]
-        self._json({"ok": True, "platform": _public_platform(name, spec),
-                    "test": {"ok": bool(ok),
-                             "info": REDACTOR.redact(info or "")}}, 201)
+        C.add_platform(cfg, name, spec)
+        _audit("platform added: %s (%s)" % (name, ptype))
+        return {"ok": True, "platform": _public_platform(name, spec)}
 
-    def h_platform_edit(self, name):
-        if not _valid_name(name):
-            raise ValueError("invalid platform name")
-        b = self._body()
-        cfg = C.load_config()
+    payload, code = _locked(do)
+    if code != 200:
+        return handler._json(payload, code)
+    _redactor().reload()
+    ok, info = False, ""
+    try:
+        ok, info = P.make(name, C.load_config()["platforms"][name]).test()
+    except Exception as e:
+        info = str(e)[:120]
+    handler._json({"ok": True, "platform": payload["platform"],
+                   "test": {"ok": bool(ok),
+                            "info": _redactor().redact(info or "")}}, 201)
+
+
+def h_platform_edit(handler, name):
+    if not _valid_name(name):
+        raise _Http(400, "invalid platform name")
+    b = handler._body()
+
+    def do(cfg):
         p = (cfg.get("platforms") or {}).get(name)
         if not p:
-            return self._err(404, "no such platform")
+            raise _Http(404, "no such platform")
         if p.get("type") == "local":
             if b.get("path"):
+                if not _valid_local_path(b["path"]):
+                    raise _Http(400, "invalid local path")
                 p["path"] = os.path.expanduser(b["path"])
         else:
+            if b.get("url") is not None and b["url"] != "":
+                if not _valid_platform_url(b["url"]):
+                    raise _Http(400, "url must be http(s) with a bare host")
             # token is write-only: an empty/absent field means "keep it"
             if (b.get("token") or "").strip():
                 p["token"] = b["token"].strip()
             for f in ("url", "owner", "protocol", "ns_id", "affiliation",
                       "url_template", "user"):
-                if b.get(f) is not None and b.get(f) != "":
+                if b.get(f):
                     p[f] = b[f]
+                elif f in b and b[f] == "":        # explicit clear
+                    p.pop(f, None)
             if b.get("ssh_port") is not None:
                 try:
                     p["ssh_port"] = int(b["ssh_port"])
                 except (TypeError, ValueError):
-                    pass
+                    raise _Http(400, "ssh_port must be a number")
             if p.get("type") == "github" and not p.get("token"):
                 p["auth"] = "gh"
         if "enabled" in b:
             p["enabled"] = bool(b["enabled"])
-        C.save_config(cfg)
-        REDACTOR.reload()
-        self._json({"ok": True, "platform": _public_platform(name, p)})
+        _audit("platform edited: %s" % name)
+        return {"ok": True, "platform": _public_platform(name, p)}
 
-    def h_platform_delete(self, name):
-        cfg = C.load_config()
-        force = (self._qs().get("force") or [None])[0] == "1"
+    payload, code = _locked(do)
+    if code != 200:
+        return handler._json(payload, code)
+    _redactor().reload()
+    handler._json(payload)
+
+
+def h_platform_delete(handler, name):
+    force = (handler._qs().get("force") or [None])[0] == "1"
+
+    def do(cfg):
         err = C.remove_platform(cfg, name, force=force)
         if err:
-            used = C.platform_used_by(cfg, name)
-            return self._err(409, err if force or not used else
-                             "%s — re-run with force=1 to remove anyway" % err)
-        C.save_config(cfg)
-        REDACTOR.reload()
-        self._json({"ok": True})
+            if not force and C.platform_used_by(cfg, name):
+                raise _Http(409, "%s — re-run with force=1 to remove anyway"
+                            % err)
+            raise _Http(400, err)
+        _audit("platform removed: %s" % name)
+        return {"ok": True}
 
-    def h_platform_test(self, name):
-        cfg = C.load_config()
+    payload, code = _locked(do)
+    _redactor().reload()
+    handler._json(payload, code)
+
+
+def h_platform_test(handler, name):
+    cfg = C.load_config()
+    p = (cfg.get("platforms") or {}).get(name)
+    if not p:
+        return handler._err(404, "no such platform")
+    try:
+        ok, info = P.make(name, p).test()
+    except Exception as e:
+        ok, info = False, str(e)[:120]
+    handler._json({"ok": bool(ok), "info": _redactor().redact(info or "")})
+
+
+def h_platform_toggle(handler, name):
+    def do(cfg):
         p = (cfg.get("platforms") or {}).get(name)
         if not p:
-            return self._err(404, "no such platform")
-        try:
-            ok, info = P.make(name, p).test()
-        except Exception as e:                              # noqa: BLE001
-            ok, info = False, str(e)[:120]
-        self._json({"ok": bool(ok), "info": REDACTOR.redact(info or "")})
-
-    def h_platform_toggle(self, name):
-        cfg = C.load_config()
-        p = (cfg.get("platforms") or {}).get(name)
-        if not p:
-            return self._err(404, "no such platform")
+            raise _Http(404, "no such platform")
         p["enabled"] = not bool(p.get("enabled"))
-        C.save_config(cfg)
-        self._json({"ok": True, "enabled": p["enabled"]})
+        _audit("platform %s: %s" % (name, "enabled" if p["enabled"]
+                                    else "disabled"))
+        return {"ok": True, "enabled": p["enabled"]}
 
-    def h_repos(self):
-        cfg = C.load_config()
-        name = (self._qs().get("platform") or [None])[0]
-        if not name:
-            routes = C.routes(cfg)
-            name = routes[0]["source"] if routes else None
-        if not name:
-            return self._err(400, "no platform to list")
-        p = C.platform(cfg, name)
-        if not p:
-            return self._err(404, "no such platform: %s" % name)
-        try:
-            repos = P.make(name, p).list_repos()
-        except Exception as e:                              # noqa: BLE001
-            return self._err(502, "cannot list %s: %s"
-                             % (name, REDACTOR.redact(str(e)[:160])))
-        q = (self._qs().get("q") or [""])[0].lower()
-        forks = (self._qs().get("forks") or [None])[0] == "1"
-        out = []
-        for r in repos:
-            if not forks and r.get("fork"):
-                continue
-            if q and q not in r["name"].lower():
-                continue
-            out.append({"name": r["name"], "private": bool(r.get("private")),
-                        "fork": bool(r.get("fork"))})
-        out.sort(key=lambda r: r["name"].lower())
-        self._json({"platform": name, "repos": out})
+    payload, code = _locked(do)
+    handler._json(payload, code)
 
-    def h_selection_file(self):
-        b = self._body()
-        repos = b.get("repos") or []
-        platform = (b.get("platform") or "").strip()
-        if not repos:
-            raise ValueError("no repos selected")
-        for r in repos:
-            if not re.match(r"^[A-Za-z0-9._-]{1,128}$", r):
-                raise ValueError("bad repo name: %r" % r[:40])
-        path = os.path.expanduser((b.get("path") or "").strip()
-                                  or os.path.join(
-                                      C.CONFIG_DIR,
-                                      "repos-%s.txt" % (platform or "selection")))
-        d = os.path.dirname(path)
+
+def h_repos(handler):
+    cfg = C.load_config()
+    name = (handler._qs().get("platform") or [None])[0]
+    if not name:
+        routes = C.routes(cfg)
+        name = routes[0]["source"] if routes else None
+    if not name:
+        return handler._err(400, "no platform to list")
+    p = C.platform(cfg, name)
+    if not p:
+        return handler._err(404, "no such platform: %s" % name)
+    try:
+        repos = P.make(name, p).list_repos()
+    except Exception as e:
+        return handler._err(502, "cannot list %s: %s"
+                            % (name, _redactor().redact(str(e)[:160])))
+    q = (handler._qs().get("q") or [""])[0].lower()
+    forks = (handler._qs().get("forks") or [None])[0] == "1"
+    out = []
+    for r in repos:
+        if not forks and r.get("fork"):
+            continue
+        if q and q not in r["name"].lower():
+            continue
+        out.append({"name": r["name"], "private": bool(r.get("private")),
+                    "fork": bool(r.get("fork"))})
+    out.sort(key=lambda r: r["name"].lower())
+    handler._json({"platform": name, "repos": out})
+
+
+def h_selection_file(handler):
+    b = handler._body()
+    repos = b.get("repos") or []
+    platform = (b.get("platform") or "").strip()
+    if not repos:
+        raise _Http(400, "no repos selected")
+    for r in repos:
+        if not isinstance(r, str) or not re.match(r"^[A-Za-z0-9._-]{1,128}$", r):
+            raise _Http(400, "bad repo name: %r" % (r,)[:40])
+
+    def do(cfg):
+        # confine the output to the config dir — never allow a caller-chosen
+        # absolute path (it could clobber config.json / web.token)
+        rel = (b.get("path") or "").strip()
+        default = os.path.join(C.CONFIG_DIR, "repos-%s.txt"
+                               % (platform or "selection"))
+        target = _confined_path(rel, C.CONFIG_DIR) if rel else default
+        if target is None:
+            target = default
+        d = os.path.dirname(target)
         if d:
             os.makedirs(d, exist_ok=True)
-        with open(path, "w") as f:
+        tmp = target + ".tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w") as f:
             f.write("# repos synced by gitsync — one per line, # comments\n")
             for r in repos:
                 f.write(r + "\n")
-        try:
-            os.chmod(path, 0o600)
-        except OSError:
-            pass
-        cfg = C.load_config()
-        routes = [r for r in C.routes(cfg) if r.get("source") == platform] \
-            or C.routes(cfg)[:1]
+        os.replace(tmp, target)
+        routes = [r for r in C.routes(cfg) if r.get("source") == platform]
+        if not routes:
+            # do not silently attach to an unrelated route
+            raise _Http(400, "no route has '%s' as its source; nothing attached"
+                        % (platform or "?"))
         for r in routes:
-            r["include_file"] = path
+            r["include_file"] = target
             r.pop("include", None)
-        C.save_config(cfg)
-        self._json({"ok": True, "path": path, "count": len(repos),
-                    "routes": [r.get("name") for r in routes]})
+        _audit("selection file written: %s (%d repos) -> %s"
+               % (target, len(repos), ", ".join(x.get("name") for x in routes)))
+        return {"ok": True, "path": target, "count": len(repos),
+                "routes": [r.get("name") for r in routes]}
 
-    def h_routes(self):
-        cfg = C.load_config()
-        self._json({"routes": [_route_view(cfg, r) for r in C.routes(cfg)]})
+    handler._json(*_locked(do))
 
-    def h_route_add(self):
-        b = self._body()
-        name = (b.get("name") or "").strip()
-        source = (b.get("source") or "").strip()
-        targets = [t.strip() for t in (b.get("targets") or []) if t.strip()]
-        if not _valid_name(name):
-            raise ValueError("invalid route name")
-        for n in [source] + targets:
-            if not _valid_name(n):
-                raise ValueError("invalid platform name: %r" % n)
-        if not targets:
-            raise ValueError("a route needs at least one target")
-        cfg = C.load_config()
+
+def h_routes(handler):
+    cfg = C.load_config()
+    handler._json({"routes": [_route_view(cfg, r) for r in C.routes(cfg)]})
+
+
+def h_route_add(handler):
+    b = handler._body()
+    name = (b.get("name") or "").strip()
+    source = (b.get("source") or "").strip()
+    targets = [t.strip() for t in (b.get("targets") or []) if t.strip()]
+    if not _valid_name(name):
+        raise _Http(400, "invalid route name")
+    for n in [source] + targets:
+        if not _valid_name(n):
+            raise _Http(400, "invalid platform name: %r" % n)
+    if not targets:
+        raise _Http(400, "a route needs at least one target")
+    if b.get("mode") not in (None, "", "inherit", "full", "safe"):
+        raise _Http(400, "invalid mode")
+    if b.get("mesh_conflict") not in (None, "", "inherit", "newest", "skip"):
+        raise _Http(400, "invalid mesh_conflict")
+    if b.get("schedule") not in (None, "", "inherit") + tuple(C.SCHEDULES):
+        raise _Http(400, "invalid schedule")
+
+    def do(cfg):
         if any(r.get("name") == name for r in cfg.get("routes", [])):
-            raise ValueError("route '%s' already exists" % name)
+            raise _Http(400, "route '%s' already exists" % name)
         if source not in (cfg.get("platforms") or {}):
-            raise ValueError("unknown source platform: %s" % source)
+            raise _Http(400, "unknown source platform: %s" % source)
         for t in targets:
             if t not in (cfg.get("platforms") or {}):
-                raise ValueError("unknown target platform: %s" % t)
+                raise _Http(400, "unknown target platform: %s" % t)
         route = {"name": name, "source": source, "targets": targets}
         if b.get("direction") == "mesh":
             route["direction"] = "mesh"
@@ -1075,16 +1402,21 @@ def make_handler(token, bind, extra_hosts=None):
             if v and v != "inherit":
                 route[key] = int(v) if key == "workers" else v
         cfg.setdefault("routes", []).append(route)
-        C.save_config(cfg)
-        self._json({"ok": True, "route": _route_view(cfg, route)}, 201)
+        _audit("route added: %s" % name)
+        return {"ok": True, "route": _route_view(cfg, route)}
 
-    def h_route_edit(self, name):
-        b = self._body()
-        cfg = C.load_config()
+    payload, code = _locked(do)
+    handler._json(payload, 201 if code == 200 else code)
+
+
+def h_route_edit(handler, name):
+    b = handler._body()
+
+    def do(cfg):
         route = next((r for r in cfg.get("routes", [])
                       if r.get("name") == name), None)
         if not route:
-            return self._err(404, "no such route")
+            raise _Http(404, "no such route")
         if b.get("clear_filters"):
             route.pop("include", None)
             route.pop("include_file", None)
@@ -1101,41 +1433,57 @@ def make_handler(token, bind, extra_hosts=None):
                 v = b[key]
                 if v in (None, "", "inherit"):
                     route.pop(key, None)
+                elif key == "workers":
+                    try:
+                        route[key] = int(v)
+                    except (TypeError, ValueError):
+                        raise _Http(400, "workers must be a number")
+                elif key == "mode" and v not in ("full", "safe"):
+                    raise _Http(400, "invalid mode")
+                elif key == "mesh_conflict" and v not in ("newest", "skip"):
+                    raise _Http(400, "invalid mesh_conflict")
                 else:
-                    route[key] = int(v) if key == "workers" else v
+                    route[key] = v
         if "schedule" in b:
             v = b["schedule"]
             if v in (None, "", "inherit"):
                 route.pop("schedule", None)
-            else:
+            elif v in C.SCHEDULES:
                 route["schedule"] = v
+            else:
+                raise _Http(400, "invalid schedule")
         if "enabled" in b:
             route["enabled"] = bool(b["enabled"])
-        C.save_config(cfg)
-        self._json({"ok": True, "route": _route_view(cfg, route)})
+        _audit("route edited: %s" % name)
+        return {"ok": True, "route": _route_view(cfg, route)}
 
-    def h_route_delete(self, name):
-        cfg = C.load_config()
+    payload, code = _locked(do)
+    handler._json(payload, code)
+
+
+def h_route_delete(handler, name):
+    def do(cfg):
         before = len(cfg.get("routes", []))
         cfg["routes"] = [r for r in cfg.get("routes", [])
                          if r.get("name") != name]
-        C.save_config(cfg)
-        self._json({"ok": len(cfg["routes"]) < before})
+        if len(cfg["routes"]) == before:
+            raise _Http(404, "no such route: %s" % name)
+        _audit("route removed: %s" % name)
+        return {"ok": True}
 
-    def h_route_pause(self, name):
-        return self._pause_resume(name, pause=True)
+    payload, code = _locked(do)
+    handler._json(payload, code)
 
-    def h_route_resume(self, name):
-        return self._pause_resume(name, pause=False)
 
-    def _pause_resume(self, name, pause):
-        b = self._body()
-        want = [t.strip() for t in (b.get("targets") or []) if t.strip()]
-        cfg = C.load_config()
+def _pause_resume(handler, name, pause):
+    b = handler._body()
+    want = [t.strip() for t in (b.get("targets") or []) if t.strip()]
+
+    def do(cfg):
         route = next((r for r in cfg.get("routes", [])
                       if r.get("name") == name), None)
         if not route:
-            return self._err(404, "no such route")
+            raise _Http(404, "no such route")
         if not want:
             route["enabled"] = not pause
             if not pause:
@@ -1144,8 +1492,8 @@ def make_handler(token, bind, extra_hosts=None):
             known = set(route.get("targets") or [])
             unknown = [t for t in want if t not in known]
             if unknown:
-                return self._err(400, "%s has no target(s): %s"
-                                 % (name, ", ".join(unknown)))
+                raise _Http(400, "%s has no target(s): %s"
+                            % (name, ", ".join(unknown)))
             cur = [t for t in (route.get("paused_targets") or []) if t in known]
             if pause:
                 cur = sorted(set(cur) | set(want))
@@ -1155,143 +1503,180 @@ def make_handler(token, bind, extra_hosts=None):
                 route["paused_targets"] = cur
             else:
                 route.pop("paused_targets", None)
-        C.save_config(cfg)
-        self._json({"ok": True, "route": _route_view(cfg, route)})
+        _audit("route %s: %s %s" % (name, "paused" if pause else "resumed",
+                                    ",".join(want) or "(whole)"))
+        return {"ok": True, "route": _route_view(cfg, route)}
 
-    def h_stars(self):
-        cfg = C.load_config()
-        name = (self._qs().get("platform") or [None])[0]
-        if not name:
-            routes = C.routes(cfg)
-            name = routes[0]["source"] if routes else None
-        p = C.platform(cfg, name) if name else None
-        if not p:
-            return self._err(404, "no platform to read stars from")
-        try:
-            rows = ST.starred(P.make(name, p))
-        except Exception as e:                              # noqa: BLE001
-            return self._err(502, "cannot read stars on %s: %s"
-                             % (name, REDACTOR.redact(str(e)[:160])))
-        self._json({"platform": name,
-                    "stars": [{"name": n, "url": u} for n, u in rows]})
+    payload, code = _locked(do)
+    handler._json(payload, code)
 
-    def h_stars_copy(self):
-        b = self._body()
-        source = (b.get("source") or "").strip()
-        targets = [t.strip() for t in (b.get("targets") or []) if t.strip()]
-        if not source or not targets:
-            raise ValueError("pick a source and at least one target")
-        cfg = C.load_config()
-        if source not in (cfg.get("platforms") or {}):
-            raise ValueError("unknown source platform: %s" % source)
-        unknown = [t for t in targets if t not in (cfg.get("platforms") or {})]
-        if unknown:
-            raise ValueError("unknown target(s): %s" % ", ".join(unknown))
-        only = b.get("repos") or None
-        lines = []
-        t = ST.copy_stars(cfg, source, targets,
-                          dry_run=bool(b.get("dry_run")), only=only,
-                          log=lambda m: lines.append(REDACTOR.redact(m)))
-        self._json({"ok": True, "summary": t, "log": lines})
 
-    def h_log(self):
-        tail = int((self._qs().get("tail") or ["400"])[0])
-        q = (self._qs().get("q") or [""])[0].lower()
-        lines = []
-        try:
-            with open(C.LOG_FILE) as f:
-                lines = f.read().splitlines()
-        except OSError:
-            pass
-        total = len(lines)
-        if q:
-            lines = [l for l in lines if q in l.lower()]
-        lines = lines[-tail:]
-        self._json({"lines": [REDACTOR.redact(l) for l in lines],
-                    "total": total, "shown": len(lines)})
+def h_route_pause(handler, name):
+    return _pause_resume(handler, name, pause=True)
 
-    def h_history(self):
-        n = int((self._qs().get("n") or ["40"])[0])
-        recs = SYNC.last_records(n)
-        self._json({
-            "records": [_public_record(r) for r in recs],
-            "spark": [r.get("elapsed_sec", 0) or 0 for r in recs[-30:]],
-        })
 
-    def h_settings_get(self):
-        cfg = C.load_config()
-        st = dict(cfg.get("settings") or {})
-        notify = dict(st.get("notify") or {})
-        notify_public = {
-            "on": notify.get("on", "failure"),
-            "discord_set": bool(notify.get("discord_webhook")),
-            "telegram_set": bool(notify.get("telegram_token")
-                                 and notify.get("telegram_chat_id")),
-        }
-        st["notify"] = notify_public
-        st["paths"] = {"config": C.CONFIG_FILE, "mirror": C.MIRROR_DIR,
-                       "log": C.LOG_FILE, "data": C.DATA_DIR}
-        st["schedules"] = {k: v["label"] for k, v in C.SCHEDULES.items()}
-        st["themes"] = list(C.THEMES)
-        self._json({"settings": st})
+def h_route_resume(handler, name):
+    return _pause_resume(handler, name, pause=False)
 
-    def h_settings_put(self):
-        b = self._body()
-        cfg = C.load_config()
+
+def h_stars(handler):
+    cfg = C.load_config()
+    name = (handler._qs().get("platform") or [None])[0]
+    if not name:
+        routes = C.routes(cfg)
+        name = routes[0]["source"] if routes else None
+    p = C.platform(cfg, name) if name else None
+    if not p:
+        return handler._err(404, "no platform to read stars from")
+    try:
+        rows = ST.starred(P.make(name, p))
+    except Exception as e:
+        return handler._err(502, "cannot read stars on %s: %s"
+                            % (name, _redactor().redact(str(e)[:160])))
+    handler._json({"platform": name,
+                   "stars": [{"name": n, "url": u} for n, u in rows]})
+
+
+def h_stars_copy(handler):
+    b = handler._body()
+    source = (b.get("source") or "").strip()
+    targets = [t.strip() for t in (b.get("targets") or []) if t.strip()]
+    if not source or not targets:
+        raise _Http(400, "pick a source and at least one target")
+    cfg = C.load_config()
+    if source not in (cfg.get("platforms") or {}):
+        raise _Http(400, "unknown source platform: %s" % source)
+    unknown = [t for t in targets if t not in (cfg.get("platforms") or {})]
+    if unknown:
+        raise _Http(400, "unknown target(s): %s" % ", ".join(unknown))
+    only = b.get("repos") or None
+    lines = []
+    t = ST.copy_stars(cfg, source, targets,
+                      dry_run=bool(b.get("dry_run")), only=only,
+                      log=lambda m: lines.append(_redactor().redact(m)))
+    handler._json({"ok": True, "summary": t, "log": lines})
+
+
+def h_log(handler):
+    tail = (handler._qs().get("tail") or ["400"])[0]
+    try:
+        tail = int(tail)
+    except ValueError:
+        raise _Http(400, "tail must be a number")
+    q = (handler._qs().get("q") or [""])[0].lower()
+    lines = []
+    try:
+        with open(C.LOG_FILE) as f:
+            lines = f.read().splitlines()
+    except OSError:
+        pass
+    total = len(lines)
+    if q:
+        lines = [l for l in lines if q in l.lower()]
+    lines = lines[-tail:] if tail > 0 else []
+    handler._json({"lines": [_redactor().redact(l) for l in lines],
+                   "total": total, "shown": len(lines)})
+
+
+def h_history(handler):
+    n = (handler._qs().get("n") or ["40"])[0]
+    try:
+        n = int(n)
+    except ValueError:
+        raise _Http(400, "n must be a number")
+    recs = SYNC.last_records(n)
+    handler._json({
+        "records": [_public_record(r) for r in recs],
+        "spark": [r.get("elapsed_sec", 0) or 0 for r in recs[-30:]],
+    })
+
+
+def h_settings_get(handler):
+    cfg = C.load_config()
+    st = _public_settings(cfg)
+    a = get_auth()
+    st["paths"] = {"config": C.CONFIG_FILE, "mirror": C.MIRROR_DIR,
+                   "log": C.LOG_FILE, "data": C.DATA_DIR}
+    st["schedules"] = {k: v["label"] for k, v in C.SCHEDULES.items()}
+    st["themes"] = list(C.THEMES)
+    st["auth"] = {"password_set": bool(a),
+                  "username": a.get("username") if a else ""}
+    handler._json({"settings": st})
+
+
+def _apply_setting(st, key, body, cast, choices=None):
+    if key not in body or body[key] in (None, ""):
+        return
+    try:
+        val = cast(body[key])
+    except (TypeError, ValueError):
+        raise _Http(400, "invalid %s" % key)
+    if choices and val not in choices:
+        raise _Http(400, "invalid %s: %r" % (key, body[key]))
+    st[key] = val
+
+
+def h_settings_put(handler):
+    b = handler._body()
+
+    def do(cfg):
         st = cfg.setdefault("settings", {})
         _apply_setting(st, "workers", b, int, [1, 2, 4, 8])
         _apply_setting(st, "mode", b, str, ["safe", "full"])
         _apply_setting(st, "mesh_conflict", b, str, ["newest", "skip"])
         _apply_setting(st, "schedule", b, str, list(C.SCHEDULES))
         _apply_setting(st, "include_forks", b, bool)
-        _apply_setting(st, "pace", b, lambda v: float(v), [0, 1, 2, 5, 10])
+        _apply_setting(st, "pace", b, float, [0, 1, 2, 5, 10])
         _apply_setting(st, "relax_protection", b, bool)
         _apply_setting(st, "token_warn_days", b, int, [7, 14, 30, 60, 90])
         _apply_setting(st, "theme", b, str, list(C.THEMES))
         notify = st.setdefault("notify", {})
         if "on" in b:
             if b["on"] not in ("failure", "success", "always", "never"):
-                raise ValueError("bad notify mode")
+                raise _Http(400, "bad notify mode")
             notify["on"] = b["on"]
         if (b.get("discord_webhook") or "").strip():
             url = b["discord_webhook"].strip()
-            if not url.startswith(("https://discord.com/api/webhooks/",
-                                   "https://discordapp.com/api/webhooks/")):
-                raise ValueError("that is not a Discord webhook URL")
+            if not url.startswith(NT.DISCORD_PREFIXES):
+                raise _Http(400, "that is not a Discord webhook URL")
             notify["discord_webhook"] = url
         if (b.get("telegram_token") or "").strip():
             tok = b["telegram_token"].strip()
             chat = (b.get("telegram_chat_id") or "").strip()
             if not chat:
-                raise ValueError("telegram needs a chat id too")
+                raise _Http(400, "telegram needs a chat id too")
             notify["telegram_token"] = tok
             notify["telegram_chat_id"] = chat
-        C.save_config(cfg)
-        REDACTOR.reload()
-        self._json({"ok": True})
+        _audit("settings updated")
+        return {"ok": True}
 
-    def h_notify_test(self):
-        cfg = C.load_config()
-        ok, msg = NT.notify_test(cfg)
-        self._json({"ok": bool(ok), "message": REDACTOR.redact(msg or "")})
+    payload, code = _locked(do)
+    _redactor().reload()
+    handler._json(payload, code)
 
-    def h_scopes(self):
-        out = []
-        for ptype in C.PLATFORM_TYPES:
-            g = PERM.guide(ptype)
-            out.append({"type": ptype, "title": g["title"],
-                        "token_url": g.get("token_url", ""),
-                        "minimum": g["minimum"],
-                        "scopes": [{"scope": s, "why": w} for s, w in
-                                   g.get("scopes", [])],
-                        "alt_auth": g.get("alt_auth", ""),
-                        "env": g.get("env", "")})
-        self._json({"scopes": out})
 
-    def h_health(self):
-        now = time.time()
-        if _cache["health"][0] is not None and now - _cache["health"][1] < 15:
-            return self._json(_cache["health"][0])
+def h_notify_test(handler):
+    cfg = C.load_config()
+    ok, msg = NT.notify_test(cfg)
+    handler._json({"ok": bool(ok), "message": _redactor().redact(msg or "")})
+
+
+def h_scopes(handler):
+    out = []
+    for ptype in C.PLATFORM_TYPES:
+        g = PERM.guide(ptype)
+        out.append({"type": ptype, "title": g["title"],
+                    "token_url": g.get("token_url", ""),
+                    "minimum": g["minimum"],
+                    "scopes": [{"scope": s, "why": w} for s, w in
+                               g.get("scopes", [])],
+                    "alt_auth": g.get("alt_auth", ""),
+                    "env": g.get("env", "")})
+    handler._json({"scopes": out})
+
+
+def h_health(handler):
+    def compute():
         cfg = C.load_config()
         try:
             tok = TK.check(cfg)
@@ -1301,7 +1686,7 @@ def make_handler(token, bind, extra_hosts=None):
                        "expires_at": t.get("expires_at")} for t in tok]
             tok_summary = TK.summary(tok)
             tok_bad = bool(TK.bad(tok))
-        except Exception:                                   # noqa: BLE001
+        except Exception:
             tokens, tok_summary, tok_bad = [], "tokens: unknown", False
         disk = {"mirrors": 0, "size": 0, "free": None, "total": None,
                 "pct": None}
@@ -1313,286 +1698,246 @@ def make_handler(token, bind, extra_hosts=None):
             disk["free"], disk["total"] = free, tot
             if tot:
                 disk["pct"] = int(100.0 * (tot - free) / tot)
-        except Exception:                                   # noqa: BLE001
+        except Exception:
             pass
         wh = {"secret_set": bool(WH.get_secret()),
               "active": S.webhooks_active()}
-        out = {"tokens": tokens, "token_summary": tok_summary,
-               "token_bad": tok_bad, "disk": disk, "webhooks": wh,
-               "disk_human": {"size": DK.human(disk["size"]),
-                              "free": DK.human(disk["free"]) if disk["free"]
-                              else None,
-                              "total": DK.human(disk["total"]) if disk["total"]
-                              else None}}
-        _cache["health"] = (out, now)
-        self._json(out)
+        return {"tokens": tokens, "token_summary": tok_summary,
+                "token_bad": tok_bad, "disk": disk, "webhooks": wh,
+                "disk_human": {"size": DK.human(disk["size"]),
+                               "free": DK.human(disk["free"]) if disk["free"]
+                               else None,
+                               "total": DK.human(disk["total"]) if disk["total"]
+                               else None}}
+    handler._json(_cached("health", 15, compute, {}))
 
-    def h_scheduler_install(self):
-        b = self._body()
-        cfg = C.load_config()
-        key = b.get("schedule") or C.finest_schedule(cfg) \
-            or C.setting(cfg, "schedule", "hourly")
-        if key == "off":
-            S.uninstall_systemd(system=True)
-            S.uninstall_systemd()
-            S.install_cron("off")
-            return self._json({"ok": True, "status": "scheduler disabled"})
-        if b.get("schedule"):
-            C.set_setting(cfg, "schedule", key)
-        if b.get("cron") or not S.have_systemd():
-            S.install_cron(key)
-            return self._json({"ok": True,
-                               "status": "cron: %s" % C.SCHEDULES[key]["label"]})
-        if S.install_systemd(key):
-            return self._json({"ok": True,
-                               "status": "timer: %s"
-                               % C.SCHEDULES[key]["label"]})
+
+def h_scheduler_install(handler):
+    b = handler._body()
+    cfg = C.load_config()
+    key = b.get("schedule") or C.finest_schedule(cfg) \
+        or C.setting(cfg, "schedule", "hourly")
+    if key != "off" and key not in C.SCHEDULES:
+        raise _Http(400, "unknown schedule '%s' (choose from: %s)"
+                    % (key, ", ".join(C.SCHEDULES)))
+    if key == "off":
+        S.uninstall_systemd(system=True)
+        S.uninstall_systemd()
+        S.install_cron("off")
+        _audit("scheduler disabled")
+        return handler._json({"ok": True, "status": "scheduler disabled"})
+    if b.get("schedule"):
+        C.set_setting(cfg, "schedule", key)
+    if b.get("cron") or not S.have_systemd():
         S.install_cron(key)
-        return self._json({"ok": True,
-                           "status": "cron (systemd failed): %s"
-                           % C.SCHEDULES[key]["label"]})
+        _audit("scheduler installed (cron): %s" % key)
+        return handler._json({"ok": True,
+                              "status": "cron: %s" % C.SCHEDULES[key]["label"]})
+    if S.install_systemd(key):
+        _audit("scheduler installed (systemd): %s" % key)
+        return handler._json({"ok": True,
+                              "status": "timer: %s"
+                              % C.SCHEDULES[key]["label"]})
+    S.install_cron(key)
+    _audit("scheduler installed (cron fallback): %s" % key)
+    handler._json({"ok": True,
+                   "status": "cron (systemd failed): %s"
+                   % C.SCHEDULES[key]["label"]})
 
-    def h_webhooks_get(self):
-        cfg = C.load_config()
-        endpoints = []
-        for name, p in (cfg.get("platforms") or {}).items():
-            if p.get("enabled") and p.get("type") in WH.AUTH_STYLE:
-                endpoints.append({"name": name, "type": p.get("type"),
-                                  "path": "/hook/%s" % name})
-        self._json({"secret_set": bool(WH.get_secret()),
-                    "active": S.webhooks_active(), "port": WH.DEFAULT_PORT,
-                    "endpoints": endpoints})
 
-    def h_webhooks_action(self):
-        b = self._body()
-        action = b.get("action")
-        if action == "rotate":
-            WH.rotate_secret()
-            _say("  %s new webhook secret generated — read it with: "
-                 "gitsync webhooks --secret --show"
-                 % _c("33", "[web]"))
-            return self._json({"ok": True, "secret_set": True,
-                               "note": "secret generated; view it with "
-                               "'gitsync webhooks --secret --show'"})
-        if action == "install":
-            ok = S.install_webhooks(port=WH.DEFAULT_PORT, bind="0.0.0.0")
-            return self._json({"ok": bool(ok),
-                               "status": "installed" if ok
-                               else "install failed (needs systemd)"})
-        if action == "stop":
-            ok = S.uninstall_webhooks()
-            return self._json({"ok": True,
-                               "status": "removed" if ok else "not installed"})
-        raise ValueError("unknown webhook action")
+def h_webhooks_get(handler):
+    cfg = C.load_config()
+    endpoints = []
+    for name, p in (cfg.get("platforms") or {}).items():
+        if p.get("enabled") and p.get("type") in WH.AUTH_STYLE:
+            endpoints.append({"name": name, "type": p.get("type"),
+                              "path": "/hook/%s" % name})
+    handler._json({"secret_set": bool(WH.get_secret()),
+                   "active": S.webhooks_active(), "port": WH.DEFAULT_PORT,
+                   "endpoints": endpoints})
 
-    def h_sync_start(self):
-        if _engine_sync_busy():
-            return self._err(409, "a sync is already running")
-        b = self._body()
-        argv = ["sync"]
-        if b.get("route"):
-            if not _valid_name(b["route"]):
-                raise ValueError("invalid route name")
-            argv += ["--route", b["route"]]
-        if b.get("to"):
-            if not _valid_name(b["to"]):
-                raise ValueError("invalid target name")
-            argv += ["--to", b["to"]]
-        repos = _clean_repo_list(b.get("repos"))
-        if repos:
-            argv += ["--repos", ",".join(repos)]
-        dry = bool(b.get("dry_run"))
-        if dry:
-            argv += ["--dry-run"]
+
+def h_webhooks_action(handler):
+    b = handler._body()
+    action = b.get("action")
+    if action == "rotate":
+        WH.rotate_secret()
+        _say("  %s new webhook secret generated — read it with: "
+             "gitsync webhooks --secret --show" % _c("33", "[web]"))
+        _audit("webhook secret rotated")
+        return handler._json({"ok": True, "secret_set": True,
+                              "note": "secret generated; view it with "
+                              "'gitsync webhooks --secret --show'"})
+    if action == "install":
+        # match the CLI default (127.0.0.1); front it with a proxy/tunnel to
+        # let platforms reach it — one exposure policy, not two
+        ok = S.install_webhooks(port=WH.DEFAULT_PORT, bind="127.0.0.1")
+        _audit("webhook service install: %s" % ("ok" if ok else "failed"))
+        return handler._json({"ok": bool(ok),
+                              "status": "installed" if ok
+                              else "install failed (needs systemd)"})
+    if action == "stop":
+        ok = S.uninstall_webhooks()
+        _audit("webhook service removed")
+        return handler._json({"ok": True,
+                              "status": "removed" if ok else "not installed"})
+    raise _Http(400, "unknown webhook action")
+
+
+def h_sync_start(handler):
+    if _engine_sync_busy():
+        _audit("409 sync start refused (engine lock held) from %s"
+               % handler._client_ip())
+        return handler._err(409, "a sync is already running")
+    b = handler._body()
+    argv = ["sync"]
+    if b.get("route"):
+        if not _valid_name(b["route"]):
+            raise _Http(400, "invalid route name")
+        argv += ["--route", b["route"]]
+    if b.get("to"):
+        if not _valid_name(b["to"]):
+            raise _Http(400, "invalid target name")
+        argv += ["--to", b["to"]]
+    repos = _clean_repo_list(b.get("repos"))
+    if repos:
+        argv += ["--repos", ",".join(repos)]
+    dry = bool(b.get("dry_run"))
+    if dry:
+        argv += ["--dry-run"]
+    try:
         job = start_job("sync", [sys.executable, "-m", "gitsync"] + argv,
                         mutating=True)
-        if job is None:
-            return self._err(409, "another job is already running")
-        global _current_sync
-        _current_sync = job
-        _say("  %s %s started (%s)"
-             % (_c("36", "[web]"), "dry run" if dry else "sync", job.id))
-        self._json({"ok": True, "job_id": job.id, "dry_run": dry,
-                    "kind": "sync"}, 202)
+    except Exception:
+        return handler._err(500, "could not start the sync")
+    if job is None:
+        return handler._err(409, "another job is already running")
+    global _current_sync
+    _current_sync = job
+    _audit("sync started (%s) route=%s to=%s repos=%d dry=%s from %s"
+           % (job.id, b.get("route") or "*", b.get("to") or "*",
+              len(repos), dry, handler._client_ip()))
+    handler._json({"ok": True, "job_id": job.id, "dry_run": dry,
+                   "kind": "sync"}, 202)
 
-    def h_sync_state(self):
-        job = _current_sync
-        if not job:
-            return self._json({"syncing": False, "job_id": None,
-                               "progress": {"done": 0, "total": 0}})
-        snap = job.snapshot()
-        self._json({"syncing": not job.done, "job_id": job.id,
-                    "progress": snap["progress"], "done": job.done,
-                    "exit": job.exit, "kind": job.kind})
 
-    def h_sync_stream(self):
-        jid = (self._qs().get("job_id") or [None])[0]
-        job = _jobs.get(jid) if jid else _current_sync
-        if not job:
-            return self._err(404, "no such job")
-        self._sse(job)
+def h_sync_state(handler):
+    job = _current_sync
+    if not job:
+        busy = _engine_sync_busy()
+        return handler._json({"syncing": busy, "job_id": None,
+                              "progress": {"done": 0, "total": 0}})
+    snap = job.snapshot()
+    handler._json({"syncing": not job.done, "job_id": job.id,
+                   "progress": snap["progress"], "done": job.done,
+                   "exit": job.exit, "kind": job.kind})
 
-    def h_job_start(self):
-        b = self._body()
-        kind = (b.get("kind") or "").strip()
-        argv, mutating = _tool_argv(kind, b)
+
+def h_sync_stream(handler):
+    jid = (handler._qs().get("job_id") or [None])[0]
+    job = _jobs.get(jid) if jid else _current_sync
+    if not job:
+        return handler._err(404, "no such job")
+    handler._sse(job)
+
+
+def h_job_start(handler):
+    b = handler._body()
+    kind = (b.get("kind") or "").strip()
+    argv, mutating = _tool_argv(kind, b)
+    try:
         job = start_job(kind, [sys.executable, "-m", "gitsync"] + argv,
                         mutating=mutating)
-        if job is None:
-            return self._err(409, "another job is already running")
-        _say("  %s tool '%s' started (%s)" % (_c("36", "[web]"), kind, job.id))
-        self._json({"ok": True, "job_id": job.id, "kind": kind}, 202)
-
-    def h_job_state(self, job_id):
-        job = _jobs.get(job_id)
-        if not job:
-            return self._err(404, "no such job")
-        snap = job.snapshot()
-        with job.cond:
-            snap["lines"] = list(job.lines)
-        snap["lines"] = [REDACTOR.redact(l) for l in snap["lines"]]
-        self._json(snap)
-
-    def h_job_stream(self, job_id):
-        job = _jobs.get(job_id)
-        if not job:
-            return self._err(404, "no such job")
-        self._sse(job)
-
-    ROUTES = [
-        ("GET", re.compile(r"^/api/auth$"), lambda s: h_auth_info(s)),
-        ("POST", re.compile(r"^/api/auth/password$"),
-         lambda s: h_set_password(s)),
-        ("POST", re.compile(r"^/api/session$"), lambda s: h_login(s)),
-        ("GET", re.compile(r"^/api/session$"), lambda s: h_session(s)),
-        ("GET", re.compile(r"^/api/logout$"), lambda s: h_logout(s)),
-        ("GET", re.compile(r"^/api/status$"), lambda s: h_status(s)),
-        ("GET", re.compile(r"^/api/platforms$"), lambda s: h_platforms(s)),
-        ("POST", re.compile(r"^/api/platforms$"), lambda s: h_platform_add(s)),
-        ("PUT", re.compile(r"^/api/platforms/(?P<name>[^/]+)$"),
-         lambda s, name: h_platform_edit(s, name)),
-        ("DELETE", re.compile(r"^/api/platforms/(?P<name>[^/]+)$"),
-         lambda s, name: h_platform_delete(s, name)),
-        ("POST", re.compile(r"^/api/platforms/(?P<name>[^/]+)/test$"),
-         lambda s, name: h_platform_test(s, name)),
-        ("POST", re.compile(r"^/api/platforms/(?P<name>[^/]+)/toggle$"),
-         lambda s, name: h_platform_toggle(s, name)),
-        ("GET", re.compile(r"^/api/repos$"), lambda s: h_repos(s)),
-        ("POST", re.compile(r"^/api/repos/selection-file$"),
-         lambda s: h_selection_file(s)),
-        ("GET", re.compile(r"^/api/routes$"), lambda s: h_routes(s)),
-        ("POST", re.compile(r"^/api/routes$"), lambda s: h_route_add(s)),
-        ("PUT", re.compile(r"^/api/routes/(?P<name>[^/]+)$"),
-         lambda s, name: h_route_edit(s, name)),
-        ("DELETE", re.compile(r"^/api/routes/(?P<name>[^/]+)$"),
-         lambda s, name: h_route_delete(s, name)),
-        ("POST", re.compile(r"^/api/routes/(?P<name>[^/]+)/pause$"),
-         lambda s, name: h_route_pause(s, name)),
-        ("POST", re.compile(r"^/api/routes/(?P<name>[^/]+)/resume$"),
-         lambda s, name: h_route_resume(s, name)),
-        ("GET", re.compile(r"^/api/stars$"), lambda s: h_stars(s)),
-        ("POST", re.compile(r"^/api/stars/copy$"), lambda s: h_stars_copy(s)),
-        ("GET", re.compile(r"^/api/log$"), lambda s: h_log(s)),
-        ("GET", re.compile(r"^/api/history$"), lambda s: h_history(s)),
-        ("GET", re.compile(r"^/api/settings$"), lambda s: h_settings_get(s)),
-        ("PUT", re.compile(r"^/api/settings$"), lambda s: h_settings_put(s)),
-        ("POST", re.compile(r"^/api/notify/test$"),
-         lambda s: h_notify_test(s)),
-        ("GET", re.compile(r"^/api/scopes$"), lambda s: h_scopes(s)),
-        ("GET", re.compile(r"^/api/health$"), lambda s: h_health(s)),
-        ("POST", re.compile(r"^/api/scheduler/install$"),
-         lambda s: h_scheduler_install(s)),
-        ("GET", re.compile(r"^/api/webhooks$"), lambda s: h_webhooks_get(s)),
-        ("POST", re.compile(r"^/api/webhooks$"),
-         lambda s: h_webhooks_action(s)),
-        ("POST", re.compile(r"^/api/sync$"), lambda s: h_sync_start(s)),
-        ("GET", re.compile(r"^/api/sync/state$"), lambda s: h_sync_state(s)),
-        ("GET", re.compile(r"^/api/sync/stream$"), lambda s: h_sync_stream(s)),
-        ("POST", re.compile(r"^/api/jobs$"), lambda s: h_job_start(s)),
-        ("GET", re.compile(r"^/api/jobs/(?P<job_id>[^/]+)$"),
-         lambda s, job_id: h_job_state(s, job_id)),
-        ("GET", re.compile(r"^/api/jobs/(?P<job_id>[^/]+)/stream$"),
-         lambda s, job_id: h_job_stream(s, job_id)),
-    ]
-
-    return Handler
+    except Exception:
+        return handler._err(500, "could not start the job")
+    if job is None:
+        return handler._err(409, "another job is already running")
+    _audit("tool '%s' started (%s) from %s" % (kind, job.id,
+                                               handler._client_ip()))
+    handler._json({"ok": True, "job_id": job.id, "kind": kind}, 202)
 
 
-def _apply_setting(st, key, body, cast, choices=None):
-    if key not in body or body[key] in (None, ""):
-        return
-    val = cast(body[key])
-    if choices and val not in choices:
-        raise ValueError("invalid %s: %r" % (key, body[key]))
-    st[key] = val
+def h_job_state(handler, job_id):
+    job = _jobs.get(job_id)
+    if not job:
+        return handler._err(404, "no such job")
+    snap = job.snapshot()
+    with job.cond:
+        snap["lines"] = [_redactor().redact(l) for l in job.lines[-2000:]]
+    handler._json(snap)
 
 
-def _tool_argv(kind, b):
-    """(argv_after_'gitsync', mutating) for a Tools action — reuses the CLI."""
-    route = (b.get("route") or "").strip()
-    if kind == "compare":
-        argv = ["compare"] + (["--route", route] if route else [])
-        return argv, False
-    if kind == "doctor":
-        argv = ["doctor"] + (["--fix"] if b.get("fix") else [])
-        return argv, False
-    if kind == "fix":
-        argv = ["fix"] + (["--route", route] if route else [])
-        return argv, True
-    if kind == "tokens":
-        return ["tokens"], False
-    if kind == "disk":
-        argv = ["disk"]
-        if b.get("orphans"):
-            argv.append("--orphans")
-        if b.get("top"):
-            argv += ["--top", str(int(b["top"]))]
-        return argv, False
-    if kind == "gc":
-        argv = ["disk", "--gc"]
-        if b.get("older_than"):
-            argv += ["--older-than", str(int(b["older_than"]))]
-        if b.get("aggressive"):
-            argv.append("--aggressive")
-        return argv, True
-    if kind == "restore":
-        to = (b.get("to") or "").strip()
-        if not _valid_name(to.split(",")[0]):
-            raise ValueError("restore needs --to PLATFORM")
-        argv = ["restore", "--to", to]
-        repos = _clean_repo_list(b.get("repos"))
-        if repos:
-            argv += ["--repos", ",".join(repos)]
-        if b.get("dry_run"):
-            argv.append("--dry-run")
-        if b.get("prune"):
-            argv.append("--prune")
-        if b.get("public"):
-            argv.append("--public")
-        return argv, True
-    if kind == "mirror":
-        repos = _clean_repo_list(b.get("repos"))
-        if not repos:
-            raise ValueError("mirror needs at least one repo")
-        argv = ["mirror"] + repos
-        if b.get("src") and _valid_name(b["src"]):
-            argv += ["--from", b["src"]]
-        if b.get("to") and _valid_name(b["to"]):
-            argv += ["--to", b["to"]]
-        return argv, True
-    raise ValueError("unknown tool: %s" % kind)
+def h_job_stream(handler, job_id):
+    job = _jobs.get(job_id)
+    if not job:
+        return handler._err(404, "no such job")
+    handler._sse(job)
 
 
-def _public_record(r):
-    if not r:
-        return None
-    fails = [{"route": f.get("route"), "repo": f.get("repo"),
-              "error": REDACTOR.redact(str(f.get("error", ""))[:200])}
-             for f in (r.get("failures") or [])]
-    return {"finished_at": r.get("finished_at"), "ok": r.get("ok", 0),
-            "partial": r.get("partial", 0), "failed": r.get("failed", 0),
-            "repos": r.get("repos", 0), "elapsed_sec": r.get("elapsed_sec"),
-            "routes": r.get("routes", 0), "failures": fails}
+def _locked(fn):
+    """Run fn(cfg)->payload under the config process-lock + flock (via
+    C.update), then save. fn may raise _Http(code,msg) to abort without
+    saving. Returns (payload, http_code)."""
+    try:
+        return C.update(fn), 200
+    except _Http as h:
+        return {"error": h.msg}, h.code
+
+
+# ---------------------------------------------------------------- routing table
+
+ROUTES = [
+    ("GET", re.compile(r"^/api/auth$"), lambda h: h_auth_info(h)),
+    ("POST", re.compile(r"^/api/auth/password$"), lambda h: h_set_password(h)),
+    ("POST", re.compile(r"^/api/session$"), lambda h: h_login(h)),
+    ("GET", re.compile(r"^/api/session$"), lambda h: h_session(h)),
+    ("GET", re.compile(r"^/api/logout$"), lambda h: h_logout(h)),
+    ("GET", re.compile(r"^/api/status$"), lambda h: h_status(h)),
+    ("GET", re.compile(r"^/api/platforms$"), lambda h: h_platforms(h)),
+    ("POST", re.compile(r"^/api/platforms$"), lambda h: h_platform_add(h)),
+    ("PUT", re.compile(r"^/api/platforms/(?P<name>[^/]+)$"),
+     lambda h, name: h_platform_edit(h, name)),
+    ("DELETE", re.compile(r"^/api/platforms/(?P<name>[^/]+)$"),
+     lambda h, name: h_platform_delete(h, name)),
+    ("POST", re.compile(r"^/api/platforms/(?P<name>[^/]+)/test$"),
+     lambda h, name: h_platform_test(h, name)),
+    ("POST", re.compile(r"^/api/platforms/(?P<name>[^/]+)/toggle$"),
+     lambda h, name: h_platform_toggle(h, name)),
+    ("GET", re.compile(r"^/api/repos$"), lambda h: h_repos(h)),
+    ("POST", re.compile(r"^/api/repos/selection-file$"),
+     lambda h: h_selection_file(h)),
+    ("GET", re.compile(r"^/api/routes$"), lambda h: h_routes(h)),
+    ("POST", re.compile(r"^/api/routes$"), lambda h: h_route_add(h)),
+    ("PUT", re.compile(r"^/api/routes/(?P<name>[^/]+)$"),
+     lambda h, name: h_route_edit(h, name)),
+    ("DELETE", re.compile(r"^/api/routes/(?P<name>[^/]+)$"),
+     lambda h, name: h_route_delete(h, name)),
+    ("POST", re.compile(r"^/api/routes/(?P<name>[^/]+)/pause$"),
+     lambda h, name: h_route_pause(h, name)),
+    ("POST", re.compile(r"^/api/routes/(?P<name>[^/]+)/resume$"),
+     lambda h, name: h_route_resume(h, name)),
+    ("GET", re.compile(r"^/api/stars$"), lambda h: h_stars(h)),
+    ("POST", re.compile(r"^/api/stars/copy$"), lambda h: h_stars_copy(h)),
+    ("GET", re.compile(r"^/api/log$"), lambda h: h_log(h)),
+    ("GET", re.compile(r"^/api/history$"), lambda h: h_history(h)),
+    ("GET", re.compile(r"^/api/settings$"), lambda h: h_settings_get(h)),
+    ("PUT", re.compile(r"^/api/settings$"), lambda h: h_settings_put(h)),
+    ("POST", re.compile(r"^/api/notify/test$"), lambda h: h_notify_test(h)),
+    ("GET", re.compile(r"^/api/scopes$"), lambda h: h_scopes(h)),
+    ("GET", re.compile(r"^/api/health$"), lambda h: h_health(h)),
+    ("POST", re.compile(r"^/api/scheduler/install$"),
+     lambda h: h_scheduler_install(h)),
+    ("GET", re.compile(r"^/api/webhooks$"), lambda h: h_webhooks_get(h)),
+    ("POST", re.compile(r"^/api/webhooks$"), lambda h: h_webhooks_action(h)),
+    ("POST", re.compile(r"^/api/sync$"), lambda h: h_sync_start(h)),
+    ("GET", re.compile(r"^/api/sync/state$"), lambda h: h_sync_state(h)),
+    ("GET", re.compile(r"^/api/sync/stream$"), lambda h: h_sync_stream(h)),
+    ("POST", re.compile(r"^/api/jobs$"), lambda h: h_job_start(h)),
+    ("GET", re.compile(r"^/api/jobs/(?P<job_id>[^/]+)$"),
+     lambda h, job_id: h_job_state(h, job_id)),
+    ("GET", re.compile(r"^/api/jobs/(?P<job_id>[^/]+)/stream$"),
+     lambda h, job_id: h_job_stream(h, job_id)),
+]
 
 
 # ---------------------------------------------------------------- server
@@ -1604,18 +1949,18 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, addr, handler, token, bind_host, extra_hosts):
         self.token = token
         self.bind_host = bind_host
-        self.port = addr[1]
         self.extra_hosts = extra_hosts
         super().__init__(addr, handler)
+        self.port = self.server_address[1]   # actual bound port (may be 0→ephemeral)
 
 
 def serve(port=DEFAULT_PORT, bind=DEFAULT_BIND, allowed_hosts=None):
     token, generated = get_web_token()
-    REDACTOR.reload()
+    _redactor().reload()
     extra = set(h.lower() for h in (allowed_hosts or []))
     env_hosts = (os.environ.get("GITSYNC_ALLOWED_HOSTS") or "").split(",")
     extra |= {h.strip().lower() for h in env_hosts if h.strip()}
-    handler = make_handler(token, bind, extra)
+    handler = make_handler()
     try:
         httpd = _Server((bind, port), handler, token, bind, extra)
     except OSError as e:
@@ -1639,8 +1984,13 @@ def serve(port=DEFAULT_PORT, bind=DEFAULT_BIND, allowed_hosts=None):
              "--bind 127.0.0.1" % (_c("33", "note:"), bind))
     if generated:
         _say("")
-        _say("  %s %s" % (_c("1", "access token (shown once):"), token))
-        _say("  stored in %s (mode 0600)" % _token_path())
+        # never print the token into the journal / a pipe — read the file
+        if _TTY and not _UNDER_SYSTEMD:
+            _say("  %s %s" % (_c("1", "access token (shown once):"), token))
+        else:
+            _say("  %s a new access token was generated; read it from:"
+                 % _c("1", "note:"))
+            _say("      %s   (mode 0600)" % _token_path())
         _say("  open the URL and paste this token to sign in.")
         _say("")
     else:

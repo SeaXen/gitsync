@@ -7,6 +7,7 @@ Runtime data (mirror hub, logs, run records) lives at ~/.local/share/gitsync
 
 import json
 import os
+import threading
 
 from . import __version__
 
@@ -132,13 +133,58 @@ def load_config():
 def save_config(cfg):
     ensure_dirs()
     tmp = CONFIG_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
+    # the temp file holds every platform token, so create it 0600 from the
+    # start — the process umask would otherwise leave it 0644 until the
+    # chmod below, exposing secrets in that window (the web UI saves often)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
     os.replace(tmp, CONFIG_FILE)
     try:
         os.chmod(CONFIG_FILE, 0o600)
     except OSError:
         pass
+
+
+_save_lock = threading.Lock()
+
+
+def update(fn):
+    """Atomically read-modify-write the config.
+
+    Holds a process lock (the web server is multi-threaded) *and* an flock on
+    config.lock (so a web write and a TUI/CLI write in another process never
+    clobber each other's in-memory copy). fn(cfg) mutates cfg in place and may
+    return a value, which update() passes back.
+    """
+    import fcntl
+    ensure_dirs()
+    lock_path = os.path.join(DATA_DIR, "config.lock")
+    with _save_lock:
+        fh = open(lock_path, "a+")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            cfg = load_config()
+            result = fn(cfg)
+            save_config(cfg)
+            return result
+        finally:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                fh.close()
+            except OSError:
+                pass
 
 
 def platform(cfg, name):

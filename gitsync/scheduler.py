@@ -362,13 +362,23 @@ def uninstall_systemd_web(system=False):
 
 
 def web_active():
-    """is the always-on web dashboard service running?"""
+    """is the always-on web dashboard service running? Checks the user unit
+    and, if present, the root system unit (installed with --system)."""
     try:
         r = _sh(["systemctl", "--user", "is-active", WEB_SERVICE])
-        return ((r.stdout or "").strip() == "active"
-                and getattr(r, "returncode", 1) == 0)
+        if ((r.stdout or "").strip() == "active"
+                and getattr(r, "returncode", 1) == 0):
+            return True
     except Exception:
-        return False
+        pass
+    if os.path.exists(os.path.join(SYSTEMD_DIR, WEB_SERVICE)):
+        try:
+            r = _sh(["systemctl", "is-active", WEB_SERVICE])
+            return ((r.stdout or "").strip() == "active"
+                    and getattr(r, "returncode", 1) == 0)
+        except Exception:
+            return False
+    return False
 
 
 def status():

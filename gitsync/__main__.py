@@ -231,7 +231,6 @@ def cmd_web(args):
         print("password sign-in disabled (access-token sign-in still works).")
         return 0
     cfg = C.load_config()
-    from . import scheduler as S
     if getattr(args, "install", False):
         # the always-on service is the "share it on the LAN" path -> 0.0.0.0
         bind, port = web.resolve_bind_port(getattr(args, "bind", None),
@@ -1586,10 +1585,6 @@ def cmd_ci(args):
     return 0
 
 
-DISCORD_PREFIXES = ("https://discord.com/api/webhooks/",
-                    "https://discordapp.com/api/webhooks/")
-
-
 def cmd_notify(args):
     cfg = C.load_config()
     if args.test:
@@ -1598,9 +1593,9 @@ def cmd_notify(args):
         return 0 if ok else 1
     if getattr(args, "set_url", None):
         url = args.set_url.strip()
-        if not url.startswith(DISCORD_PREFIXES):
+        if not url.startswith(NT.DISCORD_PREFIXES):
             print("that does not look like a Discord webhook "
-                  "(expected %s...)" % DISCORD_PREFIXES[0])
+                  "(expected %s...)" % NT.DISCORD_PREFIXES[0])
             return 2
         cfg.setdefault("settings", {}).setdefault("notify", {})
         cfg["settings"]["notify"]["discord_webhook"] = url

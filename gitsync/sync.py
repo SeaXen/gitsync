@@ -8,6 +8,7 @@ resumable and gives an offline copy for free.
 import fnmatch
 import json
 import os
+import re as _re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,6 +18,52 @@ from . import config as C
 from . import diskutil as DK
 from . import notify as NT
 from . import platforms as P
+
+# the run lock lives here; web.py probes it so the dashboard can report a
+# timer/webhook sync that is already running (one owner for the lock's path)
+SYNC_LOCK = "sync.lock"
+
+# the live per-repo progress line the engine prints — "[12/54] OK repo -> t".
+# One parser, shared by the TUI and the web UI, so a tweak to the format
+# cannot silently zero one consumer's progress bar.
+_PROGRESS_RE = _re.compile(r"\[(\d+)\s*/\s*(\d+)\]\s+(\S+)\s+(\S+)")
+
+
+def parse_progress_line(line):
+    """(done, total, status, repo) from a sync stdout line, or None."""
+    m = _PROGRESS_RE.search(line or "")
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2)), m.group(3), m.group(4)
+
+
+def engine_busy():
+    """is a sync (this process, the timer, or the webhook receiver) holding
+    the engine lock? Read-only probe; never blocks."""
+    import fcntl
+    path = os.path.join(C.DATA_DIR, SYNC_LOCK)
+    try:
+        fh = open(path, "a+")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return False
+    except OSError:
+        return True
+    finally:
+        try:
+            fh.close()
+        except OSError:
+            pass
+
+
+# public alias: the web layer redacts on top of this, and should not reach
+# into a private symbol (see gitsync/web.py Redactor)
+def redact(text):
+    """public wrapper for the engine's token-URL redaction."""
+    return _redact(text)
 
 _log_lock = threading.Lock()
 _start = None

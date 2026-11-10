@@ -27,7 +27,7 @@ a:hover{text-decoration:underline}
 .side{border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:2px;background:var(--side);position:sticky;top:0;height:100vh;overflow-y:auto}
 .logo{font:600 17px var(--mono);padding:6px 10px 14px;display:flex;align-items:center;gap:9px;color:var(--text)}
 .logo .mark{width:22px;height:22px;color:var(--accent)}
-.nav{display:flex;align-items:center;gap:11px;padding:9px 10px;min-height:42px;border-radius:9px;color:var(--nav);font-weight:500;position:relative}
+.nav{display:flex;align-items:center;gap:11px;padding:9px 10px;min-height:44px;border-radius:9px;color:var(--nav);font-weight:500;position:relative}
 .nav:hover{background:var(--hover);text-decoration:none}
 .nav svg{width:18px;height:18px;flex:none;opacity:.9}
 .nav.on{background:linear-gradient(90deg,rgba(110,168,254,.16),rgba(110,168,254,.04));color:#fff}
@@ -59,7 +59,7 @@ a:hover{text-decoration:underline}
 .actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 
 /* ---------------------------------------------------------- components */
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:40px;padding:0 16px;border-radius:9px;border:1px solid var(--line2);background:var(--panel);color:var(--text);font:550 13.5px var(--sans);cursor:pointer;transition:border-color .15s,background .15s,transform .05s;white-space:nowrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:44px;padding:0 16px;border-radius:9px;border:1px solid var(--line2);background:var(--panel);color:var(--text);font:550 13.5px var(--sans);cursor:pointer;transition:border-color .15s,background .15s,transform .05s;white-space:nowrap}
 .btn:hover{border-color:var(--accent);background:var(--hover)}
 .btn:active{transform:translateY(1px)}
 .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
@@ -69,7 +69,7 @@ a:hover{text-decoration:underline}
 .btn.danger{border-color:#5d2b2b;color:#ffb3b0}
 .btn.danger:hover{border-color:var(--bad);background:rgba(248,81,73,.08)}
 .btn.ghost{background:transparent}
-.btn.sm{min-height:32px;padding:0 11px;font-size:12.5px;border-radius:8px}
+.btn.sm{min-height:40px;padding:0 12px;font-size:12.5px;border-radius:8px}
 .btn.icon{padding:0;width:40px;min-height:40px}
 .btn:disabled{opacity:.5;cursor:not-allowed}
 
@@ -107,7 +107,7 @@ a:hover{text-decoration:underline}
 input[type=text],input[type=password],input[type=number],select,textarea{width:100%;min-height:42px;padding:0 12px;border-radius:9px;border:1px solid var(--line2);background:#0b0f16;color:var(--text);font:14px var(--sans);transition:border-color .15s,box-shadow .15s}
 textarea{min-height:88px;padding:10px 12px;resize:vertical;font-family:var(--mono);font-size:12.5px}
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.22)}
-input::placeholder{color:#5b6572}
+input::placeholder{color:#7d8790}
 select{appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%238b949e' stroke-width='2.5'><path d='M6 9l6 6 6-6'/></svg>");background-repeat:no-repeat;background-position:right 12px center;padding-right:34px}
 .check{display:flex;align-items:center;gap:10px;min-height:42px;cursor:pointer}
 .check input{width:17px;height:17px;accent-color:var(--accent);flex:none}
@@ -173,10 +173,23 @@ td .mono{color:#cbd5e1}
   .shell{grid-template-columns:1fr}
   .side{position:static;height:auto;flex-direction:row;overflow-x:auto;border-right:0;border-bottom:1px solid var(--line);padding:8px 10px;gap:4px}
   .side .logo,.side .foot{display:none}
-  .nav{white-space:nowrap;min-height:38px}
+  .nav{white-space:nowrap;min-height:40px}
   .nav.on::before{display:none}
   .main{padding:16px}
   .top{padding:9px 14px}
-  .top .status{display:none}
+  .top .status{font-size:11.5px;padding:4px 9px;max-width:42vw;overflow:hidden;text-overflow:ellipsis}
   .form-grid{grid-template-columns:1fr}
+}
+
+/* skip link + skip target */
+.skip{position:absolute;left:-9999px;top:0;z-index:200;background:var(--accent);color:var(--accent-ink);padding:10px 16px;border-radius:0 0 8px 0;font-weight:600}
+.skip:focus{left:0}
+#main:focus{outline:none}
+
+/* respect reduced-motion: stop the infinite pip/shimmer animations */
+@media (prefers-reduced-motion: reduce){
+  .status.live .pip{animation:none}
+  .skel{animation:none}
+  .toast{animation:none}
+  .btn,.progress>span{transition:none}
 }

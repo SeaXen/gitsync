@@ -2,26 +2,20 @@
 (function () {
   var G = window.Gitsync;
 
-  function spark(vals) {
-    if (!vals || !vals.length) return "";
-    var blocks = " ▁▂▃▄▅▆▇";
-    var lo = Math.min.apply(null, vals), hi = Math.max.apply(null, vals);
-    var span = (hi - lo) || 1;
-    return vals.map(function (v) {
-      return blocks[Math.min(7, Math.floor((v - lo) / span * 7) || 0)];
-    }).join("");
-  }
-
   function render(main) {
     main.innerHTML = G.bar("History", "Recent sync runs, newest first.") +
       '<section class="card"><div id="h-host">' + G.loading() + "</div></section>";
     G.api("GET", "/api/history?n=60").then(function (d) {
       var recs = (d.records || []).slice().reverse();
       var host = document.getElementById("h-host");
-      if (!recs.length) { host.innerHTML = '<div class="empty">no runs recorded yet</div>'; return; }
+      if (!recs.length) {
+        host.innerHTML = G.emptyState("No runs recorded yet", "Run a sync to see history.", "history");
+        return;
+      }
       var sparkHtml = (d.spark && d.spark.length)
-        ? '<div class="mono spark">' + G.esc(spark(d.spark)) + '</div>' +
-          '<div class="muted" style="font-size:12px">duration trend, last ' + d.spark.length + " runs</div>"
+        ? '<div class="mono spark">' + G.esc(G.spark(d.spark)) + '</div>' +
+          '<div class="muted" style="font-size:12px">duration trend, last ' +
+          d.spark.length + " runs</div>"
         : "";
       var rows = recs.map(function (r) {
         var bad = (r.failed || 0) + (r.partial || 0);
@@ -38,9 +32,12 @@
           (fails ? "<tr><td colspan='6' style='padding-top:0'>" + fails + "</td></tr>" : "");
       }).join("");
       host.innerHTML = sparkHtml +
-        "<table class='mt'><thead><tr><th>Finished</th><th>OK</th><th>Partial</th>" +
-        "<th>Failed</th><th>Repos</th><th>Time</th></tr></thead><tbody>" + rows + "</tbody></table>";
-    }).catch(function (e) { document.getElementById("h-host").innerHTML = G.errorBox(e); });
+        '<div style="overflow-x:auto"><table class="mt"><thead><tr><th>Finished</th>' +
+        "<th>OK</th><th>Partial</th><th>Failed</th><th>Repos</th><th>Time</th>" +
+        "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+    }).catch(function (e) {
+      document.getElementById("h-host").innerHTML = G.errorBox(e);
+    });
   }
 
   G.mount("history", render);

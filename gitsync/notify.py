@@ -27,6 +27,10 @@ TIMEOUT = 15
 COLORS = {"ok": 0x2ECC71, "warn": 0xF1C40F, "fail": 0xE74C3C,
           "info": 0x3498DB}
 
+# the only hosts a Discord webhook may point at (validated on save)
+DISCORD_PREFIXES = ("https://discord.com/api/webhooks/",
+                    "https://discordapp.com/api/webhooks/")
+
 
 def _settings(cfg):
     n = (cfg.get("settings", {}) or {}).get("notify", {}) or {}

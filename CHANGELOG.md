@@ -4,6 +4,77 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-11-10
+
+Full review pass over the web UI (a fleet of correctness, security,
+architecture, code-quality, simplicity, UX/a11y, telemetry and testing
+reviewers). Fixes every actionable finding; no CLI/TUI behaviour change.
+
+### Fixed — correctness (dead/unsafe features)
+- **Route pause/resume returned 500** — the handlers called a non-existent
+  `self._pause_resolve`; now wired correctly.
+- **"Doctor — auto-repair" button was dead** — the Tools page sent
+  `kind:"doctorfix"`, which the backend rejected; the id is now an accepted
+  alias for `doctor --fix`, with a contract test pinning every card id.
+- **Repos target dropdown was ignored** — selecting a site and hitting Sync
+  pushed to *every* target; the chosen target is now honoured.
+- **Platforms subtitle rendered literal `<a>` markup** — the scopes link is a
+  real button; the stale "0 sites" subtitle now refreshes after load.
+- `save-config` selection-file accepted an arbitrary write path (could clobber
+  `config.json`/`web.token`) — now confined to the config dir; returns 400 when
+  no route matches instead of a false success.
+- `scheduler/install` accepted an unknown `schedule` (corrupted the setting,
+  installed the wrong timer, then 500'd) — now validated.
+- SSE stream could wedge every mutating job (a slow reader held the job lock
+  across a blocking socket write) — the lock is now released around writes and
+  the socket has a timeout; a finished run closes its EventSource (no more
+  reconnect loop), and a lost stream stops retrying.
+
+### Security
+- Config read-modify-write is now serialized (process lock + `flock`) so
+  concurrent web writes (or web vs TUI) don't lose updates.
+- `save_config` writes its temp file `0600` before replace (tokens were briefly
+  world-readable in the write window).
+- Platform `url` must be http(s) with a bare host (no token relay / SSRF);
+  local-folder paths are validated (no writing bare repos into `/etc` etc.).
+- The first-run access token is no longer printed to the journal/pipe — read
+  `web.token` (0600). `/api/auth` no longer leaks the username unauthenticated,
+  and the DNS-rebinding Host guard now covers the public login/auth routes.
+- Login throttle is keyed per client+account and also covers the token branch;
+  `compare_digest` runs on bytes (a non-ASCII token no longer drops the
+  connection); job errors are redacted and job output is bounded; a socket
+  timeout reaps half-open connections; `nosniff`/`X-Frame-Options` added.
+- Security-relevant web events (auth failures, guard rejections, 5xx, config
+  and security mutations, job start/finish) are audit-logged (redacted) to
+  `gitsync.log`.
+
+### Architecture / quality
+- The 39 HTTP handlers moved out of the 900-line `make_handler` closure to
+  module level (testable); the config transaction is one `config.update()`
+  helper. Shared progress parsing + `engine_busy()` live in `sync.py`; the
+  redactor is a lazy singleton (no import-time read of the live config) and
+  calls the now-public `sync.redact`. `web_active`/uninstall understand
+  `--system`; the webhook-install bind matches the CLI; `DISCORD_PREFIXES`
+  moved to `notify.py`; dead code and the Google-Fonts CDN link removed.
+
+### UX / accessibility
+- Every form control has an accessible name (labels emit `for`); toasts, status
+  and progress bars are ARIA live regions; skeletons announce busy; loaders
+  show their message; error toasts are never empty; buttons disable while busy.
+- `<nav>` landmark + skip link; decorative icons `aria-hidden`; login is a
+  `<form>` with focus management; `prefers-reduced-motion` honoured.
+- Mobile: tables scroll instead of the page, 44px touch targets, status stays
+  visible, sign-out moved into the top bar. Theme control labelled "TUI theme".
+- Settings has one authoritative schedule control; dashboard surfaces
+  per-token expiry; log viewer only auto-scrolls when already pinned.
+
+### Tests
+- 142 unit tests (was 124): a new HTTP-layer suite (auth, cookie login, CSRF,
+  Host guard, traversal, 413, the pause endpoint, the doctorfix alias, setting
+  validation), the tools-page contract test, locked-case `engine_busy`, token
+  reuse + `0600`, `_public_settings` redaction, `_apply_setting` rejection, and
+  progress-line parsing.
+
 ## [1.9.5] - 2026-11-10
 
 ### Changed — two clear run modes, and web UI fixes

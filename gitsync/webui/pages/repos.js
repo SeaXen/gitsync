@@ -2,7 +2,7 @@
    (all targets / one site / local only), or save the selection to a file. */
 (function () {
   var G = window.Gitsync;
-  var state = { platform: "", platforms: [], repos: [], sel: {}, q: "" };
+  var state = { platform: "", platforms: [], repos: [], sel: {}, q: "", to: "" };
 
   function render(main) {
     main.innerHTML =
@@ -11,10 +11,10 @@
         '<button class="btn" id="r-all">Select all</button>') +
       '<section class="card">' +
         '<div class="inline mb">' +
-          '<div class="field" style="margin:0;min-width:200px"><label>Platform</label>' +
-          '<select id="r-plat"></select></div>' +
-          '<div class="field grow" style="margin:0"><label>Filter</label>' +
-          '<input type="text" id="r-q" placeholder="type to filter…"></div>' +
+          '<div class="field" style="margin:0;min-width:200px">' +
+            G.field("Platform", '<select id="r-plat"></select>') + "</div>" +
+          '<div class="field grow" style="margin:0">' +
+            G.field("Filter", '<input type="text" id="r-q" placeholder="type to filter…">') + "</div>" +
           '<label class="check"><input type="checkbox" id="r-forks"> include forks</label>' +
         "</div>" +
         '<div id="r-list">' + G.loading("listing repos…") + "</div>" +
@@ -22,46 +22,63 @@
       '<section class="card" id="r-actions" style="display:none">' +
         '<div class="bar"><span class="route-title">Sync <span id="r-count">0</span> selected</span>' +
         '<div class="actions">' +
-          '<select id="r-to" style="min-height:44px"></select>' +
+          '<div class="field" style="margin:0">' +
+            G.field("Target", '<select id="r-to"></select>') + "</div>" +
           '<button class="btn" id="r-local">Local only</button>' +
           '<button class="btn primary" id="r-sync">Sync selected</button>' +
           '<button class="btn" id="r-save">Save to file</button>' +
         "</div></div>" +
-        '<div class="muted mt">“Sync selected” pushes to every target on the route; ' +
-        "pick a site to push to just one.</div>" +
+        '<div class="muted mt">“Sync selected” pushes to the chosen target, ' +
+        "or every target on the route if you leave it on “all targets”.</div>" +
       "</section>" +
       '<div id="r-live"></div>';
 
     G.api("GET", "/api/platforms?probe=0").then(function (d) {
       state.platforms = d.platforms || [];
-      var sel = document.getElementById("r-plat");
-      sel.innerHTML = state.platforms.map(function (p) {
-        return '<option value="' + G.esc(p.name) + '"' + (p.enabled ? "" : " disabled") + ">" +
-          G.esc(p.name) + " (" + G.esc(p.type) + ")</option>";
+      var enabled = state.platforms.filter(function (p) { return p.enabled; });
+      document.getElementById("r-plat").innerHTML = state.platforms.map(function (p) {
+        return '<option value="' + G.esc(p.name) + '"' +
+          (p.enabled ? "" : " disabled") + ">" + G.esc(p.name) +
+          " (" + G.esc(p.type) + ")</option>";
       }).join("");
-      var firstEnabled = state.platforms.filter(function (p) { return p.enabled; })[0];
-      state.platform = firstEnabled ? firstEnabled.name : "";
-      // target dropdown: every platform
+      var first = enabled[0];
+      state.platform = first ? first.name : "";
       var to = document.getElementById("r-to");
-      to.innerHTML = state.platforms.filter(function (p) { return p.enabled; })
-        .map(function (p) { return '<option value="' + G.esc(p.name) + '">to ' + G.esc(p.name) + "</option>"; }).join("");
+      to.innerHTML = '<option value="">all targets</option>' + enabled.map(function (p) {
+        return '<option value="' + G.esc(p.name) + '">' + G.esc(p.name) + "</option>";
+      }).join("");
+      state.to = "";
+      to.addEventListener("change", function () { state.to = to.value; });
       loadRepos();
-      sel.addEventListener("change", function () { state.platform = sel.value; state.sel = {}; loadRepos(); });
-    }).catch(function (e) { document.getElementById("r-list").innerHTML = G.errorBox(e); });
+      document.getElementById("r-plat").addEventListener("change", function () {
+        state.platform = document.getElementById("r-plat").value;
+        state.sel = {}; loadRepos();
+      });
+    }).catch(function (e) {
+      document.getElementById("r-list").innerHTML = G.errorBox(e);
+    });
 
-    document.getElementById("r-q").addEventListener("input", function (e) { state.q = e.target.value.toLowerCase(); renderList(); });
+    document.getElementById("r-q").addEventListener("input", function (e) {
+      state.q = e.target.value.toLowerCase(); renderList(); updateActions();
+    });
     document.getElementById("r-forks").addEventListener("change", loadRepos);
     document.getElementById("r-all").addEventListener("click", function () {
-      filtered().forEach(function (r) { state.sel[r.name] = true; }); renderList(); updateActions();
+      filtered().forEach(function (r) { state.sel[r.name] = true; });
+      renderList(); updateActions();
     });
-    document.getElementById("r-none").addEventListener("click", function () { state.sel = {}; renderList(); updateActions(); });
-    document.getElementById("r-sync").addEventListener("click", function () { doSync(null); });
+    document.getElementById("r-none").addEventListener("click", function () {
+      state.sel = {}; renderList(); updateActions();
+    });
+    document.getElementById("r-sync").addEventListener("click", function () {
+      G.busy(this, function () { return doSync(null); });
+    });
     document.getElementById("r-local").addEventListener("click", function () {
-      var local = state.platforms.filter(function (p) { return p.type === "local" && p.enabled; })[0];
+      var local = state.platforms.filter(function (p) {
+        return p.type === "local" && p.enabled;
+      })[0];
       if (!local) return G.toast("no local-folder platform configured", "warn");
       doSync(local.name);
     });
-    document.getElementById("r-to").addEventListener("change", function () {});
     document.getElementById("r-save").addEventListener("click", saveSelection);
   }
 
@@ -71,7 +88,9 @@
       (document.getElementById("r-forks").checked ? "&forks=1" : "");
     G.api("GET", "/api/repos" + q).then(function (d) {
       state.repos = d.repos || []; renderList(); updateActions();
-    }).catch(function (e) { document.getElementById("r-list").innerHTML = G.errorBox(e); });
+    }).catch(function (e) {
+      document.getElementById("r-list").innerHTML = G.errorBox(e);
+    });
   }
 
   function filtered() {
@@ -83,18 +102,25 @@
   function renderList() {
     var host = document.getElementById("r-list");
     var rows = filtered();
-    if (!rows.length) { host.innerHTML = '<div class="empty">no matching repos</div>'; return; }
+    if (!rows.length) {
+      host.innerHTML = G.emptyState(
+        state.q ? "No matching repos" : "No repos",
+        state.q ? "clear the filter to see all" : "this platform has none", "repos");
+      return;
+    }
     host.innerHTML = rows.map(function (r) {
       var on = !!state.sel[r.name];
       return '<label class="check" style="justify-content:flex-start">' +
-        '<input type="checkbox" data-repo="' + G.esc(r.name) + '"' + (on ? " checked" : "") + "> " +
+        '<input type="checkbox" data-repo="' + G.esc(r.name) + '"' +
+        (on ? " checked" : "") + "> " +
         '<span class="mono">' + G.esc(r.name) + "</span> " +
         '<span class="muted" style="font-size:12px">' + (r.private ? "priv" : "pub") +
         (r.fork ? " fork" : "") + "</span></label>";
     }).join("");
     host.querySelectorAll("input[data-repo]").forEach(function (c) {
       c.addEventListener("change", function () {
-        if (c.checked) state.sel[c.dataset.repo] = true; else delete state.sel[c.dataset.repo];
+        if (c.checked) state.sel[c.dataset.repo] = true;
+        else delete state.sel[c.dataset.repo];
         updateActions();
       });
     });
@@ -110,8 +136,8 @@
 
   function doSync(to) {
     var names = selectedNames();
-    if (!names.length) return;
-    G.startSync({ repos: names.join(","), to: to || undefined })
+    if (!names.length) return Promise.resolve();
+    return G.startSync({ repos: names.join(","), to: to || state.to || undefined })
       .then(function (r) { showLive(names.length + " repo(s)", r.job_id); })
       .catch(function (e) {
         if (e.status === 409) G.toast(e.error || "already running", "warn");
@@ -123,8 +149,9 @@
     if (!names.length) return G.toast("select some repos first", "warn");
     G.api("POST", "/api/repos/selection-file", { platform: state.platform, repos: names })
       .then(function (d) {
-        G.toast(names.length + " repos saved to " + d.path + " → " + d.routes.join(", "), "ok");
-      }).catch(function (e) { G.toast(e.error, "bad"); });
+        G.toast(names.length + " repos saved to " + d.path + " → " +
+          (d.routes || []).join(", "), "ok");
+      }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }
 
   function showLive(label, jobId) {
@@ -133,19 +160,26 @@
       '<section class="card"><div class="bar"><span class="route-title">Syncing ' +
       G.esc(label) + '</span><span class="muted mono" id="rl-pct"></span></div>' +
       '<div class="progress mt"><span id="rl-fill" style="width:0%"></span></div>' +
-      '<div class="viewer mt" id="rl-lines"></div></section>';
+      '<div class="viewer mt" id="rl-lines" role="log" aria-live="polite"></div></section>';
     var lines = document.getElementById("rl-lines");
-    G.sse("/api/sync/stream?job_id=" + encodeURIComponent(jobId), function (d) {
-      if (d.progress && d.progress.total) {
-        var pc = G.pct(d.progress.done, d.progress.total);
-        document.getElementById("rl-pct").textContent = d.progress.done + "/" + d.progress.total;
-        document.getElementById("rl-fill").style.width = pc + "%";
+    lines.textContent = "running…";
+    G.watchJob("/api/sync/stream?job_id=" + encodeURIComponent(jobId), {
+      onProgress: function (p) {
+        if (p.total) {
+          document.getElementById("rl-pct").textContent =
+            p.done + "/" + p.total;
+          document.getElementById("rl-fill").style.width = G.pct(p.done, p.total) + "%";
+        }
+      },
+      onLine: function (line, cls) {
+        var div = document.createElement("div");
+        div.className = cls; div.textContent = line;
+        lines.appendChild(div); lines.scrollTop = lines.scrollHeight;
+      },
+      onDone: function (d) {
+        G.toast("sync " + (d.exit === 0 ? "finished" : "exit " + d.exit),
+          d.exit === 0 ? "ok" : "bad");
       }
-      if (d.line) {
-        var div = document.createElement("div"); div.className = G.stateClass(d.line);
-        div.textContent = d.line; lines.appendChild(div); lines.scrollTop = lines.scrollHeight;
-      }
-      if (d.done) G.toast("sync " + (d.exit === 0 ? "finished" : "exit " + d.exit), d.exit === 0 ? "ok" : "bad");
     });
     host.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
