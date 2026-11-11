@@ -44,6 +44,10 @@ _TOKEN_ENV = ("GITHUB_TOKEN", "FORGEJO_TOKEN", "GITEA_TOKEN", "GITLAB_TOKEN",
               "GITSYNC_TELEGRAM_TOKEN", "GITSYNC_TELEGRAM_CHAT_ID",
               "GITSYNC_NOTIFY_ON")
 
+def _have_git():
+    import shutil
+    return shutil.which("git") is not None
+
 _real_connect = socket.socket.connect
 
 def _hermetic_connect(self, address):
@@ -697,6 +701,7 @@ class TestRedaction(unittest.TestCase):
         self.assertIsNone(user3)
         self.assertIsNone(token3)
 
+    @unittest.skipUnless(_have_git(), "needs the git binary")
     def test_s2_token_not_persisted_in_mirror_git_config(self):
         import subprocess
         with tempfile.TemporaryDirectory() as td:

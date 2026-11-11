@@ -432,7 +432,10 @@ def commit_screen(stdscr=None):
     everything at once. (Calling stdscr.noutrefresh() here would copy the
     erased stdscr over the panels and blank them.)
     """
-    curses.doupdate()
+    try:
+        curses.doupdate()
+    except Exception:
+        pass
 
 
 def menu(stdscr, title, items, note=None):
@@ -1605,8 +1608,11 @@ def draw(stdscr):
         commit_screen(stdscr)
         return
 
-    Cc, G, Y, R = (curses.color_pair(1), curses.color_pair(2),
-                   curses.color_pair(3), curses.color_pair(4))
+    try:
+        Cc, G, Y, R = (curses.color_pair(1), curses.color_pair(2),
+                       curses.color_pair(3), curses.color_pair(4))
+    except Exception:
+        Cc = G = Y = R = 0
     dim = curses.A_DIM
 
     safe_add(stdscr, 0, 0,
