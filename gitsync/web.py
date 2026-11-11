@@ -1819,6 +1819,7 @@ def h_settings_get(handler):
     st["themes"] = list(C.THEMES)
     st["scheduler"] = _cached_scheduler()
     st["next_run"] = _cached_next_run()
+    st["version"] = __version__
     st["auth"] = {"password_set": bool(a),
                   "username": a.get("username") if a else ""}
     handler._json({"settings": st})

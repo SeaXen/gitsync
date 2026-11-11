@@ -4,6 +4,14 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Web UI polish (post-2.0.3)
+- **Favicon**: every page ships an inline SVG icon, so the browser stops requesting a missing `/favicon.ico` and logging a 404 on every load.
+- **Version on the dashboard**: `/api/settings` now reports `version`, and the Current Settings card shows it instead of "—".
+- **Card labels align**: the label row is a flex line, so "Change →" / "Manage routes →" links sit right before the minimise button and wrap tidily on phones.
+- **Quick reference rows**: command and description are separate flex items, so a long description drops to its own line instead of breaking mid-command on narrow screens.
+
 ## [2.0.3] - 2026-11-11
 
 Correctness fixes across the sync engine, the web API and the TUI: dry runs are reported as dry runs, the destructive-mode default is consistent, cron installs show a next run, and several TUI panels that read the whole hub per frame no longer do.

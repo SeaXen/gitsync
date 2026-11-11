@@ -229,7 +229,7 @@
           "</span>") +
       row("Log file", '<span class="muted">' + G.esc((st.paths || {}).log) +
           "</span>") +
-      row("Version", G.esc(s.version || d.version || "—")) +
+      row("Version", G.esc(st.version || s.version || "—")) +
       "</dl>" +
       '<p class="muted" style="font-size:12.5px;margin:12px 0 0">' +
       "Change these on the <a href=\"settings.html\">Settings</a> page, " +
@@ -382,12 +382,12 @@
         '<a href="log.html" style="text-transform:none;letter-spacing:0">View full log →</a></p>' +
         '<div class="mono log" id="logtail">' + G.loading() + "</div></section>" +
       '<section class="card" id="ref-card"><p class="label">Quick reference</p>' +
-        '<div class="mono" style="line-height:2">' +
-        '<div><b>gitsync sync</b> — sync every enabled route now</div>' +
-        '<div><b>gitsync sync --dry-run</b> — show what would change, change nothing</div>' +
-        '<div><b>gitsync fix --dry-run</b> — find drift without pushing</div>' +
-        '<div><b>gitsync doctor</b> — check tokens, mirrors and routes</div>' +
-        '<div><b>gitsync tui</b> — the terminal dashboard</div>' +
+        '<div class="mono" style="line-height:1.9">' +
+        '<div class="qr"><span class="c">gitsync sync</span><span class="d">— sync every enabled route now</span></div>' +
+        '<div class="qr"><span class="c">gitsync sync --dry-run</span><span class="d">— show what would change, change nothing</span></div>' +
+        '<div class="qr"><span class="c">gitsync fix --dry-run</span><span class="d">— find drift without pushing</span></div>' +
+        '<div class="qr"><span class="c">gitsync doctor</span><span class="d">— check tokens, mirrors and routes</span></div>' +
+        '<div class="qr"><span class="c">gitsync tui</span><span class="d">— the terminal dashboard</span></div>' +
         "</div>" +
         '<p class="muted" style="font-size:12.5px;margin:12px 0 0">' +
         "On this page: <b>Sync now</b> and <b>Dry run</b> are in the top bar, " +
