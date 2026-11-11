@@ -86,15 +86,20 @@ def cmd_sync(args):
         if recs:
             for f in recs[-1].get("failures", []):
                 r = f.get("repo")
+                rt = f.get("route")
                 if r and r != "-":
-                    failed.append(r)
+                    if not args.route or rt == args.route:
+                        failed.append(r)
         if not failed:
             print("no failed repos in last run to retry")
             return 0
         only = list(set(only + failed))
     t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet,
                       only=only or None, dry_run=args.dry_run,
-                      scheduled=args.scheduled)
+                      scheduled=args.scheduled,
+                      force=getattr(args, "force", False))
+    if t.get("paused"):
+        return 0
     if args.dry_run:
         n_upd = sum(1 for p in t.get("planned", [])
                     if p.get("verdict") == "update")
@@ -121,6 +126,8 @@ def cmd_status(args):
     print("gitsync %s" % __version__)
     print("config : %s" % C.CONFIG_FILE)
     print("mirrors: %s" % C.MIRROR_DIR)
+    if C.setting(cfg, "paused", False):
+        print("status : [PAUSED] background sync is suspended")
     print()
     table = _platforms_table(cfg)
     live = sum(1 for r in table if r[2].strip() == "ON" and r[3].strip() == "OK")
@@ -1775,6 +1782,22 @@ def cmd_uninstall(args):
     return 0
 
 
+def cmd_pause(args):
+    cfg = C.load_config()
+    cfg.setdefault("settings", {})["paused"] = True
+    C.save_config(cfg)
+    print("gitsync: background sync PAUSED globally")
+    return 0
+
+
+def cmd_resume(args):
+    cfg = C.load_config()
+    cfg.setdefault("settings", {})["paused"] = False
+    C.save_config(cfg)
+    print("gitsync: background sync RESUMED")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog="gitsync",
@@ -1792,11 +1815,13 @@ def main(argv=None):
     sp.add_argument("--to", help="only push to this platform")
     sp.add_argument("--repos", help="comma-separated repo names to sync")
     sp.add_argument("--retry-failed", action="store_true",
-                    help="only retry repos that failed in the last run")
+                    help="re-sync failed repos from last run (combine with --route to scope to a single route)")
     sp.add_argument("--dry-run", action="store_true",
                     help="show what would change, change nothing")
     sp.add_argument("--scheduled", action="store_true",
                     help="skip routes whose own schedule is not due yet")
+    sp.add_argument("--force", action="store_true",
+                    help="run sync even if sync is paused globally")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(func=cmd_sync)
 
@@ -2031,6 +2056,12 @@ def main(argv=None):
     sp = sub.add_parser("uninstall", help="remove scheduler + symlink")
     sp.add_argument("--yes", action="store_true")
     sp.set_defaults(func=cmd_uninstall)
+
+    sp = sub.add_parser("pause", help="pause background sync globally")
+    sp.set_defaults(func=cmd_pause)
+
+    sp = sub.add_parser("resume", help="resume background sync globally")
+    sp.set_defaults(func=cmd_resume)
 
     args = ap.parse_args(argv)
     if not getattr(args, "func", None):

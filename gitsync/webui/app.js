@@ -17,7 +17,7 @@
     history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     tools: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a4 4 0 0 0 5 5L21 21H3l7.7-7.7a4 4 0 0 1 4-6.9z"/></svg>',
     settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
-    sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>',
+    sync: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><polygon points="6 4 20 12 6 20 6 4"/></svg>',
     eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
     logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5"/></svg>',
@@ -263,7 +263,7 @@
     }).join("");
   }
   function tokenStateBadge(state) {
-    var map = { set: ["ok", "token"], missing: ["warn", "no token"],
+    var map = { set: ["ok", "token"], oauth: ["ok", "oauth"], missing: ["warn", "no token"],
                 gh: ["ok", "gh CLI"], glab: ["ok", "glab CLI"],
                 local: ["muted", "local"] };
     var m = map[state] || ["muted", state];
@@ -461,6 +461,8 @@
           '<span class="status" id="top-status"><span class="pip"></span>' +
             '<span id="top-status-text" role="status">connecting…</span></span>' +
           '<div class="spacer"></div>' +
+          '<button class="btn ghost" id="top-pause" title="Pause / resume background sync" aria-label="Pause / resume background sync">' +
+            '<span id="top-pause-text">Pause</span></button>' +
           '<button class="btn ghost" id="top-dry" title="Dry run" aria-label="Dry run">' + I.eye +
             "<span>Dry run</span></button>" +
           '<button class="btn primary" id="top-sync" title="Sync now" aria-label="Sync now">' + I.sync +
@@ -497,6 +499,7 @@
   function wireTopbar() {
     var dry = document.getElementById("top-dry");
     var sync = document.getElementById("top-sync");
+    var pauseBtn = document.getElementById("top-pause");
     var bar = document.getElementById("top-progress");
     function run(d, btn) {
       busy(btn, function () { return startSync({ dry_run: d }); })
@@ -506,6 +509,16 @@
     }
     if (dry) dry.addEventListener("click", function () { run(true, dry); });
     if (sync) sync.addEventListener("click", function () { run(false, sync); });
+    if (pauseBtn) {
+      pauseBtn.addEventListener("click", function () {
+        busy(pauseBtn, function () {
+          return api("POST", "/api/pause", {}).then(function (res) {
+            toast(res.paused ? "Sync paused globally" : "Sync resumed", "ok");
+            refreshStatus();
+          });
+        });
+      });
+    }
 
     onSync(function (jobId) {
       setStatus("syncing…", "live");
@@ -544,6 +557,14 @@
     api("GET", "/api/status").then(function (s) {
       var v = document.getElementById("side-version");
       if (v) v.textContent = "gitsync " + s.version;
+      var pBtn = document.getElementById("top-pause");
+      var pTxt = document.getElementById("top-pause-text");
+      if (pTxt) pTxt.textContent = s.paused ? "Resume" : "Pause";
+      if (pBtn) {
+        if (s.paused) pBtn.classList.add("warn");
+        else pBtn.classList.remove("warn");
+      }
+      if (s.paused) { setStatus("PAUSED · all syncs suspended", "warn"); return; }
       if (s.syncing) { setStatus("syncing…", "live"); return; }
       var next = s.next_run ? " · next " + s.next_run : "";
       setStatus("idle · " + s.schedule + next);

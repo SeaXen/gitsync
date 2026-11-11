@@ -110,12 +110,13 @@
     }
     host.innerHTML = rows.map(function (r) {
       var on = !!state.sel[r.name];
+      var mirrorBadge = r.mirrored ? ' <span class="badge ok" style="font-size:11px">mirrored</span>' : '';
       return '<label class="check" style="justify-content:flex-start">' +
         '<input type="checkbox" name="selected_repo" data-repo="' + G.esc(r.name) + '"' +
         (on ? " checked" : "") + "> " +
         '<span class="mono">' + G.esc(r.name) + "</span> " +
         '<span class="muted" style="font-size:12px">' + (r.private ? "priv" : "pub") +
-        (r.fork ? " fork" : "") + "</span></label>";
+        (r.fork ? " fork" : "") + "</span>" + mirrorBadge + "</label>";
     }).join("");
     host.querySelectorAll("input[data-repo]").forEach(function (c) {
       c.addEventListener("change", function () {

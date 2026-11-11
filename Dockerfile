@@ -34,7 +34,8 @@ ENV PYTHONPATH=/opt/gitsync \
 RUN mkdir -p /data/config /data/share/mirrors
 
 # run unprivileged; the mounted volume is owned by this same user
-RUN useradd -r -m -u 10001 gitsync \
+RUN chmod +x /opt/gitsync/gitsync/askpass.py /opt/gitsync/gitsync/glab_askpass.py \
+ && useradd -r -m -u 10001 gitsync \
  && chown -R gitsync:gitsync /data /opt/gitsync /home/gitsync
 USER gitsync
 ENV HOME=/home/gitsync

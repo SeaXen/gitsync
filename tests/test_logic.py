@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import socket
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -429,6 +430,57 @@ class TestTokenCheck(unittest.TestCase):
 
     def test_days_left(self):
         self.assertIsNone(TK.days_left(None))
+
+    def test_offline_network_reports_unverified_not_critical(self):
+        cfg = {
+            "platforms": {
+                "gh": {"type": "github", "enabled": True, "token": "secret"},
+                "gl": {"type": "gitlab", "enabled": True, "token": "secret"},
+            }
+        }
+        def fake_unreachable(*args, **kwargs):
+            if kwargs.get("want_headers"):
+                return (None, "network down", {})
+            return (None, "network down")
+
+        with patch("gitsync.platforms._http", side_effect=fake_unreachable):
+            results = TK.check(cfg)
+            for r in results:
+                self.assertEqual(r["level"], "unknown")
+                self.assertIn("not verified", r["note"])
+            self.assertEqual(TK.bad(results), [])
+            self.assertIn("unverified", TK.summary(results))
+            self.assertNotIn("need attention", TK.summary(results))
+
+    def test_local_only_and_no_expiry_tokens(self):
+        # local-only config: level is n/a, summary says all tokens healthy
+        cfg_local = {
+            "platforms": {
+                "loc1": {"type": "local", "enabled": True, "path": "/tmp/a"},
+                "loc2": {"type": "local", "enabled": True, "path": "/tmp/b"},
+            }
+        }
+        res_local = TK.check(cfg_local)
+        for r in res_local:
+            self.assertEqual(r["level"], "n/a")
+        self.assertEqual(TK.summary(res_local), "all tokens healthy")
+
+        # valid authenticated token without expiry reports ok-no-expiry and not unverified
+        cfg_no_exp = {
+            "platforms": {
+                "fj": {"type": "forgejo", "enabled": True, "token": "secret", "url": "https://codeberg.org"},
+            }
+        }
+        def fake_ok(*args, **kwargs):
+            if kwargs.get("want_headers"):
+                return (200, {"username": "alice"}, {})
+            return (200, {"username": "alice"})
+
+        with patch("gitsync.platforms._http", side_effect=fake_ok):
+            res_no_exp = TK.check(cfg_no_exp)
+            self.assertEqual(res_no_exp[0]["level"], "ok-no-expiry")
+            self.assertEqual(TK.bad(res_no_exp), [])
+            self.assertEqual(TK.summary(res_no_exp), "all tokens healthy")
 
 
 # ---------------------------------------------------------------- webhooks
@@ -1448,6 +1500,39 @@ class TestTui(unittest.TestCase):
         self.assertEqual(rows[0][2], "ON ")
         self.assertIn(rows[0][3], ("OK ", "FAIL"))
 
+    def test_help_overlay_tabs(self):
+        lines = tui.global_help_lines()
+        text = "\n".join(lines)
+        for tab in tui.TABS:
+            self.assertIn(tab, text)
+        self.assertIn("1 - %d" % len(tui.TABS), text)
+
+    def test_tui_resize_and_small_dimensions(self):
+        class MockWin:
+            def __init__(self, h, w):
+                self.h = h
+                self.w = w
+                self.lines = {}
+                self.cleared = False
+            def getmaxyx(self):
+                return self.h, self.w
+            def erase(self):
+                self.cleared = True
+                self.lines.clear()
+            def addnstr(self, y, x, text, n, attr=0):
+                self.lines[(y, x)] = str(text)[:n]
+
+        win = MockWin(24, 80)
+        tui._handle_resize(win)
+        self.assertTrue(win.cleared)
+
+        small_win = MockWin(8, 30)
+        tui.draw(small_win)
+        self.assertTrue(any("terminal too small" in v for v in small_win.lines.values()))
+
+        norm_win = MockWin(24, 80)
+        tui.draw(norm_win)
+
 
 # ------------------------------------------------------------------ web UI
 
@@ -2096,23 +2181,92 @@ class TestTUISmoke(unittest.TestCase):
                    TERM="xterm-256color",
                    GITSYNC_CONFIG_DIR=tempfile.mkdtemp(),
                    GITSYNC_DATA_DIR=tempfile.mkdtemp())
-        proc = subprocess.Popen([sys.executable, "-m", "gitsync", "tui"],
+        proc = subprocess.Popen([sys.executable, "-m", "gitsync"],
                                 stdin=slave, stdout=slave, stderr=slave,
                                 close_fds=True, env=env)
         os.close(slave)
         output = b""
         start = time.time()
+        stage = 0
         try:
-            while time.time() - start < 5.0:
+            while time.time() - start < 8.0:
                 r, _, _ = select.select([master], [], [], 0.2)
                 if r:
                     chunk = os.read(master, 1024)
                     if not chunk:
                         break
                     output += chunk
-                    if b"Dashboard" in output or b"gitsync" in output:
+                    if stage == 0 and (b"Dashboard" in output or b"gitsync" in output):
+                        os.write(master, b"?")
+                        stage = 1
+                    elif stage == 1 and (b"HELP" in output or b"SHORTCUTS" in output or time.time() - start > 1.5):
+                        os.write(master, b"\x1b")
+                        stage = 2
+                    elif stage == 2 and time.time() - start > 2.5:
                         os.write(master, b"q")
+                        stage = 3
                         break
+            if stage < 3:
+                os.write(master, b"q")
+            proc.wait(timeout=3)
+            self.assertEqual(proc.returncode, 0)
+        finally:
+            os.close(master)
+            if proc.poll() is None:
+                proc.kill()
+
+    def test_tui_pty_resize(self):
+        try:
+            import pty
+            import select
+            import termios
+            import struct
+            import fcntl
+            import signal
+        except ImportError:
+            self.skipTest("pty/termios not available on this platform (Windows)")
+
+        master, slave = pty.openpty()
+        winsize = struct.pack("HHHH", 30, 120, 0, 0)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
+
+        env = dict(os.environ,
+                   TERM="xterm-256color",
+                   GITSYNC_CONFIG_DIR=tempfile.mkdtemp(),
+                   GITSYNC_DATA_DIR=tempfile.mkdtemp())
+        proc = subprocess.Popen([sys.executable, "-m", "gitsync"],
+                                stdin=slave, stdout=slave, stderr=slave,
+                                close_fds=True, env=env)
+        os.close(slave)
+        start = time.time()
+        try:
+            output = b""
+            while time.time() - start < 4.0:
+                r, _, _ = select.select([master], [], [], 0.2)
+                if r:
+                    chunk = os.read(master, 1024)
+                    if chunk:
+                        output += chunk
+                        if b"Dashboard" in output or b"gitsync" in output:
+                            break
+            # 120x30 -> 80x24
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
+            if hasattr(signal, "SIGWINCH"):
+                try:
+                    proc.send_signal(signal.SIGWINCH)
+                except Exception:
+                    pass
+            time.sleep(0.3)
+            # 80x24 -> 40x12
+            fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack("HHHH", 12, 40, 0, 0))
+            if hasattr(signal, "SIGWINCH"):
+                try:
+                    proc.send_signal(signal.SIGWINCH)
+                except Exception:
+                    pass
+            time.sleep(0.3)
+            self.assertIsNone(proc.poll(), "TUI process crashed during resize")
+            os.write(master, b"q")
             proc.wait(timeout=3)
             self.assertEqual(proc.returncode, 0)
         finally:
@@ -2139,7 +2293,7 @@ class TestRetryFailed(unittest.TestCase):
                               {"route": "r1", "repo": "failed_repo_2", "error": "err"}]}]
         captured = {}
 
-        def fake_run_sync(cfg, route_name=None, quiet=False, only=None, dry_run=False, scheduled=False):
+        def fake_run_sync(cfg, route_name=None, quiet=False, only=None, dry_run=False, scheduled=False, **kwargs):
             captured["only"] = only
             return {"ok": 2, "partial": 0, "failed": 0, "repos": 2, "elapsed_sec": 1.0, "planned": []}
 
@@ -2153,6 +2307,325 @@ class TestRetryFailed(unittest.TestCase):
             self.assertIsNotNone(captured.get("only"))
             self.assertIn("failed_repo_1", captured["only"])
             self.assertIn("failed_repo_2", captured["only"])
+
+    def test_retry_failed_scoped_by_route(self):
+        from gitsync import __main__ as main_mod
+        from types import SimpleNamespace
+        recs = [{"failures": [
+            {"route": "r1", "repo": "repo_a", "error": "err"},
+            {"route": "r2", "repo": "repo_b", "error": "err"},
+        ]}]
+        captured = {}
+
+        def fake_run_sync(cfg, route_name=None, quiet=False, only=None, dry_run=False, scheduled=False, **kwargs):
+            captured["only"] = only
+            return {"ok": 1, "partial": 0, "failed": 0, "repos": 1, "elapsed_sec": 0.5, "planned": []}
+
+        with patch.object(main_mod.SYNC, "last_records", return_value=recs), \
+             patch.object(main_mod.SYNC, "run_sync", fake_run_sync), \
+             patch.object(main_mod.C, "load_config", return_value={"platforms": {"p": {"type": "local"}}, "routes": []}), \
+             patch.object(main_mod.C, "enabled_platforms", return_value={"p": {}}):
+            # When scoped to r1, only repo_a is retried
+            args = SimpleNamespace(route="r1", to=None, repos="", retry_failed=True, quiet=True, dry_run=False, scheduled=False)
+            rc = main_mod.cmd_sync(args)
+            self.assertEqual(rc, 0)
+            self.assertEqual(captured.get("only"), ["repo_a"])
+
+
+class TestNewFeatures(unittest.TestCase):
+    def test_github_device_flow_mock(self):
+        start_payload = json.dumps({
+            "device_code": "dev_test_123",
+            "user_code": "ABCD-1234",
+            "verification_uri": "https://github.com/login/device",
+            "expires_in": 900,
+            "interval": 5
+        }).encode("utf-8")
+
+        class FakeResponse:
+            def __init__(self, data):
+                self.data = data
+            def read(self):
+                return self.data
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        with patch("urllib.request.urlopen", return_value=FakeResponse(start_payload)):
+            res = P.github_device_flow_start()
+            self.assertEqual(res["user_code"], "ABCD-1234")
+            self.assertEqual(res["device_code"], "dev_test_123")
+
+        pending_payload = json.dumps({"error": "authorization_pending"}).encode("utf-8")
+        with patch("urllib.request.urlopen", return_value=FakeResponse(pending_payload)):
+            res = P.github_device_flow_poll("dev_test_123")
+            self.assertEqual(res["status"], "pending")
+
+        ok_payload = json.dumps({"access_token": "gho_secret123", "scope": "repo"}).encode("utf-8")
+        with patch("urllib.request.urlopen", return_value=FakeResponse(ok_payload)):
+            res = P.github_device_flow_poll("dev_test_123")
+            self.assertEqual(res["status"], "ok")
+            self.assertEqual(res["token"], "gho_secret123")
+
+    def test_github_rate_limit_tracking(self):
+        self.addCleanup(P.GitHubPlatform._rate_limits.pop, "gh-unit", None)
+        hdrs = {
+            "x-ratelimit-remaining": "4950",
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-reset": str(int(time.time() + 3600)),
+        }
+        P.GitHubPlatform.update_rate_limit("gh-unit", hdrs)
+        plat = P.GitHubPlatform("gh-unit", {})
+        info = plat.rate_limit_info()
+        self.assertIsNotNone(info)
+        self.assertEqual(info["remaining"], 4950)
+        self.assertEqual(info["limit"], 5000)
+        self.assertGreater(info["resets_in_mins"], 50)
+
+        # Expired rate limit returns None
+        P.GitHubPlatform.update_rate_limit("gh-unit", {
+            "x-ratelimit-remaining": "0",
+            "x-ratelimit-limit": "5000",
+            "x-ratelimit-reset": str(int(time.time() - 10)),
+        })
+        self.assertIsNone(plat.rate_limit_info())
+
+    def test_global_sync_pause(self):
+        cfg = {
+            "platforms": {"local": {"type": "local", "enabled": True, "path": "/tmp"}},
+            "routes": [{"name": "r1", "source": "local", "targets": ["local"]}],
+            "settings": {"paused": True}
+        }
+        res = SY.run_sync(cfg, quiet=True)
+        self.assertTrue(res.get("paused"))
+        self.assertEqual(res.get("skipped"), "paused")
+
+        # force=True bypasses pause
+        with patch.object(C, "routes", return_value=[]):
+            res_forced = SY.run_sync(cfg, quiet=True, force=True)
+            self.assertNotEqual(res_forced.get("skipped"), "paused")
+
+    def test_github_device_flow_validation_and_errors(self):
+        class FakeResponse:
+            def __init__(self, data):
+                self.data = data
+            def read(self):
+                return self.data
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        # Error response on start raises RuntimeError
+        err_payload = json.dumps({"error": "unauthorized_client", "error_description": "Bad client"}).encode("utf-8")
+        with patch("urllib.request.urlopen", return_value=FakeResponse(err_payload)):
+            with self.assertRaises(RuntimeError):
+                P.github_device_flow_start()
+
+        # slow_down without explicit interval does not default to 5
+        slow_payload = json.dumps({"error": "slow_down"}).encode("utf-8")
+        with patch("urllib.request.urlopen", return_value=FakeResponse(slow_payload)):
+            res = P.github_device_flow_poll("dev_123")
+            self.assertEqual(res["status"], "slow_down")
+            self.assertNotIn("interval", res)
+
+    def test_cmd_pause_and_resume(self):
+        temp_cfg = {"settings": {}}
+        with patch.object(M.C, "load_config", return_value=temp_cfg), \
+             patch.object(M.C, "save_config", lambda c: None):
+            self.assertEqual(M.cmd_pause(None), 0)
+            self.assertTrue(temp_cfg["settings"]["paused"])
+            self.assertEqual(M.cmd_resume(None), 0)
+            self.assertFalse(temp_cfg["settings"]["paused"])
+
+
+class TestAskpassExecutable(unittest.TestCase):
+    def test_ensure_executable_helper_robustness(self):
+        import shutil
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, True)
+        helper_copy = os.path.join(td, "askpass.py")
+        here = os.path.dirname(os.path.abspath(__file__))
+        askpass_src = os.path.join(os.path.dirname(here), "gitsync", "askpass.py")
+        with open(askpass_src, "rb") as sf, open(helper_copy, "wb") as df:
+            df.write(sf.read())
+        try:
+            os.chmod(helper_copy, 0o644)
+        except Exception:
+            pass
+
+        ex_path = SY.ensure_executable_helper(helper_copy)
+        self.assertTrue(os.path.exists(ex_path))
+        self.assertTrue(os.access(ex_path, os.X_OK))
+
+        def fail_chmod(p, m):
+            raise PermissionError("simulated read-only fs")
+        with patch("os.chmod", side_effect=fail_chmod):
+            wrapper = SY.ensure_executable_helper(helper_copy)
+            self.assertTrue(os.path.exists(wrapper))
+
+    def test_askpass_env_configuration(self):
+        env = SY.askpass_env(user="user123", token="secret456")
+        self.assertIn("GIT_ASKPASS", env)
+        self.assertTrue(os.path.exists(env["GIT_ASKPASS"]))
+        self.assertTrue(os.access(env["GIT_ASKPASS"], os.X_OK))
+        self.assertEqual(env["GITSYNC_ASKPASS_USER"], "user123")
+        self.assertEqual(env["GITSYNC_ASKPASS_TOKEN"], "secret456")
+        self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(env["GIT_CONFIG_PARAMETERS"], "'credential.helper='")
+
+
+class TestGitHttpBackendIntegration(unittest.TestCase):
+    """End-to-end integration test with git http-backend behind basic auth http.server."""
+    def test_http_auth_clone_and_push_through_sync_repo(self):
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git binary not found")
+
+        import base64
+        from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+
+        td = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, td, True)
+
+        src_repo_dir = os.path.join(td, "src.git")
+        dst_repo_dir = os.path.join(td, "dst.git")
+        P.run(["git", "init", "--bare", src_repo_dir])
+        P.run(["git", "init", "--bare", dst_repo_dir])
+        P.run(["git", "-C", src_repo_dir, "config", "http.receivepack", "true"])
+        P.run(["git", "-C", dst_repo_dir, "config", "http.receivepack", "true"])
+
+        work_dir = os.path.join(td, "work")
+        os.makedirs(work_dir)
+        P.run(["git", "init"], cwd=work_dir)
+        P.run(["git", "config", "user.name", "Test Runner"], cwd=work_dir)
+        P.run(["git", "config", "user.email", "runner@test.local"], cwd=work_dir)
+        with open(os.path.join(work_dir, "file.txt"), "w") as f:
+            f.write("content\n")
+        P.run(["git", "add", "."], cwd=work_dir)
+        P.run(["git", "commit", "-m", "init commit"], cwd=work_dir)
+        P.run(["git", "branch", "-M", "main"], cwd=work_dir)
+        P.run(["git", "remote", "add", "origin", src_repo_dir], cwd=work_dir)
+        P.run(["git", "push", "origin", "main"], cwd=work_dir)
+
+        test_user = "gituser"
+        test_token = "super_secret_token_xyz123"
+        expected_auth = "Basic " + base64.b64encode(f"{test_user}:{test_token}".encode("ascii")).decode("ascii")
+
+        class AuthGitBackendHandler(BaseHTTPRequestHandler):
+            def do_auth(self):
+                auth = self.headers.get("Authorization")
+                if auth != expected_auth:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="Git"')
+                    self.end_headers()
+                    return False
+                return True
+
+            def do_HEAD(self):
+                if self.do_auth():
+                    self.send_response(200)
+                    self.end_headers()
+
+            def do_GET(self):
+                if self.do_auth():
+                    self.run_cgi()
+
+            def do_POST(self):
+                if self.do_auth():
+                    self.run_cgi()
+
+            def run_cgi(self):
+                env = dict(os.environ)
+                env["GIT_PROJECT_ROOT"] = td
+                env["GIT_HTTP_EXPORT_ALL"] = "1"
+                env["PATH_INFO"] = self.path.split("?")[0]
+                env["QUERY_STRING"] = self.path.split("?")[1] if "?" in self.path else ""
+                env["REQUEST_METHOD"] = self.command
+                if "Content-Type" in self.headers:
+                    env["CONTENT_TYPE"] = self.headers["Content-Type"]
+                length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(length) if length > 0 else b""
+                p = subprocess.Popen(["git", "http-backend"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+                out, _ = p.communicate(input=body)
+                parts = out.split(b"\r\n\r\n", 1)
+                if len(parts) == 1:
+                    parts = out.split(b"\n\n", 1)
+                hdr = parts[0].decode("utf-8", "replace")
+                body = parts[1] if len(parts) > 1 else b""
+                code = 200
+                for l in hdr.splitlines():
+                    if l.lower().startswith("status:"):
+                        try:
+                            code = int(l.split(":")[1].strip().split()[0])
+                        except Exception:
+                            pass
+                self.send_response(code)
+                for l in hdr.splitlines():
+                    if ":" in l and not l.lower().startswith("status:"):
+                        k, v = l.split(":", 1)
+                        self.send_header(k.strip(), v.strip())
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), AuthGitBackendHandler)
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        port = srv.server_port
+        self.addCleanup(srv.shutdown)
+
+        hub_mirrors = os.path.join(td, "hub_mirrors")
+        os.makedirs(hub_mirrors, exist_ok=True)
+        old_mirror_dir = C.MIRROR_DIR
+        C.MIRROR_DIR = hub_mirrors
+        self.addCleanup(setattr, C, "MIRROR_DIR", old_mirror_dir)
+
+        class MockHttpPlatform:
+            ptype = "generic"
+            def __init__(self, name, url):
+                self.name = name
+                self.url = url
+            def ensure_repo(self, repo):
+                return self.url
+            def git_env(self):
+                return SY.askpass_env(test_user, test_token)
+
+        src_platform = MockHttpPlatform("src_plat", f"http://{test_user}:{test_token}@127.0.0.1:{port}/src.git")
+        dst_platform = MockHttpPlatform("dst_plat", f"http://{test_user}:{test_token}@127.0.0.1:{port}/dst.git")
+
+        repo_dict = {
+            "name": "src",
+            "clone_url": f"http://{test_user}:{test_token}@127.0.0.1:{port}/src.git"
+        }
+
+        executed_cmds = []
+        orig_run = P.run
+        def tracking_run(cmd, *a, **kw):
+            executed_cmds.append(list(cmd))
+            return orig_run(cmd, *a, **kw)
+
+        with patch("gitsync.platforms.run", side_effect=tracking_run):
+            status, detail, errors = SY.sync_repo(
+                repo_dict,
+                src_platform,
+                {"dst": dst_platform},
+                "safe"
+            )
+
+        self.assertEqual(status, "ok", f"sync_repo failed: {detail} errors: {errors}")
+
+        self.assertTrue(len(executed_cmds) > 0)
+        for cmd in executed_cmds:
+            for arg in cmd:
+                self.assertNotIn(test_token, str(arg), f"Secret token leaked into argv: {cmd}")
+
+        rc, out, _ = P.run(["git", "log", "-1", "--oneline", "main"], cwd=dst_repo_dir)
+        self.assertEqual(rc, 0)
+        self.assertIn("init commit", out)
 
 
 if __name__ == '__main__':

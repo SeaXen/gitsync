@@ -59,7 +59,21 @@
     if (sub) {
       if (s.schedule !== "off" && (!s.scheduler || s.scheduler.indexOf("not scheduled") !== -1 || s.scheduler.indexOf("none") !== -1)) {
         sub.innerHTML = "Schedule set to " + G.esc(s.schedule) +
-          ' but no timer is installed — <a href="tools.html" style="text-decoration:underline">Install timer</a>';
+          ' but no timer is installed — <button class="btn-link" id="dash-install-timer" type="button">Install timer</button>';
+        var b = document.getElementById("dash-install-timer");
+        if (b) {
+          b.addEventListener("click", function () {
+            G.busy(this, function () {
+              return G.api("POST", "/api/scheduler/install", s.schedule ? { schedule: s.schedule } : {})
+                .then(function (d) {
+                  G.toast(d.status || "Timer installed", d.ok ? "ok" : "warn");
+                  G.refreshStatus();
+                }).catch(function (e) {
+                  G.toast(G.apiError(e), "bad");
+                });
+            });
+          });
+        }
       } else {
         sub.textContent = "Timer: " + s.schedule + ", next run " +
           (s.next_run || "—") + " · scheduler: " + s.scheduler;

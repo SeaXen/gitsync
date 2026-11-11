@@ -550,6 +550,8 @@ def _valid_local_path(path):
 def _token_state(p):
     if p.get("type") == "local":
         return "local"
+    if p.get("auth") == "oauth":
+        return "oauth"
     if p.get("token"):
         return "set"
     if p.get("auth") == "gh":
@@ -560,7 +562,7 @@ def _token_state(p):
 
 
 def _public_platform(name, p):
-    return {"name": name, "type": p.get("type", "?"),
+    res = {"name": name, "type": p.get("type", "?"),
             "enabled": bool(p.get("enabled")),
             "token_state": _token_state(p),
             "url": p.get("url", ""), "owner": p.get("owner", ""),
@@ -569,6 +571,14 @@ def _public_platform(name, p):
             "url_template": p.get("url_template", ""),
             "user": p.get("user", ""), "ns_id": p.get("ns_id", ""),
             "affiliation": p.get("affiliation", "")}
+    if p.get("type") == "github":
+        try:
+            plat = P.make(name, p)
+            if hasattr(plat, "rate_limit_info"):
+                res["rate_limit"] = plat.rate_limit_info()
+        except Exception:
+            pass
+    return res
 
 
 def _public_settings(cfg):
@@ -1134,6 +1144,7 @@ def h_status(handler):
     handler._json({
         "version": __version__,
         "syncing": syncing,
+        "paused": bool(C.setting(cfg, "paused", False)),
         "schedule": C.setting(cfg, "schedule", "hourly"),
         "scheduler": _cached_scheduler(),
         "next_run": _cached_next_run(),
@@ -1144,6 +1155,160 @@ def h_status(handler):
         "counts": {"platforms": len(cfg.get("platforms") or {}),
                    "routes": len(C.routes(cfg))},
     })
+
+
+_device_flow_lock = threading.Lock()
+_active_device_flows = {}
+MAX_ACTIVE_DEVICE_FLOWS = 25
+
+
+def h_pause(handler):
+    b = handler._body()
+    requested_paused = b.get("paused")
+
+    def do(cfg):
+        paused = requested_paused
+        if paused is None:
+            paused = not C.setting(cfg, "paused", False)
+        cfg.setdefault("settings", {})["paused"] = bool(paused)
+        return {"ok": True, "paused": bool(paused)}
+
+    payload, code = _locked(do)
+    if code == 200:
+        _audit("web: sync %s globally" % ("paused" if payload["paused"] else "resumed"))
+    handler._json(payload, code)
+
+
+def h_github_device_start(handler):
+    try:
+        init_data = P.github_device_flow_start()
+    except Exception as e:
+        return handler._err(502, "failed to initiate GitHub device flow: %s" % str(e)[:160])
+
+    if not isinstance(init_data, dict) or "device_code" not in init_data or "user_code" not in init_data:
+        return handler._err(502, "invalid response from GitHub device authorization")
+
+    flow_id = secrets.token_hex(16)
+    now = time.time()
+    with _device_flow_lock:
+        expired = [fid for fid, f in _active_device_flows.items() if now - f.get("created_at", 0) > 900]
+        for fid in expired:
+            _active_device_flows.pop(fid, None)
+
+        if len(_active_device_flows) >= MAX_ACTIVE_DEVICE_FLOWS:
+            oldest_fid = min(_active_device_flows.keys(), key=lambda k: _active_device_flows[k].get("created_at", 0))
+            _active_device_flows.pop(oldest_fid, None)
+
+        _active_device_flows[flow_id] = {
+            "device_code": init_data["device_code"],
+            "user_code": init_data["user_code"],
+            "verification_uri": init_data.get("verification_uri", "https://github.com/login/device"),
+            "expires_in": init_data.get("expires_in", 900),
+            "interval": int(init_data.get("interval", 5)),
+            "created_at": now,
+            "last_poll_at": 0.0,
+        }
+
+    handler._json({
+        "flow_id": flow_id,
+        "user_code": init_data["user_code"],
+        "verification_uri": init_data.get("verification_uri", "https://github.com/login/device"),
+        "expires_in": init_data.get("expires_in", 900),
+        "interval": int(init_data.get("interval", 5)),
+    })
+
+
+def h_github_device_poll(handler):
+    b = handler._body()
+    flow_id = b.get("flow_id")
+    with _device_flow_lock:
+        flow = _active_device_flows.get(flow_id)
+        if not flow:
+            return handler._err(404, "flow not found or expired")
+
+        now = time.time()
+        min_interval = flow.get("interval", 5)
+        last_poll = flow.get("last_poll_at", 0.0)
+        if now - last_poll < (min_interval - 0.5):
+            return handler._json({"status": "slow_down", "interval": min_interval})
+
+        flow["last_poll_at"] = now
+        device_code = flow["device_code"]
+
+    res = P.github_device_flow_poll(device_code)
+    status = res.get("status")
+
+    if status == "ok":
+        token = res["token"]
+        raw_name = (b.get("platform_name") or "").strip()
+
+        temp_plat = P.GitHubPlatform("temp", {"token": token, "auth": "oauth"})
+        username = temp_plat.user() or ""
+
+        def do(cfg):
+            plats = cfg.setdefault("platforms", {})
+            if raw_name:
+                plat_name = raw_name
+                _valid_name(plat_name)
+                if plat_name in plats and plats[plat_name].get("type") != "github":
+                    raise _Http(409, "platform '%s' exists and is not github" % plat_name)
+            else:
+                if "github" not in plats:
+                    plat_name = "github"
+                elif username and ("github-" + username) not in plats:
+                    plat_name = "github-" + username
+                else:
+                    idx = 2
+                    while ("github-%d" % idx) in plats:
+                        idx += 1
+                    plat_name = "github-%d" % idx
+
+            pcfg = plats.get(plat_name) or {"type": "github"}
+            pcfg["type"] = "github"
+            pcfg["enabled"] = True
+            pcfg["token"] = token
+            pcfg["auth"] = "oauth"
+            if username:
+                pcfg["owner"] = username
+            plats[plat_name] = pcfg
+            return {
+                "status": "ok",
+                "user": username,
+                "platform": plat_name,
+                "message": "Connected to GitHub as @%s" % (username or plat_name),
+            }
+
+        payload, code = _locked(do)
+        if code != 200:
+            return handler._json(payload, code)
+
+        with _device_flow_lock:
+            _active_device_flows.pop(flow_id, None)
+
+        _redactor().reload()
+        _audit("web: connected GitHub platform '%s' as @%s via device flow" % (payload["platform"], username))
+        return handler._json(payload)
+
+    elif status == "slow_down":
+        with _device_flow_lock:
+            if flow_id in _active_device_flows:
+                curr_int = _active_device_flows[flow_id].get("interval", 5)
+                new_int = res.get("interval") or (curr_int + 5)
+                _active_device_flows[flow_id]["interval"] = new_int
+            else:
+                new_int = res.get("interval", 10)
+        return handler._json({"status": "slow_down", "interval": new_int})
+
+    elif status == "pending":
+        return handler._json({"status": "pending"})
+
+    elif status == "expired":
+        with _device_flow_lock:
+            _active_device_flows.pop(flow_id, None)
+        return handler._json({"status": "expired", "error": res.get("error", "authorization expired")})
+
+    else:
+        return handler._json({"status": "error", "error": res.get("error", "authorization failed")})
 
 
 def h_platforms(handler):
@@ -1314,14 +1479,16 @@ def h_repos(handler):
                             % (name, _redactor().redact(str(e)[:160])))
     q = (handler._qs().get("q") or [""])[0].lower()
     forks = (handler._qs().get("forks") or [None])[0] == "1"
+    existing_mirrors = set(os.listdir(C.MIRROR_DIR)) if os.path.isdir(C.MIRROR_DIR) else set()
     out = []
     for r in repos:
         if not forks and r.get("fork"):
             continue
         if q and q not in r["name"].lower():
             continue
+        mirrored = (r["name"] + ".git") in existing_mirrors
         out.append({"name": r["name"], "private": bool(r.get("private")),
-                    "fork": bool(r.get("fork"))})
+                    "fork": bool(r.get("fork")), "mirrored": mirrored})
     out.sort(key=lambda r: r["name"].lower())
     handler._json({"platform": name, "repos": out})
 
@@ -1905,6 +2072,11 @@ ROUTES = [
     ("GET", re.compile(r"^/api/session$"), lambda h: h_session(h)),
     ("GET", re.compile(r"^/api/logout$"), lambda h: h_logout(h)),
     ("GET", re.compile(r"^/api/status$"), lambda h: h_status(h)),
+    ("POST", re.compile(r"^/api/pause$"), lambda h: h_pause(h)),
+    ("POST", re.compile(r"^/api/auth/github/device/start$"),
+     lambda h: h_github_device_start(h)),
+    ("POST", re.compile(r"^/api/auth/github/device/poll$"),
+     lambda h: h_github_device_poll(h)),
     ("GET", re.compile(r"^/api/platforms$"), lambda h: h_platforms(h)),
     ("POST", re.compile(r"^/api/platforms$"), lambda h: h_platform_add(h)),
     ("PUT", re.compile(r"^/api/platforms/(?P<name>[^/]+)$"),

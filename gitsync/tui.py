@@ -176,6 +176,11 @@ def _probe(name, p):
                 count = str(len(plat.list_repos()))
             except Exception:
                 count = "?"
+        rate = getattr(plat, "rate_limit_info", lambda: None)()
+        if rate:
+            info += " [rate: %d/%d (%dm)]" % (
+                rate["remaining"], rate["limit"], rate["resets_in_mins"]
+            )
     except Exception as e:
         ok, info, count = False, str(e)[:80], "?"
     return (name, p.get("type", "?"), bool(p.get("enabled")),
@@ -292,7 +297,7 @@ def read_full_log():
         state["full_log"] = []
 
 
-def run_sync(dry_run=False):
+def run_sync(dry_run=False, force=False):
     if state["syncing"]:
         flash("a sync is already running")
         return
@@ -306,6 +311,8 @@ def run_sync(dry_run=False):
             cmd = ["python3", "-m", "gitsync", "sync"]
             if dry_run:
                 cmd.append("--dry-run")
+            if force:
+                cmd.append("--force")
             p = subprocess.Popen(cmd,
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True,
@@ -438,6 +445,20 @@ def commit_screen(stdscr=None):
         pass
 
 
+def _handle_resize(stdscr=None):
+    """Update curses lines/columns on window resize and clear screen."""
+    if hasattr(curses, "update_lines_cols"):
+        try:
+            curses.update_lines_cols()
+        except Exception:
+            pass
+    if stdscr:
+        try:
+            stdscr.erase()
+        except Exception:
+            pass
+
+
 def menu(stdscr, title, items, note=None):
     idx = 0
     while True:
@@ -460,6 +481,9 @@ def menu(stdscr, title, items, note=None):
                  curses.A_REVERSE)
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (curses.KEY_UP, ord("k")):
@@ -586,6 +610,9 @@ def _form(stdscr, title, fields, note=None):
                      " Enter=edit/cycle  up/dn=move  S=save  B=cancel ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return None
         if ch in (curses.KEY_UP, ord("k")):
@@ -610,7 +637,7 @@ def _form(stdscr, title, fields, note=None):
 
 
 def _platform_rows(cfg):
-    """[(name, type, enabled, ok, info, has_token, extra)] for the manager"""
+    """[(name, type, enabled, ok, info, has_token, extra, gh_auth, is_oauth)] for the manager"""
     rows = []
     tested = {r[0]: (r[3], r[4]) for r in (state.get("platforms") or [])}
     for name, p in (cfg.get("platforms") or {}).items():
@@ -619,7 +646,8 @@ def _platform_rows(cfg):
         rows.append((name, p.get("type", "?"), bool(p.get("enabled")),
                      bool(ok) if ok is not None else None, info,
                      bool(p.get("token")), extra,
-                     p.get("auth") == "gh" and not p.get("token")))
+                     p.get("auth") == "gh" and not p.get("token"),
+                     p.get("auth") == "oauth"))
     return rows
 
 
@@ -642,7 +670,7 @@ def accounts_screen(stdscr):
                  (" ACCOUNTS — %d site(s) " % len(rows)).center(w - 1)[:w - 1],
                  curses.A_BOLD | curses.color_pair(1))
         safe_add(stdscr, 1, 0,
-                 " A=add  E=edit  X=remove  T=test  V=view repos  ?=scopes  "
+                 " A=add  L=browser login  E=edit  X=remove  T=test  V=view repos  "
                  "Space=on/off  R=refresh  B=back ".ljust(w - 1)[:w - 1],
                  curses.A_DIM)
         avail = max(1, h - 5)
@@ -651,7 +679,7 @@ def accounts_screen(stdscr):
         elif idx - top >= avail:
             top = idx - avail + 1
         for i, row in enumerate(rows[top:top + avail]):
-            (name, ptype, on, ok, info, has_tok, extra, gh_auth) = row
+            (name, ptype, on, ok, info, has_tok, extra, gh_auth, is_oauth) = row
             attr = curses.A_REVERSE if (top + i) == idx else 0
             if not on:
                 attr |= curses.A_DIM
@@ -662,7 +690,14 @@ def accounts_screen(stdscr):
                 state_txt = "OK"
             else:
                 state_txt = "FAIL"
-            tok = "gh-CLI" if gh_auth else ("token" if has_tok else "no token")
+            if is_oauth:
+                tok = "oauth"
+            elif gh_auth:
+                tok = "gh-CLI"
+            elif has_tok:
+                tok = "token"
+            else:
+                tok = "no token"
             line = " %s %-14s %-9s %-5s %-8s %s" % (
                 mark, name[:14], ptype, state_txt, tok, extra[:w - 52])
             safe_add(stdscr, 3 + i, 0, line[:w - 1], attr)
@@ -676,8 +711,8 @@ def accounts_screen(stdscr):
                                                       len(rows)),
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
-                     " A=add  E=edit  X=remove  T=test  V=view repos  "
-                     "?=scopes  Space=on/off  up/dn=move  B=back ")
+                     " A=add  L=browser login  E=edit  X=remove  T=test  "
+                     "V=repos  Space=on/off  up/dn=move  B=back ")
         commit_screen(stdscr)
 
         ch = stdscr.getch()
@@ -695,6 +730,14 @@ def accounts_screen(stdscr):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("?"),):
             _scopes_screen(stdscr)
+        elif ch in (ord("l"), ord("L")) and rows:
+            row = rows[idx]
+            if row[1] != "github":
+                flash("Browser login is for GitHub sites (use E to edit %s)" % row[1], 4)
+                continue
+            made = _github_device_login(stdscr, name=row[0])
+            if made:
+                threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("v"), ord("V")) and rows:
             # browse this site's repos without leaving the manager
             repos_screen(stdscr, source=rows[idx][0])
@@ -803,6 +846,140 @@ def _remove_platform_screen(stdscr, name):
             return
 
 
+def _github_device_login(stdscr, name=None):
+    """authenticate GitHub via browser device flow"""
+    h, w = stdscr.getmaxyx()
+    stdscr.erase()
+    safe_add(stdscr, 2, 2, "Connecting to GitHub...", curses.A_BOLD)
+    safe_add(stdscr, 3, 2, "Requesting device code from GitHub...", curses.A_DIM)
+    commit_screen(stdscr)
+    try:
+        init_data = P.github_device_flow_start()
+    except Exception as e:
+        flash("GitHub login failed: %s" % str(e)[:60], 6)
+        return None
+
+    user_code = init_data.get("user_code", "")
+    uri = init_data.get("verification_uri", "https://github.com/login/device")
+    device_code = init_data.get("device_code", "")
+    interval = init_data.get("interval", 5)
+
+    try:
+        import webbrowser
+        webbrowser.open(uri)
+    except Exception:
+        pass
+
+    start_time = time.time()
+    expires_in = init_data.get("expires_in", 900)
+    spinner = ["|", "/", "-", "\\"]
+    sp_idx = 0
+    token = None
+
+    poll_state = {
+        "status": "pending",
+        "token": None,
+        "error": None,
+        "interval": interval,
+        "stop": False,
+    }
+
+    def poll_worker():
+        curr_int = interval
+        while not poll_state["stop"] and (time.time() - start_time < expires_in):
+            time.sleep(curr_int)
+            if poll_state["stop"]:
+                break
+            res = P.github_device_flow_poll(device_code)
+            st = res.get("status")
+            if st == "ok":
+                poll_state["token"] = res["token"]
+                poll_state["status"] = "ok"
+                break
+            elif st == "slow_down":
+                curr_int = res.get("interval") or (curr_int + 5)
+                poll_state["interval"] = curr_int
+            elif st == "expired":
+                poll_state["status"] = "expired"
+                poll_state["error"] = res.get("error", "authorization expired")
+                break
+            elif st == "error":
+                err_msg = res.get("error", "")
+                if "access_denied" in err_msg or "expired" in err_msg:
+                    poll_state["status"] = "error"
+                    poll_state["error"] = err_msg
+                    break
+                poll_state["status"] = "retry"
+                time.sleep(2)
+
+    poller = threading.Thread(target=poll_worker, daemon=True)
+    poller.start()
+
+    stdscr.nodelay(True)
+    try:
+        while time.time() - start_time < expires_in:
+            now = time.time()
+            ch = stdscr.getch()
+            if ch == getattr(curses, "KEY_RESIZE", 410):
+                _handle_resize(stdscr)
+                continue
+            if ch in (27, ord("q"), ord("Q"), ord("b"), ord("B")):
+                poll_state["stop"] = True
+                flash("GitHub login cancelled", 4)
+                return None
+
+            if poll_state["status"] == "ok":
+                token = poll_state["token"]
+                break
+            elif poll_state["status"] in ("expired", "error"):
+                flash("Login failed: %s" % (poll_state["error"] or "expired"), 6)
+                return None
+
+            stdscr.erase()
+            h, w = stdscr.getmaxyx()
+            safe_add(stdscr, 1, 2, " GITHUB BROWSER LOGIN ", curses.A_BOLD | curses.color_pair(1))
+            safe_add(stdscr, 3, 4, "1. Open in your browser: %s" % uri, curses.A_BOLD)
+            safe_add(stdscr, 4, 4, "   (Browser window was opened automatically)", curses.A_DIM)
+            safe_add(stdscr, 6, 4, "2. Enter this one-time code: ", curses.A_BOLD)
+            safe_add(stdscr, 7, 7, "+----------------+", curses.color_pair(2))
+            safe_add(stdscr, 8, 7, "|    %s    |" % user_code, curses.A_BOLD | curses.color_pair(2))
+            safe_add(stdscr, 9, 7, "+----------------+", curses.color_pair(2))
+            safe_add(stdscr, 11, 4, "%s Waiting for authorization on GitHub... (Esc to cancel)" % spinner[sp_idx % 4], curses.A_DIM)
+            rem = max(0, int(expires_in - (now - start_time)))
+            safe_add(stdscr, 12, 4, "Code expires in %dm %ds" % (rem // 60, rem % 60), curses.A_DIM)
+            modal_footer(stdscr, h, w, " Esc=cancel  waiting for GitHub browser authorization... ")
+            commit_screen(stdscr)
+
+            time.sleep(0.1)
+            sp_idx += 1
+    finally:
+        poll_state["stop"] = True
+        stdscr.nodelay(False)
+    if not token:
+        flash("Login timed out", 5)
+        return None
+
+    flash("Authorized! Validating user...", 4)
+    plat = P.GitHubPlatform(name or "github", {"token": token, "auth": "oauth"})
+    username = plat.user() or ""
+
+    cfg = C.load_config()
+    plat_name = name or ("github" if "github" not in (cfg.get("platforms") or {}) else "github-%s" % (username or "user"))
+    pcfg = (cfg.get("platforms") or {}).get(plat_name) or {"type": "github"}
+    pcfg["type"] = "github"
+    pcfg["enabled"] = True
+    pcfg["token"] = token
+    pcfg["auth"] = "oauth"
+    if username:
+        pcfg["owner"] = username
+    cfg.setdefault("platforms", {})[plat_name] = pcfg
+    C.save_config(cfg)
+    _reload_routes()
+    flash("Connected to GitHub as @%s!" % (username or plat_name), 6)
+    threading.Thread(target=refresh_platforms, daemon=True).start()
+    return plat_name
+
+
 def _add_platform_screen(stdscr):
     """pick a type, then fill in the form - the same fields the CLI asks for.
 
@@ -812,6 +989,35 @@ def _add_platform_screen(stdscr):
     made = []
 
     def make(tt):
+        if tt == "github":
+            sub_choice = []
+            menu(stdscr, "CONNECT GITHUB — how to authenticate?", [
+                ("Browser Login (Device Flow)", "sign in securely in browser (recommended)",
+                 lambda: sub_choice.append("browser")),
+                ("Personal Access Token (PAT)", "enter ghp_... token manually",
+                 lambda: sub_choice.append("token")),
+                ("gh CLI", "use local gh CLI session",
+                 lambda: sub_choice.append("gh")),
+            ], note="Browser login opens GitHub in your browser without needing to generate a token")
+            if sub_choice:
+                if sub_choice[0] == "browser":
+                    res = _github_device_login(stdscr)
+                    if res:
+                        made.append(res)
+                    return
+                elif sub_choice[0] == "gh":
+                    name = prompt_line(stdscr, " platform name: ", "github")
+                    if name:
+                        cfg = C.load_config()
+                        spec = C.platform_template("github", name, auth="gh")
+                        C.add_platform(cfg, name, spec)
+                        C.save_config(cfg)
+                        flash("%s: added (using gh CLI)" % name, 4)
+                        _reload_routes()
+                        threading.Thread(target=refresh_platforms, daemon=True).start()
+                        _test_platform(name)
+                        made.append(name)
+                    return
         made.append(_platform_form(stdscr, tt))
 
     items = []
@@ -948,6 +1154,9 @@ def _input_line(stdscr, prompt, secret=False):
             except (curses.error, AttributeError):
                 ch = stdscr.getch()
                 c_val = chr(ch) if (32 <= ch < 0x110000 and ch != 127) else ""
+            if ch == getattr(curses, "KEY_RESIZE", 410):
+                _handle_resize(stdscr)
+                continue
             if ch in (27,):
                 return None
             if ch in (10, 13, curses.KEY_ENTER):
@@ -1004,6 +1213,9 @@ def notifications_screen(stdscr):
                      "[Enter]test  [B]ack ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (ord("d"), ord("D")):
@@ -1074,6 +1286,9 @@ def _webhooks_screen(stdscr, cfg):
                      "[B]ack ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (ord("r"), ord("R")):
@@ -1291,9 +1506,12 @@ def repos_screen(stdscr, source=None):
             attr = curses.color_pair(2) if name in state["repo_sel"] else 0
             if (top + i) == cur:
                 attr |= curses.A_REVERSE
-            line = " %s %-30s %s%s" % (mark, name[:30],
-                                       "priv" if priv else "pub ",
-                                       " fork" if fork else "")
+            is_mirrored = os.path.isdir(os.path.join(C.MIRROR_DIR, name + ".git"))
+            hub_tag = "mirrored" if is_mirrored else "-"
+            line = " %s %-26s %-4s %-8s %s" % (mark, name[:26],
+                                               "priv" if priv else "pub ",
+                                               hub_tag,
+                                               "fork" if fork else "")
             safe_add(stdscr, 2 + i, 0, line[:w - 1], attr)
         if not view:
             safe_add(stdscr, 2, 0, " (no matching repos)", curses.A_DIM)
@@ -1304,10 +1522,13 @@ def repos_screen(stdscr, source=None):
                                                        len(items)))[:w - 1],
                      curses.A_DIM)
         modal_footer(stdscr, h, w,
-                     " space=select  a=all  n=none  /=filter  W=save to file  "
-                     "S=all targets  T=one site  L=local only  B=back ")
+                     " space=select  a=all  n=none  /=filter  P=platform  "
+                     "+=add-to-route  W=save  S=sync  T=push-to  B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch == curses.KEY_MOUSE:
             try:
                 _eid, _mx, my, _bz, bstate = curses.getmouse()
@@ -1359,6 +1580,45 @@ def repos_screen(stdscr, source=None):
                 flash("nothing selected - press space on a repo", 5)
                 continue
             _save_selection_file(stdscr)
+        elif ch in (ord("p"), ord("P")):
+            cfg = C.load_config()
+            plats = [pname for pname, p in (cfg.get("platforms") or {}).items() if p.get("enabled")]
+            if not plats:
+                flash("no enabled platforms configured", 4)
+                continue
+            chosen = []
+            m_items = [(pname, (cfg.get("platforms") or {})[pname].get("type", ""),
+                        (lambda pp=pname: chosen.append(pp))) for pname in plats]
+            menu(stdscr, "BROWSE REPOS — which platform?", m_items)
+            if chosen:
+                state["repo_sel"] = set()
+                state["repo_loaded"] = False
+                state["repo_scroll"] = 0
+                load_repos(source=chosen[0])
+                cur = top = 0
+                query = ""
+        elif ch in (ord("+"),):
+            if not state["repo_sel"]:
+                flash("nothing selected - press space on a repo", 5)
+                continue
+            cfg = C.load_config()
+            routes = C.routes(cfg)
+            if not routes:
+                flash("no routes configured", 4)
+                continue
+            chosen_r = []
+            m_items = [(r.get("name"), "%s -> %s" % (r.get("source"), ",".join(r.get("targets", []))),
+                        (lambda rr=r: chosen_r.append(rr))) for r in routes]
+            menu(stdscr, "ADD SELECTED REPOS TO WHICH ROUTE?", m_items)
+            if chosen_r:
+                r = chosen_r[0]
+                inc = set(r.get("include") or [])
+                inc.update(state["repo_sel"])
+                r["include"] = sorted(inc)
+                r.pop("include_file", None)
+                C.save_config(cfg)
+                _reload_routes()
+                flash("added %d repo(s) to route '%s'" % (len(state["repo_sel"]), r.get("name")), 5)
         elif ch in (ord("s"), ord("S"), ord("l"), ord("L"),
                     ord("t"), ord("T")):
             if not state["repo_sel"]:
@@ -1403,6 +1663,9 @@ def prompt_line(stdscr, label, initial=""):
         except (curses.error, AttributeError):
             ch = stdscr.getch()
             c_val = chr(ch) if (32 <= ch < 0x110000 and ch != 127) else ""
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (10, 13, curses.KEY_ENTER):
             break
         if ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -1510,6 +1773,9 @@ def _scroll_view(stdscr, title, lines, start=0):
                      "Home=top /=filter Esc=clear B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             if ch == 27 and state["search"]:
                 state["search"] = ""
@@ -1550,15 +1816,19 @@ def cached_status():
     return _status_cache["txt"]
 
 
-def status_line():
+def status_line(cfg=None):
     """the row-1 status text (clock at CLOCK_X, sync state, schedule, age)"""
-    sched = C.setting(C.load_config(), "schedule", "hourly")
+    if cfg is None:
+        cfg = C.load_config()
+    sched = C.setting(cfg, "schedule", "hourly")
+    is_paused = C.setting(cfg, "paused", False)
+    sync_txt = "PAUSED" if is_paused else ("YES" if state["syncing"] else "no")
     age = int(time.time() - state["counts_age"])
     age_txt = "loading..." if not state["platforms"] else (
         "%ds" % age if age < 3600 else "stale")
-    return (" %s  syncing: %s  schedule: %s  counts: %s "
+    return (" %s  sync: %s  schedule: %s  counts: %s "
             % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-               "YES" if state["syncing"] else "no",
+               sync_txt,
                C.SCHEDULES.get(sched, {}).get("label", sched), age_txt))
 
 
@@ -1615,10 +1885,13 @@ def draw(stdscr):
         Cc = G = Y = R = 0
     dim = curses.A_DIM
 
+    cfg = C.load_config()
+    is_paused = C.setting(cfg, "paused", False)
+    title = (" gitsync %s [PAUSED] " if is_paused else " gitsync %s ") % __version__
     safe_add(stdscr, 0, 0,
-             (" gitsync %s " % __version__).center(w - 1)[:w - 1],
-             curses.A_BOLD | Cc)
-    safe_add(stdscr, 1, 0, status_line().ljust(w - 1)[:w - 1], dim)
+             title.center(w - 1)[:w - 1],
+             curses.A_BOLD | (Y if is_paused else Cc))
+    safe_add(stdscr, 1, 0, status_line(cfg).ljust(w - 1)[:w - 1], dim)
 
     tab = state["tab"]
     if tab == 1:
@@ -1639,7 +1912,7 @@ def draw(stdscr):
     # tab bar + footer
     safe_add(stdscr, 2, 0, (" " + tab_bar(w) + " ").center(w - 1)[:w - 1],
              curses.A_REVERSE)
-    foot = (" [1-7]tabs  [S]ync  [D]ry-run  [L]og  [C]ron  [O]pt  "
+    foot = (" [1-7]tabs  [S]ync  [P]ause  [D]ry-run  [L]og  [C]ron  [O]pt  "
             "[A]cc  [N]otify  [E]repos  [T]ools  [W]izard  [R]efresh  "
             "[?]Help  [Q]uit ")
     if tab == 1:
@@ -2229,6 +2502,9 @@ def routes_screen(stdscr):
         commit_screen(stdscr)
 
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch == curses.KEY_MOUSE:
             try:
                 _eid, _mx, my, _bz, bstate = curses.getmouse()
@@ -2420,6 +2696,9 @@ def stars_screen(stdscr):
                      "B=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (curses.KEY_UP, ord("k")):
@@ -2846,14 +3125,15 @@ def main():
         snapshot()
 
 
-def _global_help_screen(stdscr):
-    """Global keyboard shortcuts and usage guide."""
-    lines = [
+def global_help_lines():
+    tab_list = ", ".join(TABS)
+    nav_tabs = "  1 - %d      Switch tabs (%s)" % (len(TABS), tab_list)
+    return [
         "KEYBOARD SHORTCUTS & HELP",
         "=" * 50,
         "",
         "NAVIGATION:",
-        "  1 - 6      Switch tabs (Dashboard, Platforms, Routes, Log, History, Settings)",
+        nav_tabs,
         "  Up / Down  Scroll active list or panel (or j / k)",
         "  PgUp/PgDn  Page scroll up / down",
         "  Home / End Jump to top / bottom",
@@ -2865,9 +3145,9 @@ def _global_help_screen(stdscr):
         "  S          Sync now (syncs all enabled routes; prompts if FULL mode)",
         "  D          Dry run (simulate sync without making changes)",
         "  R          Refresh platforms status and health checks",
-        "  E          Browse repositories (view details, selective sync)",
-        "  A          Accounts / platforms manager (add, edit, test, delete)",
-        "  P          Pause / resume routes (on Routes tab or modal)",
+        "  E          Browse repositories (view details, selective sync, add to route)",
+        "  A          Accounts / platforms manager (add, edit, test, delete, browser login)",
+        "  P          Pause / resume global sync (or route target in Tab 2)",
         "  C          Schedule timer (systemd / cron interval configuration)",
         "  O          Options and global settings",
         "  N          Notifications (Discord / Telegram webhooks)",
@@ -2890,7 +3170,11 @@ def _global_help_screen(stdscr):
         "",
         "Press B, Q, or Esc to return to dashboard.",
     ]
-    _scroll_view(stdscr, " GLOBAL HELP (?) ", lines)
+
+
+def _global_help_screen(stdscr):
+    """Global keyboard shortcuts and usage guide."""
+    _scroll_view(stdscr, " GLOBAL HELP (?) ", global_help_lines())
 
 
 def _run(stdscr):
@@ -2991,6 +3275,11 @@ def _run(stdscr):
                 state["dirty"] = True
         if ch != -1:
             dirty = True
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            dirty = True
+            state["dirty"] = True
+            continue
 
         # ---- search mode: capture typed characters ----
         if state["search_mode"]:
@@ -3020,14 +3309,22 @@ def _run(stdscr):
             STAR_STATE["scroll"] = 0
             state["plat_scroll"] = 0
         elif ch in (ord("s"), ord("S")):
-            _cfg_full = [r.get("name") for r in C.routes(C.load_config())
+            _cfg_curr = C.load_config()
+            force_sync = False
+            if C.setting(_cfg_curr, "paused", False):
+                conf = prompt_line(stdscr, " Sync is PAUSED globally. Run anyway? Type 'yes': ")
+                if conf.strip().lower() != "yes":
+                    flash("sync cancelled (app is paused)", 4)
+                    continue
+                force_sync = True
+            _cfg_full = [r.get("name") for r in C.routes(_cfg_curr)
                          if r.get("mode") == "full" and r.get("enabled") is not False]
             if _cfg_full:
                 conf = prompt_line(stdscr, " FULL mode route(s) (%s) prune branches. Type 'yes': " % ",".join(_cfg_full))
                 if conf.strip().lower() != "yes":
                     flash("sync cancelled (full mode requires confirmation)", 5)
                     continue
-            run_sync()
+            run_sync(force=force_sync)
         elif ch in (ord("d"), ord("D")):
             run_sync(dry_run=True)
         elif ch in (ord("l"), ord("L")):
@@ -3072,7 +3369,14 @@ def _run(stdscr):
                 STAR_STATE["scroll"] = max(0, n - 1)
             else:
                 STAR_STATE["scroll"] = 0
-        elif ch in (ord("r"), ord("R"), ord("p"), ord("P")):
+        elif ch in (ord("p"), ord("P")):
+            cfg = C.load_config()
+            new_p = not C.setting(cfg, "paused", False)
+            cfg.setdefault("settings", {})["paused"] = new_p
+            C.save_config(cfg)
+            flash("Sync %s globally" % ("PAUSED" if new_p else "RESUMED"), 4)
+            state["dirty"] = True
+        elif ch in (ord("r"), ord("R")):
             threading.Thread(target=refresh_platforms, daemon=True).start()
         elif ch in (ord("n"), ord("N")):
             notifications_screen(stdscr)
@@ -3167,6 +3471,9 @@ def _confirm_modal(stdscr, title, warning, action_fn):
         modal_footer(stdscr, h, w, " Y = run it   N = cancel ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
             return
         if ch in (ord("y"), ord("Y")):

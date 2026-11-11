@@ -195,6 +195,8 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync routes add all github,gitlab,forgejo` | **two-way (mesh)** route over every peer |
 | `gitsync routes pause NAME [TARGET]` | pause a whole route, or just one target |
 | `gitsync routes resume NAME [TARGET]` | resume it (targets catch up on the next run) |
+| `gitsync pause` | **suspend all background and scheduled syncs** globally |
+| `gitsync resume` | **resume** global sync |
 | `gitsync routes remove NAME` | remove a route |
 | `gitsync sync --to backup` | push to **one target only** (not for mesh routes) |
 | `gitsync webhooks --install` | run the receiver as a service (URL shown in the TUI) |
@@ -237,6 +239,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `--dry-run` | `sync`, `fix` | preview only. Names every ref a `full`-mode push **would delete** |
 | `--quiet` | `sync` | no progress output (what the timer uses) |
 | `--scheduled` | `sync` | only run routes whose own schedule says they are due |
+| `--force` | `sync` | run sync even if global sync is paused |
 | `--to NAME` | `sync`, `mirror` | push to one target only. **Ignored on a mesh route** (a mesh always syncs every peer) |
 | `--from NAME` | `mirror` | pull from a specific platform instead of the route's source |
 | `--repos "a,b"` | `sync`, `stars copy` | only these repos (exact, case-insensitive names) |
@@ -606,9 +609,10 @@ next sync if the repo reappears).
 | `H` | run history + duration trend |
 | `C` | schedule: hourly / 6h / 12h / daily / weekly / off |
 | `O` | options: workers, mirror mode, forks, notify, **pacing**, mesh policy, token warning, **theme** |
-| `A` | accounts: add / edit / remove / test / enable-disable a site, `V` browse its repos, `?` token scopes |
+| `A` | accounts: add / edit / remove / test / enable-disable a site, `L` GitHub browser login, `V` browse repos, `?` scopes |
+| `P` (Dashboard) | **pause / resume global sync** (suspends background timer and manual syncs) |
 | `P` (Routes tab) | pause/resume a target or a route · `S` run one route · `D` dry-run it · `F` filters · `A` add · `X` remove · `O` per-route options |
-| `E` | **repo browser** — see the account's repos, pick some, `S` all targets / `T` one site / `L` local only |
+| `E` | **repo browser** — see repos, mirror status, pick some, `+` add to route, `P` switch account, `S` all / `T` one site / `L` local only |
 | `T` | **tools**: disk + orphans, doctor, compare, mirror one repo, fix drift, update, uninstall (run in the background, output streams to the dashboard) |
 | `N` | notifications: Discord `D`, Telegram `T`, mode `M`, test Enter, webhook receiver `W` |
 | `R` | refresh platform connections |

@@ -77,28 +77,37 @@ def check(cfg, warn_days=None):
 
         exp = info.get("expires_at")
         days = days_left(exp)
-        lvl = level_for(days, warn_days)
-        entry["level"] = lvl
         entry["expires_at"] = exp
         entry["days_left"] = days
         entry["scopes"] = info.get("scopes")
-        if info.get("error"):
+        if info.get("rate_limit"):
+            entry["rate_limit"] = info["rate_limit"]
+
+        if entry["type"] == "local" or info.get("has_token") is False:
+            entry["level"] = "n/a"
+            entry["note"] = info.get("note") or "no credentials"
+        elif info.get("error") == "unreachable":
+            entry["level"] = "unknown"
+            entry["note"] = "could not reach host — not verified"
+        elif info.get("error"):
             entry["note"] = info["error"]
             entry["level"] = "critical"
-        elif info.get("note"):
-            entry["note"] = info["note"]
         elif info.get("revoked"):
             entry["note"] = "token revoked"
             entry["level"] = "expired"
         elif info.get("active") is False:
             entry["note"] = "token inactive"
             entry["level"] = "expired"
-        elif days is None:
-            entry["note"] = "expiry not reported"
-        elif days < 0:
-            entry["note"] = "EXPIRED %d day(s) ago" % (-days)
+        elif exp is not None:
+            lvl = level_for(days, warn_days)
+            entry["level"] = lvl
+            if days < 0:
+                entry["note"] = "EXPIRED %d day(s) ago" % (-days)
+            else:
+                entry["note"] = "expires in %d day(s)" % days
         else:
-            entry["note"] = "expires in %d day(s)" % days
+            entry["level"] = "ok-no-expiry"
+            entry["note"] = info.get("note") or "no expiry set"
         out.append(entry)
     return out
 
@@ -111,9 +120,10 @@ def bad(results):
 
 def summary(results):
     """one-line digest for the TUI / doctor"""
-    b = bad(results)
+    checked = [r for r in results if r.get("level") != "n/a"]
+    b = bad(checked)
     if not b:
-        unverified = [r for r in results if r.get("level") == "unknown"]
+        unverified = [r for r in checked if r.get("level") == "unknown"]
         if unverified:
             return "%d token(s) unverified" % len(unverified)
         return "all tokens healthy"

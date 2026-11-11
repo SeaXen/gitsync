@@ -4,9 +4,45 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-11-11
+
+Credential helper reliability, network fault tolerance in token telemetry, TUI window resize resilience, and UI accessibility polish.
+
+### Credential Helper & Container Hermeticity (R1)
+- **Executable Mode in Git Index**: Explicitly marked `gitsync/askpass.py` and `gitsync/glab_askpass.py` executable (`100755`) in the repository index to prevent permission denied errors on source clones and unzips outside `install.sh`.
+- **Runtime Helper Fallback**: `sync.askpass_env()` and `platforms.GitLabPlatform.git_env()` now dynamically ensure executable permissions (`os.chmod`) and automatically fall back to an isolated generated POSIX wrapper script (`0700` in private temp dir with atexit cleanup) if the underlying filesystem is read-only.
+- **Docker Layer Hardening**: Ensured execute bits are preserved on askpass helpers inside container builds.
+
+### Token Telemetry & Health Accuracy (R2, R3)
+- **Network Resilience**: `tokencheck.check()` distinguishes host unreachability (`error == "unreachable"`) from credential rejection, reporting `level="unknown"` with `"could not reach host — not verified"` instead of raising critical alert banners. Aligned `GitLabPlatform`, `ForgejoPlatform`, and `BitbucketPlatform` `token_info()` probes.
+- **Local & Non-Expiring Credentials**: Assigned `level="n/a"` to local folders and CLI auth (excluding them from verification alerts), and `level="ok-no-expiry"` to verified tokens without expiration dates so healthy tokens are not counted as unverified.
+
+### TUI Window Resize & Navigation Help (R4, R5)
+- **Dynamic Tab Switch Help**: Replaced static help overlay text with dynamically computed tab list (`1 - 7 Switch tabs (...)`) sourced directly from `TABS`, preventing tab drift.
+- **Interactive Window Resize Handling**: Integrated `KEY_RESIZE` / `curses.update_lines_cols()` handling across all 15 modal and full-screen loops, ensuring clean redraws upon terminal geometry changes (e.g., 120x30 to 80x24 to 40x12).
+
+### UI Polish & Route Scoping
+- **Accessible Mobile Top Bar**: Mobile action buttons feature clear `aria-label` and `title` tooltips, distinct play icon for sync triggers, and responsive topbar layout.
+- **Web Scheduler Install Action**: Converted raw anchor link in dashboard notice to an accessible action `<button>` wired to the scheduler install endpoint.
+- **Scoped Retry Failed**: `--retry-failed` CLI option supports route isolation when combined with `--route <name>`.
+- **Documentation Organization**: Relocated review and plan files to `docs/FIX-PLAN.md` with updated references.
+
 ## [2.0.1] - 2026-11-11
 
-Security hardening, secret protection, test hermeticity, mobile responsiveness, and UI clarity improvements.
+Security hardening, secret protection, GitHub browser login (Device Flow), live rate limits, global sync pause/resume, and UI clarity improvements.
+
+### GitHub Device Authorization & Rate-Limit Tracking
+- **Browser Login (OAuth Device Flow RFC 8628)**: Added interactive GitHub Device Flow authentication in TUI (`L` in accounts, wizard option), WebUI ("Sign in with GitHub" modal with live polling), and CLI without requiring PAT copy-pasting or open inbound ports. Standard library only (`urllib.request`).
+- **Live Rate-Limit Telemetry**: Automated capture of GitHub API `x-ratelimit-*` headers across all requests; surfaced in TUI account probes (`[rate: rem/limit (reset_min)]`) and WebUI platform cards and tables.
+
+### Global Sync Pause & Resume
+- **Master Pause Switch**: Added `gitsync pause` and `gitsync resume` CLI commands, TUI `P` toggle with persistent `[PAUSED]` indicator in title and status lines, WebUI topbar Pause/Resume toggle button, and `/api/pause` endpoint.
+- **Sync Guard**: `run_sync()` respects global pause setting, exiting cleanly with `skipped="paused"`, with `--force` override option.
+
+### Repository Management & Route Filter Additions
+- **Mirror Hub Status**: Repo browser in both TUI (`E`) and WebUI (`/repos`) displays real-time `mirrored` status vs unmirrored.
+- **TUI Repo Browser Shortcuts**: Added `P` shortcut to quickly switch source accounts without backing out, and `+` shortcut to add selected repos directly to existing route filters.
+
 
 ### Security & Secret Handling
 - **Scrubbed stored credentials in mirrors (S2)**: Hub mirror configs rewritten to store clean, token-less URLs in `remote.origin.url`; credentials supplied per command via `GIT_ASKPASS`.

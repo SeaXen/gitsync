@@ -5,11 +5,14 @@ repo, then pushed from the hub to each target. The hub makes the sync
 resumable and gives an offline copy for free.
 """
 
+import atexit
 import fnmatch
 import json
 import os
 import re as _re
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -44,13 +47,51 @@ def split_url_auth(url):
     return clean_url, user, token
 
 
+_HELPER_WRAPPERS = {}
+
+
+def ensure_executable_helper(helper):
+    """Ensure a helper script (GIT_ASKPASS) is executable.
+
+    If on POSIX and not executable, tries os.chmod. If chmod fails or the file
+    is still not executable (e.g. read-only mount), falls back to a generated
+    temporary wrapper script (chmod 0700) invoking sys.executable.
+    """
+    if os.name == "nt":
+        return helper
+    try:
+        st = os.stat(helper)
+        if not (st.st_mode & 0o111):
+            os.chmod(helper, st.st_mode | 0o111)
+    except Exception:
+        pass
+    if os.access(helper, os.X_OK):
+        return helper
+    if helper in _HELPER_WRAPPERS and os.path.exists(_HELPER_WRAPPERS[helper]):
+        return _HELPER_WRAPPERS[helper]
+    td = tempfile.mkdtemp(prefix="gitsync_helper_")
+    wrapper = os.path.join(td, os.path.basename(helper) + ".sh")
+    with open(wrapper, "w", encoding="utf-8") as f:
+        f.write('#!/bin/sh\nexec "%s" "%s" "$@"\n' % (sys.executable, helper))
+    try:
+        os.chmod(wrapper, 0o700)
+    except Exception:
+        pass
+    _HELPER_WRAPPERS[helper] = wrapper
+    atexit.register(lambda d=td: shutil.rmtree(d, ignore_errors=True))
+    return wrapper
+
+
 def askpass_env(user=None, token=None, base_env=None):
     """Build an env dict configuring GIT_ASKPASS with safe credentials."""
     env = dict(base_env if base_env is not None else os.environ)
     here = os.path.dirname(os.path.abspath(__file__))
     helper = os.path.join(here, "askpass.bat" if os.name == "nt" else "askpass.py")
+    helper = ensure_executable_helper(helper)
     env["GIT_ASKPASS"] = helper
     env["GIT_TERMINAL_PROMPT"] = "0"
+    if "GIT_CONFIG_PARAMETERS" not in env:
+        env["GIT_CONFIG_PARAMETERS"] = "'credential.helper='"
     if os.name == "nt":
         env["GITSYNC_PYTHON"] = sys.executable
     if user:
@@ -903,12 +944,13 @@ def _short_error(err, limit=160):
 
 
 def run_sync(cfg=None, route_name=None, quiet=False, only=None,
-             dry_run=False, scheduled=False):
+             dry_run=False, scheduled=False, force=False):
     """Run all routes (or one). Returns a summary dict.
 
     dry_run=True    computes what would change without touching anything.
     scheduled=True  skip routes whose own schedule says they are not due
                     yet (this is what the systemd timer uses).
+    force=True      run even if sync is paused globally.
     """
     global _start
     # one run at a time — the timer and manual runs must never overlap
@@ -932,9 +974,26 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                     "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "routes": 0, "skipped": "locked"}
 
+    cfg = cfg or C.load_config()
+    if not force and C.setting(cfg, "paused", False):
+        if not quiet:
+            log("sync is paused globally (run 'gitsync resume' or toggle in TUI)")
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            lockf.close()
+        except OSError:
+            pass
+        return {"repos": 0, "ok": 0, "partial": 0, "failed": 0,
+                "failures": [], "elapsed_sec": 0,
+                "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "routes": 0, "skipped": "paused", "paused": True}
+
     _start = time.time()
     reset_progress()
-    cfg = cfg or C.load_config()
     include_forks = bool(C.setting(cfg, "include_forks", False))
     pace = float(C.setting(cfg, "pace", 0) or 0)
     # changing branch protection is a lasting security change on a

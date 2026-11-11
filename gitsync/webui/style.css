@@ -78,6 +78,8 @@ a:hover{text-decoration:underline}
 .btn.sm{min-height:40px;padding:0 12px;font-size:12.5px;border-radius:8px}
 .btn.icon{padding:0;width:40px;min-height:40px}
 .btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-link{background:none;border:none;padding:0;font:inherit;color:var(--accent);text-decoration:underline;cursor:pointer;display:inline}
+.btn-link:hover{color:var(--text)}
 
 .card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px;min-width:0;box-shadow:var(--shadow)}
 .card .card-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}
@@ -196,6 +198,7 @@ td .mono{color:#cbd5e1}
   .top .status{max-width:32vw}
   .top button span{display:none}
   .top button.btn{padding:8px 10px;min-width:36px;justify-content:center}
+  #top-pause{display:none}
 }
 
 /* checkboxes */

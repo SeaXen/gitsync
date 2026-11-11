@@ -126,8 +126,99 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
 
 # ---------------------------------------------------------------- GitHub
 
+DEFAULT_GITHUB_CLIENT_ID = "Ov23li6dtbvT9gmwepvU"
+DEFAULT_GITHUB_SCOPES = "repo,read:user"
+
+
+def github_device_flow_start(client_id=None, scopes=None):
+    """Initiates GitHub Device Authorization Flow (RFC 8628).
+    Returns dict:
+      {
+        "device_code": str,
+        "user_code": str,
+        "verification_uri": str,
+        "expires_in": int,
+        "interval": int
+      }
+    """
+    cid = client_id or os.environ.get("GITSYNC_GITHUB_CLIENT_ID") or DEFAULT_GITHUB_CLIENT_ID
+    sc = scopes or DEFAULT_GITHUB_SCOPES
+    data = urllib.parse.urlencode({"client_id": cid, "scope": sc}).encode("utf-8")
+    req = urllib.request.Request(
+        "https://github.com/login/device/code",
+        data=data,
+        headers={"Accept": "application/json", "User-Agent": "gitsync"}
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        res = json.loads(resp.read().decode("utf-8"))
+    if not isinstance(res, dict) or "error" in res:
+        err_msg = res.get("error_description", res.get("error", "Failed to start GitHub device flow")) if isinstance(res, dict) else "Invalid response from GitHub"
+        raise RuntimeError(err_msg)
+    if "device_code" not in res or "user_code" not in res:
+        raise RuntimeError("Missing device_code or user_code in GitHub response")
+    return res
+
+
+def github_device_flow_poll(device_code, client_id=None):
+    """Polls GitHub token endpoint for Device Flow completion.
+    Returns:
+      {"status": "pending"}
+      {"status": "slow_down", ["interval": int]}
+      {"status": "expired", "error": str}
+      {"status": "ok", "token": str, "scope": str}
+      {"status": "error", "error": str}
+    """
+    cid = client_id or os.environ.get("GITSYNC_GITHUB_CLIENT_ID") or DEFAULT_GITHUB_CLIENT_ID
+    data = urllib.parse.urlencode({
+        "client_id": cid,
+        "device_code": device_code,
+        "grant_type": "urn:ietf:params:oauth:grant-type:device_code"
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://github.com/login/oauth/access_token",
+        data=data,
+        headers={"Accept": "application/json", "User-Agent": "gitsync"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            raw = e.read().decode("utf-8")
+            data = json.loads(raw)
+        except Exception:
+            data = {"error": str(e)}
+        finally:
+            e.close()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+    if not isinstance(data, dict):
+        return {"status": "error", "error": "Invalid response from GitHub"}
+
+    if "access_token" in data:
+        return {"status": "ok", "token": data["access_token"], "scope": data.get("scope", "")}
+
+    err = data.get("error", "")
+    if err == "authorization_pending":
+        return {"status": "pending"}
+    elif err == "slow_down":
+        ret = {"status": "slow_down"}
+        if "interval" in data:
+            try:
+                ret["interval"] = int(data["interval"])
+            except (ValueError, TypeError):
+                pass
+        return ret
+    elif err in ("expired_token", "access_denied"):
+        return {"status": "expired", "error": err}
+    else:
+        return {"status": "error", "error": data.get("error_description", err or "unknown error")}
+
+
 class GitHubPlatform:
     ptype = "github"
+    _rate_limits = {}
 
     def __init__(self, name, cfg):
         self.name = name
@@ -136,6 +227,43 @@ class GitHubPlatform:
         self.owner = cfg.get("owner") or ""
         self.token = cfg.get("token") or os.environ.get("GITHUB_TOKEN", "")
         self.auth = cfg.get("auth") or "gh"   # "gh" = use gh CLI
+
+    @classmethod
+    def update_rate_limit(cls, name, headers):
+        if not headers or not name:
+            return
+        rem = headers.get("x-ratelimit-remaining")
+        lim = headers.get("x-ratelimit-limit")
+        rst = headers.get("x-ratelimit-reset")
+        if rem is not None and lim is not None:
+            try:
+                cls._rate_limits[name] = {
+                    "remaining": int(rem),
+                    "limit": int(lim),
+                    "reset": int(rst) if rst else 0,
+                    "updated_at": time.time(),
+                }
+            except (ValueError, TypeError):
+                pass
+
+    def rate_limit_info(self):
+        info = GitHubPlatform._rate_limits.get(self.name)
+        if info:
+            now = time.time()
+            reset_ts = info.get("reset", 0)
+            if reset_ts and now >= reset_ts:
+                GitHubPlatform._rate_limits.pop(self.name, None)
+                return None
+            resets_in = max(0, int(reset_ts - now))
+            resets_min = (resets_in + 59) // 60
+            return {
+                "remaining": info["remaining"],
+                "limit": info["limit"],
+                "reset": info["reset"],
+                "resets_in_secs": resets_in,
+                "resets_in_mins": resets_min,
+            }
+        return None
 
     # -- helpers
     def _gh(self, args):
@@ -153,8 +281,10 @@ class GitHubPlatform:
         return "https://%s/api/v3" % host
 
     def _api(self, path, method="GET", payload=None):
-        return _http(method, self._api_base() + path,
-                     token=self.token, payload=payload)
+        rc, out, hdrs = _http(method, self._api_base() + path,
+                              token=self.token, payload=payload, want_headers=True)
+        self.update_rate_limit(self.name, hdrs)
+        return rc, out
 
     def user(self):
         if self.auth == "gh" and not self.token:
@@ -258,22 +388,27 @@ class GitHubPlatform:
         return []
 
     def token_info(self):
-        """expiry + scopes, for the token-expiry warning"""
+        """expiry + scopes + rate limit, for the token-expiry warning"""
         if not self.token:
             return {"has_token": False,
                     "note": "gh CLI auth — expiry not exposed"}
         rc, out, hdrs = _http("GET", self._api_base() + "/user",
                               token=self.token, want_headers=True)
+        self.update_rate_limit(self.name, hdrs)
         if rc is None:
             return {"has_token": True, "error": "unreachable"}
         if rc in (401, 403):
             return {"has_token": True, "error": "token rejected"}
         if not isinstance(out, dict) or not out.get("login"):
             return {"has_token": True, "error": "token rejected"}
-        return {"has_token": True,
-                "expires_at": hdrs.get("github-authentication-token-expiration"),
-                "scopes": hdrs.get("x-oauth-scopes"),
-                "user": out.get("login")}
+        res = {"has_token": True,
+               "expires_at": hdrs.get("github-authentication-token-expiration"),
+               "scopes": hdrs.get("x-oauth-scopes"),
+               "user": out.get("login")}
+        rate = self.rate_limit_info()
+        if rate:
+            res["rate_limit"] = rate
+        return res
 
     def ensure_repo(self, repo):
         owner = self.owner or (self.user() or "")
@@ -449,6 +584,11 @@ class GitLabPlatform:
             return None
         helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                               "glab_askpass.py")
+        try:
+            from .sync import ensure_executable_helper
+            helper = ensure_executable_helper(helper)
+        except Exception:
+            pass
         env = dict(os.environ)
         env["GIT_ASKPASS"] = helper
         env["GITLAB_HOST"] = self.url
@@ -514,8 +654,13 @@ class GitLabPlatform:
     def token_info(self):
         """expiry + scopes, for the token-expiry warning"""
         if not self.token:
-            return {"has_token": False}
+            return {"has_token": False,
+                    "note": "glab auth — expiry not exposed"}
         rc, out = self._api("/personal_access_tokens/self")
+        if rc is None:
+            return {"has_token": True, "error": "unreachable"}
+        if rc in (401, 403):
+            return {"has_token": True, "error": "token rejected"}
         if not isinstance(out, dict):
             return {"has_token": True, "error": "cannot read token info"}
         return {"has_token": True,
@@ -707,8 +852,17 @@ class ForgejoPlatform:
 
     def token_info(self):
         """Forgejo/Gitea access tokens do not expire by default"""
-        return {"has_token": bool(self.token), "expires_at": None,
-                "note": "%s tokens do not expire" % self.ptype}
+        if not self.token:
+            return {"has_token": False, "note": "no token configured"}
+        rc, out = self._api("/user")
+        if rc is None:
+            return {"has_token": True, "error": "unreachable"}
+        if rc in (401, 403):
+            return {"has_token": True, "error": "token rejected"}
+        user = out.get("username") or out.get("login") if isinstance(out, dict) else None
+        return {"has_token": True, "expires_at": None,
+                "note": "%s tokens do not expire" % self.ptype,
+                "user": user}
 
     def ensure_repo(self, repo):
         name = repo["name"]
@@ -877,8 +1031,17 @@ class BitbucketPlatform:
 
     def token_info(self):
         """Bitbucket app-password expiry is not exposed by the API"""
-        return {"has_token": bool(self.token), "expires_at": None,
-                "note": "Bitbucket app-password expiry not exposed"}
+        if not self.token:
+            return {"has_token": False, "note": "no token configured"}
+        rc, out = self._api("/user")
+        if rc is None:
+            return {"has_token": True, "error": "unreachable"}
+        if rc in (401, 403):
+            return {"has_token": True, "error": "token rejected"}
+        user = out.get("username") if isinstance(out, dict) else None
+        return {"has_token": True, "expires_at": None,
+                "note": "Bitbucket app-password expiry not exposed",
+                "user": user}
 
     def ensure_repo(self, repo):
         name = repo["name"]

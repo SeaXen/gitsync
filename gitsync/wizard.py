@@ -185,12 +185,61 @@ def run_wizard():
                                ptype, "http://localhost:3000")
             p["url"] = ask("Instance URL", default_url)
             if ptype == "github":
-                p["auth"] = "token" if ask_yes(
-                        "Use a personal access token? (No = use gh CLI)",
-                        False) else "gh"
-                if p["auth"] == "token":
-                    p["token"] = ask_secret(
-                        "GitHub token (hidden; ghp_/github_pat_):")
+                print(" GitHub authentication method:")
+                print("   1) Browser login (Device Flow - easiest, opens in browser)")
+                print("   2) Personal access token (PAT)")
+                print("   3) gh CLI")
+                choice = ask(" Choice [1/2/3]", "1").strip()
+                if choice == "1":
+                    try:
+                        print(" Connecting to GitHub...")
+                        init_data = P.github_device_flow_start()
+                        print("\n " + "=" * 54)
+                        print("  1. Open in your browser: %s" % init_data["verification_uri"])
+                        print("  2. Enter code:          %s" % init_data["user_code"])
+                        print(" " + "=" * 54 + "\n")
+                        try:
+                            import webbrowser
+                            webbrowser.open(init_data["verification_uri"])
+                        except Exception:
+                            pass
+                        print(" Waiting for authorization on GitHub (Ctrl+C to skip)...")
+                        device_code = init_data["device_code"]
+                        interval = init_data.get("interval", 5)
+                        token = None
+                        start_time = time.time()
+                        expires_in = init_data.get("expires_in", 900)
+                        while time.time() - start_time < expires_in:
+                            time.sleep(interval)
+                            res = P.github_device_flow_poll(device_code)
+                            if res.get("status") == "ok":
+                                token = res["token"]
+                                break
+                            elif res.get("status") == "slow_down":
+                                interval = res.get("interval") or (interval + 5)
+                            elif res.get("status") in ("expired", "error"):
+                                print("  login failed: %s" % res.get("error", "expired"))
+                                break
+                        if token:
+                            p["auth"] = "oauth"
+                            p["token"] = token
+                            user = P.GitHubPlatform("", {"token": token, "auth": "oauth"}).user()
+                            if user:
+                                p["owner"] = user
+                                print(" -> Successfully authenticated as @%s!" % user)
+                        else:
+                            print("  could not complete browser login; falling back to token input")
+                            p["auth"] = "token"
+                            p["token"] = ask_secret("GitHub token (hidden; ghp_/github_pat_):")
+                    except Exception as e:
+                        print("  browser login error: %s" % e)
+                        p["auth"] = "token"
+                        p["token"] = ask_secret("GitHub token (hidden; ghp_/github_pat_):")
+                elif choice == "2":
+                    p["auth"] = "token"
+                    p["token"] = ask_secret("GitHub token (hidden; ghp_/github_pat_):")
+                else:
+                    p["auth"] = "gh"
             elif ptype == "gitlab":
                 p["auth"] = "glab" if ask_yes(
                         "Use the glab CLI? (No = use a personal access token)",
