@@ -330,13 +330,26 @@ _cache_lock = threading.Lock()
 def _cached(key, ttl, fn, default=None):
     now = time.time()
     with _cache_lock:
-        val, at = _cache.get(key, (None, 0.0))
-        if val is not None and now - at < ttl:
+        val, at = _cache.get(key, (default, 0.0))
+        # cache on the timestamp, not the value: a legitimate None (no
+        # timer installed, no next run) must be cached too, or /api/status
+        # shells out to systemctl on every poll
+        if at and now - at < ttl:
             return val
-    val = fn()
+    try:
+        val = fn()
+    except Exception:
+        val = default
     with _cache_lock:
         _cache[key] = (val, time.time())
     return val
+
+
+def _invalidate(*keys):
+    """drop cached probes after a mutation so the next GET is fresh."""
+    with _cache_lock:
+        for key in keys:
+            _cache.pop(key, None)
 
 
 def _cached_scheduler():
@@ -621,7 +634,9 @@ def _public_record(r):
     return {"finished_at": r.get("finished_at"), "ok": r.get("ok", 0),
             "partial": r.get("partial", 0), "failed": r.get("failed", 0),
             "repos": r.get("repos", 0), "elapsed_sec": r.get("elapsed_sec"),
-            "routes": r.get("routes", 0), "failures": fails}
+            "routes": r.get("routes", 0), "failures": fails,
+            "dry_run": bool(r.get("dry_run")),
+            "would_change": r.get("would_change")}
 
 
 def _probe(name, p):
@@ -1249,7 +1264,8 @@ def h_github_device_poll(handler):
             plats = cfg.setdefault("platforms", {})
             if raw_name:
                 plat_name = raw_name
-                _valid_name(plat_name)
+                if not _valid_name(plat_name):
+                    raise _Http(400, "invalid platform name")
                 if plat_name in plats and plats[plat_name].get("type") != "github":
                     raise _Http(409, "platform '%s' exists and is not github" % plat_name)
             else:
@@ -1361,6 +1377,7 @@ def h_platform_add(handler):
     if code != 200:
         return handler._json(payload, code)
     _redactor().reload()
+    _invalidate("platforms", "health")
     ok, info = False, ""
     try:
         ok, info = P.make(name, C.load_config()["platforms"][name]).test()
@@ -1414,6 +1431,7 @@ def h_platform_edit(handler, name):
     if code != 200:
         return handler._json(payload, code)
     _redactor().reload()
+    _invalidate("platforms", "health")
     handler._json(payload)
 
 
@@ -1432,6 +1450,7 @@ def h_platform_delete(handler, name):
 
     payload, code = _locked(do)
     _redactor().reload()
+    _invalidate("platforms", "health")
     handler._json(payload, code)
 
 
@@ -1458,6 +1477,7 @@ def h_platform_toggle(handler, name):
         return {"ok": True, "enabled": p["enabled"]}
 
     payload, code = _locked(do)
+    _invalidate("platforms", "health")
     handler._json(payload, code)
 
 
@@ -1479,15 +1499,21 @@ def h_repos(handler):
                             % (name, _redactor().redact(str(e)[:160])))
     q = (handler._qs().get("q") or [""])[0].lower()
     forks = (handler._qs().get("forks") or [None])[0] == "1"
-    existing_mirrors = set(os.listdir(C.MIRROR_DIR)) if os.path.isdir(C.MIRROR_DIR) else set()
+    ptype = p.get("type")
     out = []
     for r in repos:
         if not forks and r.get("fork"):
             continue
         if q and q not in r["name"].lower():
             continue
-        mirrored = (r["name"] + ".git") in existing_mirrors
-        out.append({"name": r["name"], "private": bool(r.get("private")),
+        # mirrors live at mirrors/{type}/{hub_rel(id)}.git now, so a
+        # name+".git" check against the hub root missed every current mirror
+        try:
+            mirrored = os.path.isdir(SYNC.mirror_path(r, ptype))
+        except Exception:
+            mirrored = False
+        out.append({"name": r["name"], "id": r.get("id") or r["name"],
+                    "private": bool(r.get("private")),
                     "fork": bool(r.get("fork")), "mirrored": mirrored})
     out.sort(key=lambda r: r["name"].lower())
     handler._json({"platform": name, "repos": out})
@@ -1499,11 +1525,22 @@ def h_selection_file(handler):
     platform = (b.get("platform") or "").strip()
     if not repos:
         raise _Http(400, "no repos selected")
+    # the platform name becomes part of the default file name, so it must
+    # be a real platform name — not a path fragment
+    if platform and not _valid_name(platform):
+        raise _Http(400, "invalid platform name")
     for r in repos:
         if not isinstance(r, str) or not re.match(r"^[A-Za-z0-9._-]{1,128}$", r):
             raise _Http(400, "bad repo name: %r" % (r,)[:40])
 
     def do(cfg):
+        # find the route first: a request that cannot attach the file must
+        # not leave a stray file behind
+        routes = [r for r in C.routes(cfg) if r.get("source") == platform]
+        if not routes:
+            # do not silently attach to an unrelated route
+            raise _Http(400, "no route has '%s' as its source; nothing attached"
+                        % (platform or "?"))
         # confine the output to the config dir — never allow a caller-chosen
         # absolute path (it could clobber config.json / web.token)
         rel = (b.get("path") or "").strip()
@@ -1512,6 +1549,9 @@ def h_selection_file(handler):
         target = _confined_path(rel, C.CONFIG_DIR) if rel else default
         if target is None:
             target = default
+        # even the default must be inside the config dir
+        if _confined_path(target, C.CONFIG_DIR) is None:
+            raise _Http(400, "output path outside the config dir")
         d = os.path.dirname(target)
         if d:
             os.makedirs(d, exist_ok=True)
@@ -1523,11 +1563,6 @@ def h_selection_file(handler):
             for r in repos:
                 f.write(r + "\n")
         os.replace(tmp, target)
-        routes = [r for r in C.routes(cfg) if r.get("source") == platform]
-        if not routes:
-            # do not silently attach to an unrelated route
-            raise _Http(400, "no route has '%s' as its source; nothing attached"
-                        % (platform or "?"))
         for r in routes:
             r["include_file"] = target
             r.pop("include", None)
@@ -1577,7 +1612,13 @@ def h_route_add(handler):
         for key in ("workers", "mode", "mesh_conflict", "schedule"):
             v = b.get(key)
             if v and v != "inherit":
-                route[key] = int(v) if key == "workers" else v
+                if key == "workers":
+                    try:
+                        route[key] = int(v)
+                    except (TypeError, ValueError):
+                        raise _Http(400, "workers must be a number")
+                else:
+                    route[key] = v
         cfg.setdefault("routes", []).append(route)
         _audit("route added: %s" % name)
         return {"ok": True, "route": _route_view(cfg, route)}
@@ -1776,6 +1817,8 @@ def h_settings_get(handler):
                    "log": C.LOG_FILE, "data": C.DATA_DIR}
     st["schedules"] = {k: v["label"] for k, v in C.SCHEDULES.items()}
     st["themes"] = list(C.THEMES)
+    st["scheduler"] = _cached_scheduler()
+    st["next_run"] = _cached_next_run()
     st["auth"] = {"password_set": bool(a),
                   "username": a.get("username") if a else ""}
     handler._json({"settings": st})
@@ -1812,6 +1855,16 @@ def h_settings_put(handler):
             if b["on"] not in ("failure", "success", "always", "never"):
                 raise _Http(400, "bad notify mode")
             notify["on"] = b["on"]
+        # explicit removal: the fields are write-only, so a blank value
+        # means "keep"; only a named clear removes a stored secret
+        for what in (b.get("clear_notify") or []):
+            if what == "discord":
+                notify.pop("discord_webhook", None)
+            elif what == "telegram":
+                notify.pop("telegram_token", None)
+                notify.pop("telegram_chat_id", None)
+            else:
+                raise _Http(400, "unknown notify target: %r" % (what,))
         if (b.get("discord_webhook") or "").strip():
             url = b["discord_webhook"].strip()
             if not url.startswith(NT.DISCORD_PREFIXES):
@@ -1829,6 +1882,7 @@ def h_settings_put(handler):
 
     payload, code = _locked(do)
     _redactor().reload()
+    _invalidate("health", "next", "sched")
     handler._json(payload, code)
 
 
@@ -1898,13 +1952,18 @@ def h_scheduler_install(handler):
         raise _Http(400, "unknown schedule '%s' (choose from: %s)"
                     % (key, ", ".join(C.SCHEDULES)))
     if key == "off":
+        # persist the choice, or the dashboard keeps showing the old
+        # schedule and its "Install timer" button re-enables hourly
+        C.set_setting(cfg, "schedule", "off")
         S.uninstall_systemd(system=True)
         S.uninstall_systemd()
         S.install_cron("off")
         _audit("scheduler disabled")
+        _invalidate("next", "sched")
         return handler._json({"ok": True, "status": "scheduler disabled"})
     if b.get("schedule"):
         C.set_setting(cfg, "schedule", key)
+    _invalidate("next", "sched")
     if b.get("cron") or not S.have_systemd():
         S.install_cron(key)
         _audit("scheduler installed (cron): %s" % key)
@@ -2023,7 +2082,10 @@ def h_sync_stream(handler):
 def h_job_start(handler):
     b = handler._body()
     kind = (b.get("kind") or "").strip()
-    argv, mutating = _tool_argv(kind, b)
+    try:
+        argv, mutating = _tool_argv(kind, b)
+    except (ValueError, TypeError) as e:
+        return handler._err(400, str(e)[:160])
     try:
         job = start_job(kind, [sys.executable, "-m", "gitsync"] + argv,
                         mutating=mutating)

@@ -4,6 +4,38 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.3] - 2026-11-11
+
+Correctness fixes across the sync engine, the web API and the TUI: dry runs are reported as dry runs, the destructive-mode default is consistent, cron installs show a next run, and several TUI panels that read the whole hub per frame no longer do.
+
+### Sync engine
+- **One mode default**: added `config.route_mode()`; the engine used to fall back to `full` (force-push + prune) while the config template and `restore` used `safe`, so a config without `settings["mode"]` was treated as a mirror. `run_sync`, `restore`, `sync`/`fix`/`compare` CLI paths and the TUI now all resolve through it.
+- **Dry runs count what would change**: `run_sync(dry_run=True)` now reports `would_change` (and the history record keeps `dry_run`), instead of an `ok` count that read like a completed sync. `notify_run` no longer sends "sync complete" for a preview.
+- **`gitsync fix --dry-run`**: the flag existed in the docs but not in argparse, so `fix --dry-run` exited with an error. It now reports drift without pushing.
+
+### Scheduler
+- **Next run under cron**: added `cron_next()` for the minute/hour/list/step expressions gitsync installs; `next_run()` falls back to it when no systemd timer exists. Cron installs no longer show "next run —" in the TUI, the web dashboard or `gitsync schedule status`.
+
+### Web API
+- **Selection-file write is confined**: `platform` is validated as a platform name (it becomes part of the file name), the route that will own the file is found *before* anything is written, and the target is realpath-checked against the config dir.
+- **Probe cache is invalidated**: adding, editing, deleting or toggling a platform (and settings/scheduler writes) now drop the cached `/api/status` and health probes instead of serving the previous answer for 15s.
+- **`/api/settings` returns `scheduler` and `next_run`**; scheduler "off" persists so the dashboard stops offering to install the old schedule.
+- **`/api/repos` mirrors** are detected with `sync.mirror_path` (the hub moved to `mirrors/<type>/…`) and each repo now carries its `id`.
+- **`/api/sync` rejects an unusable tool argv with 400** instead of a 500, and route `workers` must be a number.
+
+### TUI
+- **Per-frame disk work is cached**: the Routes tab re-read config, route state and records every second (the dashboard redraws every second for the clock) — now a 3s TTL cache invalidated on any config change, with a fresh 5s read for the effective mode.
+- **Dry runs read as dry runs** in the dashboard log title, the History tab and the per-route "last run" digest ("no sync yet / last was a dry run — N would change").
+- **Tab bar is windowed around the active tab** with `‹ ›` hints, and a click maps to the bar that was actually drawn instead of the centred full strip.
+- **The footer keeps `[?]Help [Q]uit`**: it was centred then clipped at both ends, which hid exactly those two keys at 120 columns.
+- **The Log tab has a panel border and an empty state** — it used to draw straight onto the screen and looked blank with no log.
+- **Mouse wheel scrolls** the active list (platforms, stars, log tail) instead of adjusting a scroll offset nothing read; Esc snaps the log back to "follow".
+- **Full log viewer**: `/` opens the filter the footer has always advertised, `End` jumps to the last *page*, and a filter that shrinks the list can no longer leave the view blank.
+- **Device login restores the input timeout**: `nodelay(False)` used to make the main loop block forever, freezing the clock after a cancelled GitHub browser login.
+- **Stars**: `R` re-reads on the Stars tab, a failed read is remembered (with a 60s backoff) instead of retrying on every frame, and the copy streams its lines into the log panel.
+- **On the Stars tab `S` means Source**, matching the footer, instead of starting a global sync behind the modal.
+- **A terminal that disappears is not a crash**: curses teardown failures (`nocbreak`/`endwin`) are no longer written into the log as a TUI crash traceback.
+
 ## [2.0.2] - 2026-11-11
 
 Credential helper reliability, network fault tolerance in token telemetry, TUI window resize resilience, and UI accessibility polish.

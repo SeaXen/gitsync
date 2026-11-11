@@ -298,3 +298,17 @@ def setting(cfg, key, default=None):
 def set_setting(cfg, key, value):
     cfg.setdefault("settings", {})[key] = value
     save_config(cfg)
+
+
+DEFAULT_MODE = "safe"
+
+
+def route_mode(cfg, route=None):
+    """the push mode a route actually runs with.
+
+    A route's own "mode" wins, otherwise the global setting. The fallback
+    has to be the same everywhere: the sync engine used to default to
+    "full" while the fresh-config template and restore both said "safe",
+    so a config without settings["mode"] force-pushed and pruned.
+    """
+    return (route or {}).get("mode") or setting(cfg, "mode", DEFAULT_MODE)

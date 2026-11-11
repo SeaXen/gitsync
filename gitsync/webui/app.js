@@ -18,6 +18,8 @@
     tools: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M14.7 6.3a4 4 0 0 0 5 5L21 21H3l7.7-7.7a4 4 0 0 1 4-6.9z"/></svg>',
     settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
     sync: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><polygon points="6 4 20 12 6 20 6 4"/></svg>',
+    pause: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>',
+    play: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><polygon points="7 4 20 12 7 20 7 4"/></svg>',
     eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
     logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5"/></svg>',
@@ -70,7 +72,10 @@
       return res.json().catch(function () { return {}; }).then(function (data) {
         if (!res.ok) {
           var e = new Error((data && data.error) || res.statusText);
-          e.status = res.status; e.data = data; throw e;
+          e.status = res.status; e.data = data;
+          // callers check e.error (and e.status === 409); keep both working
+          e.error = (data && data.error) || "";
+          throw e;
         }
         return data;
       });
@@ -90,6 +95,7 @@
     if (opts.route) body.route = opts.route;
     if (opts.to) body.to = opts.to;
     if (opts.repos) body.repos = opts.repos;
+    if (opts.retry_failed) body.retry_failed = true;
     return api("POST", "/api/sync", body)
       .then(function (r) {
         _activeJob = r.job_id;
@@ -462,6 +468,7 @@
             '<span id="top-status-text" role="status">connecting…</span></span>' +
           '<div class="spacer"></div>' +
           '<button class="btn ghost" id="top-pause" title="Pause / resume background sync" aria-label="Pause / resume background sync">' +
+            '<span id="top-pause-icon" aria-hidden="true">' + I.pause + "</span>" +
             '<span id="top-pause-text">Pause</span></button>' +
           '<button class="btn ghost" id="top-dry" title="Dry run" aria-label="Dry run">' + I.eye +
             "<span>Dry run</span></button>" +
@@ -559,7 +566,9 @@
       if (v) v.textContent = "gitsync " + s.version;
       var pBtn = document.getElementById("top-pause");
       var pTxt = document.getElementById("top-pause-text");
+      var pIcon = document.getElementById("top-pause-icon");
       if (pTxt) pTxt.textContent = s.paused ? "Resume" : "Pause";
+      if (pIcon) pIcon.innerHTML = s.paused ? I.play : I.pause;
       if (pBtn) {
         if (s.paused) pBtn.classList.add("warn");
         else pBtn.classList.remove("warn");

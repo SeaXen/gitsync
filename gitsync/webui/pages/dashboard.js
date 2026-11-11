@@ -142,24 +142,34 @@
     var retryBtn = (last.failed && last.failed > 0)
       ? '<button class="btn sm warn" id="btn-retry-failed" style="margin-top:8px">Retry ' + last.failed + ' failed repo(s)</button>'
       : "";
+    var head, subline;
+    if (last.dry_run) {
+      var wc = (last.would_change === null || last.would_change === undefined)
+        ? (last.ok || 0) : last.would_change;
+      head = '<div class="big">' + wc + " would change</div>";
+      subline = "dry run — " + (last.ok || 0) + " of " + (last.repos || 0) +
+        " already in sync, in " + (last.elapsed_sec || "?") + "s";
+    } else {
+      head = '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " OK</div>";
+      subline = (last.failed || 0) + " failed" +
+        (last.partial ? ", " + last.partial + " partial" : "") + " of " +
+        (last.repos || 0) + ", in " + (last.elapsed_sec || "?") + "s";
+    }
     host.innerHTML =
-      '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " OK</div>" +
-      '<div class="muted" style="margin-top:6px">' + (last.failed || 0) + " failed" +
-      (last.partial ? ", " + last.partial + " partial" : "") + " of " +
-      (last.repos || 0) + ", in " + (last.elapsed_sec || "?") + "s</div>" +
+      head +
+      '<div class="muted" style="margin-top:6px">' + subline + "</div>" +
       retryBtn +
       '<div class="mono spark">' + G.esc(G.spark(d.spark || [])) + "</div>" +
       '<div class="muted" style="font-size:12px">last ' + (d.spark || []).length + " runs</div>";
     var btn = document.getElementById("btn-retry-failed");
     if (btn) {
       btn.addEventListener("click", function () {
-        btn.disabled = true;
-        G.api("POST", "/api/sync", { retry_failed: true }).then(function (res) {
-          if (res.job_id) attachSync(res.job_id);
-          G.toast("Retrying failed repos…");
-        }).catch(function (err) {
-          btn.disabled = false;
-          G.toast(G.apiError(err), "bad");
+        G.busy(btn, function () {
+          return G.startSync({ retry_failed: true }).then(function () {
+            G.toast("Retrying failed repos…");
+          }).catch(function (err) {
+            if (err.status !== 409) G.toast(G.apiError(err), "bad");
+          });
         });
       });
     }

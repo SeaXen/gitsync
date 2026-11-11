@@ -31,7 +31,10 @@
         "</section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Notifications</span>' +
-        '<div class="actions"><button class="btn" id="notify-test">Send Test</button></div></div>' +
+        '<div class="actions">' +
+        '<button class="btn sm" id="n-clear-discord" title="Remove the stored Discord webhook">Clear Discord</button>' +
+        '<button class="btn sm" id="n-clear-telegram" title="Remove the stored Telegram token">Clear Telegram</button>' +
+        '<button class="btn" id="notify-test">Send Test</button></div></div>' +
         '<div class="form-grid mt">' +
         f("Notify on", G.select("n-on", "", ["failure", "success", "always", "never"])) +
         f("Discord webhook", '<input type="password" id="n-discord" name="discord_webhook" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "write-only; validated on save") +
@@ -55,8 +58,10 @@
       '<section class="card"><p class="label">Paths</p><div class="mono" id="paths">—</div></section>';
 
     document.getElementById("save-settings").addEventListener("click", function () { G.busy(this, saveSettings); });
-    document.getElementById("install-sched").addEventListener("click", installSched);
+    document.getElementById("install-sched").addEventListener("click", function () { G.busy(this, installSched); });
     document.getElementById("notify-test").addEventListener("click", notifyTest);
+    document.getElementById("n-clear-discord").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["discord"]); }); });
+    document.getElementById("n-clear-telegram").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["telegram"]); }); });
     document.getElementById("pw-save").addEventListener("click", function () { G.busy(this, savePassword); });
     document.getElementById("pw-disable").addEventListener("click", disablePassword);
     document.getElementById("wh-rotate").addEventListener("click", function () { wh("rotate"); });
@@ -113,7 +118,8 @@
         if (dirtyPill) dirtyPill.style.display = "inline-block";
       };
       var formEl = document.getElementById("settings-form");
-      if (formEl) {
+      if (formEl && !formEl.dataset.wired) {
+        formEl.dataset.wired = "1";
         formEl.addEventListener("change", setDirty);
         formEl.addEventListener("input", setDirty);
       }
@@ -175,7 +181,22 @@
       .then(function (d) {
         G.toast(d.status, d.ok ? "ok" : "warn");
         document.getElementById("sched-status").textContent = d.status;
+        G.refreshStatus();
       }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
+  }
+
+  function clearNotify(what) {
+    return G.modalConfirm({
+      title: "Remove notification credentials",
+      message: "Remove the stored " + what.join(" + ") + " credentials?",
+      confirmText: "Remove",
+      danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      return G.api("PUT", "/api/settings", { clear_notify: what })
+        .then(function () { G.toast("removed", "ok"); load(); })
+        .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+    });
   }
 
   function notifyTest() {

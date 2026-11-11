@@ -142,6 +142,7 @@
       .then(function (r) { showLive(names.length + " repo(s)", r.job_id); })
       .catch(function (e) {
         if (e.status === 409) G.toast(e.error || "already running", "warn");
+        else G.toast(G.apiError(e), "bad");
       });
   }
 

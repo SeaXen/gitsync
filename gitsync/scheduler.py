@@ -195,14 +195,87 @@ def timer_status():
     return "installed"
 
 
-def next_run():
-    if not systemd_installed():
+def _cron_field(field, lo, hi):
+    """expand one cron field into a sorted list of ints (subset we write)."""
+    out = set()
+    for piece in field.split(","):
+        piece = piece.strip()
+        if not piece:
+            continue
+        step = 1
+        if "/" in piece:
+            base, raw_step = piece.split("/", 1)
+            try:
+                step = max(1, int(raw_step))
+            except ValueError:
+                return []
+        else:
+            base = piece
+        try:
+            if base == "*":
+                values = range(lo, hi + 1, step)
+            elif "-" in base:
+                a, b = base.split("-", 1)
+                values = range(int(a), int(b) + 1, step)
+            else:
+                values = [int(base)]
+        except ValueError:
+            return []
+        out.update(v for v in values if lo <= v <= hi)
+    return sorted(out)
+
+
+def cron_next(expr, now=None):
+    """next fire time for the simple cron expressions gitsync installs.
+
+    Supports ``M H * * *`` / ``M H * * D`` (minute and hour may be a
+    number, ``*``, ``*/N`` or a list). Returns a local
+    ``YYYY-MM-DD HH:MM`` string, or None if the expression is not one we
+    understand. Kept deliberately small: it exists so the UI can say
+    "next run" on cron installs, not to be a full cron engine.
+    """
+    import datetime as _dt
+    parts = (expr or "").split()
+    if len(parts) != 5:
         return None
-    r = _sh(["systemctl", "show", TIMER, "-p", "NextElapseUSecRealtime",
-             "--value"])
-    if r.returncode == 0 and r.stdout.strip():
-        return r.stdout.strip()
+    mins = _cron_field(parts[0], 0, 59)
+    hours = _cron_field(parts[1], 0, 23)
+    if not mins or not hours:
+        return None
+    doms = _cron_field(parts[2], 1, 31) if parts[2] != "*" else None
+    months = _cron_field(parts[3], 1, 12) if parts[3] != "*" else None
+    dows = _cron_field(parts[4], 0, 6) if parts[4] != "*" else None
+    start = now or _dt.datetime.now()
+    cur = start.replace(second=0, microsecond=0) + _dt.timedelta(minutes=1)
+    for _ in range(366 * 24 * 60):
+        if (cur.minute in mins and cur.hour in hours
+                and (months is None or cur.month in months)
+                and (doms is None or cur.day in doms)
+                and (dows is None or ((cur.weekday() + 1) % 7) in dows)):
+            return cur.strftime("%Y-%m-%d %H:%M")
+        cur += _dt.timedelta(minutes=1)
     return None
+
+
+def next_run():
+    """when the scheduler will next fire, systemd or cron.
+
+    Before this returned None unless a systemd timer was installed, so
+    every cron install showed "next run —" in the TUI, the web dashboard
+    and `gitsync schedule status`.
+    """
+    if systemd_installed():
+        r = _sh(["systemctl", "show", TIMER, "-p", "NextElapseUSecRealtime",
+                 "--value"])
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+        return None
+    line = [l for l in _crontab().splitlines()
+            if "gitsync" in l and " sync" in l]
+    if not line:
+        return None
+    expr = " ".join(line[0].split()[:5])
+    return cron_next(expr)
 
 
 # ---- cron fallback ----

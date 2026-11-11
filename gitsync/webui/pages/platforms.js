@@ -122,13 +122,17 @@
                   danger: true
                 }).then(function (forceOk) {
                   if (forceOk) return G.api("DELETE", "/api/platforms/" + encodeURIComponent(name) + "?force=1");
-                  throw e;
+                  throw { cancelled: true };
                 });
               }
               throw e;
             })
             .then(function () { G.toast(name + " removed", "ok"); load(); })
-            .catch(function (e) { if (e && e.error) G.toast(G.apiError(e), "bad"); });
+            .catch(function (e) {
+              if (e && e.cancelled) return;
+              G.toast(G.apiError(e), "bad");
+              load();
+            });
         });
       });
     }
@@ -292,13 +296,27 @@
         '</div>';
 
       var closed = false;
+      var prevFocus = document.activeElement;
       function dismiss() {
         closed = true;
         document.removeEventListener("keydown", onModalKey);
         host.innerHTML = "";
+        if (prevFocus && typeof prevFocus.focus === "function") prevFocus.focus();
       }
       function onModalKey(e) {
-        if (e.key === "Escape") { dismiss(); }
+        if (e.key === "Escape") { dismiss(); return; }
+        if (e.key === "Tab") {
+          var focusables = host.querySelectorAll(
+            'a[href], button:not([disabled])');
+          if (!focusables.length) return;
+          var list = Array.prototype.slice.call(focusables);
+          var idx = list.indexOf(document.activeElement);
+          if (e.shiftKey) {
+            if (idx <= 0) { list[list.length - 1].focus(); e.preventDefault(); }
+          } else if (idx === -1 || idx >= list.length - 1) {
+            list[0].focus(); e.preventDefault();
+          }
+        }
       }
       document.addEventListener("keydown", onModalKey);
       document.getElementById("gh-modal-close").addEventListener("click", dismiss);
@@ -308,6 +326,9 @@
           if (e.target === backdropEl) dismiss();
         });
       }
+      // move focus into the dialog so keyboard/SR users land on it
+      var openLink = host.querySelector("a.btn");
+      if (openLink) openLink.focus();
 
       var pollInterval = (d.interval || 5) * 1000;
       function poll() {

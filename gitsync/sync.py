@@ -1054,7 +1054,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
         # (for mesh) the conflict policy; the global values stay defaults
         workers = int(route.get("workers")
                       or C.setting(cfg, "workers", 4) or 4)
-        mode = route.get("mode") or C.setting(cfg, "mode", "full")
+        mode = C.route_mode(cfg, route)
         conflict = route.get("mesh_conflict") or \
             C.setting(cfg, "mesh_conflict", "newest")
 
@@ -1188,6 +1188,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
     if dry_run:
         n_upd = sum(1 for p in totals["planned"]
                     if p["verdict"] == "update")
+        totals["would_change"] = n_upd
         log("=== dry run done: %d of %d repos would change (%ss) ==="
             % (n_upd, totals["repos"], elapsed))
     else:
@@ -1275,7 +1276,7 @@ def restore(cfg, target_names, only=None, dry_run=False, prune=False,
     def say(msg):
         (log_fn or log)(msg)
 
-    mode = C.setting(cfg, "mode", "safe")
+    mode = C.route_mode(cfg)
     do_prune = prune and mode == "full"
     targets = {}
     for t in target_names:

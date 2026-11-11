@@ -134,6 +134,9 @@ def notify_run(cfg, summary):
     """
     url, token, chat = _channels(cfg)
     _u, on = _settings(cfg)
+    if summary.get("dry_run"):
+        # a preview must never page anyone with "sync complete"
+        return False
     if not (url or (token and chat)) or on == "never":
         return False
     failed = summary.get("failed", 0)

@@ -1030,6 +1030,22 @@ class TestNotifyChannels(unittest.TestCase):
         self.assertFalse(NT.notify_run(cfg, {"failed": 1, "partial": 0,
                                              "ok": 0}))
 
+    def test_a_dry_run_never_notifies(self):
+        # a preview used to be delivered as "gitsync: sync complete"
+        cfg = {"settings": {"notify": {"telegram_token": "T",
+                                       "telegram_chat_id": "1",
+                                       "on": "always"}}}
+        calls = []
+        orig = NT.telegram_send
+        NT.telegram_send = lambda c, m: calls.append(m) or True
+        try:
+            self.assertFalse(NT.notify_run(cfg, {"failed": 0, "partial": 0,
+                                                 "ok": 3, "dry_run": True,
+                                                 "would_change": 5}))
+        finally:
+            NT.telegram_send = orig
+        self.assertEqual(calls, [])
+
 
 class TestScheduler(unittest.TestCase):
     """P0-1: the calendar is derived, and every schedule key is allowed."""
@@ -1062,6 +1078,57 @@ class TestScheduler(unittest.TestCase):
         self.assertIn("sync --scheduled --quiet", S._cron_line("hourly")
                       if hasattr(S, "_cron_line") else
                       S.SERVICE_TEMPLATE)
+
+    def test_cron_next_reads_the_expressions_we_install(self):
+        import datetime as dt
+        now = dt.datetime(2026, 11, 11, 10, 25)
+        self.assertEqual(S.cron_next("0 * * * *", now), "2026-11-11 11:00")
+        self.assertEqual(S.cron_next("30 3 * * *", now), "2026-11-12 03:30")
+        # weekly Sunday 03:00 — 2026-11-11 is a Wednesday
+        self.assertEqual(S.cron_next("0 3 * * 0", now), "2026-11-15 03:00")
+        # minute lists and steps are understood too
+        self.assertEqual(S.cron_next("*/15 * * * *", now), "2026-11-11 10:30")
+        self.assertEqual(S.cron_next("0 9,17 * * *", now), "2026-11-11 17:00")
+        # garbage returns None rather than a wrong time
+        for bad in ("", "* * *", "nonsense", "0 0 * * * *", "x y z w v"):
+            self.assertIsNone(S.cron_next(bad, now), bad)
+
+    def test_cron_next_is_never_in_the_past(self):
+        import datetime as dt
+        now = dt.datetime(2026, 11, 11, 10, 25, 42)
+        nxt = S.cron_next("0 * * * *", now)
+        self.assertEqual(nxt, "2026-11-11 11:00")
+        self.assertNotEqual(nxt, "2026-11-11 10:00")
+
+    def test_next_run_falls_back_to_cron(self):
+        # a cron install used to report None, so every UI showed "next run —"
+        with patch.object(S, "systemd_installed", return_value=False), \
+             patch.object(S, "_crontab",
+                          return_value="0 3 * * * /usr/bin/gitsync sync "
+                                       "--scheduled --quiet"):
+            out = S.next_run()
+        self.assertTrue(out)
+        self.assertRegex(out, r"^\d{4}-\d{2}-\d{2} 03:00$")
+
+    def test_next_run_is_none_without_any_scheduler(self):
+        with patch.object(S, "systemd_installed", return_value=False), \
+             patch.object(S, "_crontab", return_value=""):
+            self.assertIsNone(S.next_run())
+
+    def test_route_mode_defaults_match_the_fresh_config(self):
+        # the engine defaulted to "full" (prunes!) while the template and
+        # restore said "safe", so a config without settings["mode"] was
+        # force-pushed
+        self.assertEqual(C.route_mode({}), "safe")
+        self.assertEqual(C.route_mode({"settings": {}}), "safe")
+        self.assertEqual(C.route_mode({"settings": {"mode": "full"}}),
+                         "full")
+        self.assertEqual(C.route_mode({"settings": {"mode": "full"}},
+                                      {"name": "r"}), "full")
+        self.assertEqual(C.route_mode({"settings": {"mode": "full"}},
+                                      {"mode": "safe"}), "safe")
+        fresh = {"settings": dict(C.DEFAULT_CONFIG["settings"])}
+        self.assertEqual(C.route_mode(fresh), "safe")
 
 
 class TestWizardSafety(unittest.TestCase):
@@ -1445,12 +1512,54 @@ class TestTui(unittest.TestCase):
         self.assertEqual(tui._merged_refs([]), 0)
 
     def test_tab_at_hit_testing(self):
-        # the same arithmetic draw() uses for the tab bar
-        self.assertIsNone(tui._tab_at(0, 120))
-        self.assertEqual(tui._tab_at(28, 120), 0)
-        self.assertEqual(tui._tab_at(40, 120), 1)
-        self.assertEqual(tui._tab_at(62, 120), 3)
+        # _tab_at maps against the bar that was actually drawn (the bar is
+        # windowed on narrow terminals), so a click lands on the tab the
+        # user sees instead of the centred full strip
+        tui._TAB_HIT.update(items=[], first=0, start=0)
+        self.assertIsNone(tui._tab_at(0, 120))      # nothing drawn yet
+
+        tui.tab_bar(120, 0)
+        hit = tui._TAB_HIT
+        self.assertEqual(hit["first"], 0)
+        col = hit["start"]
+        for off, item in enumerate(hit["items"]):
+            self.assertEqual(tui._tab_at(col + len(item) // 2, 120),
+                             hit["first"] + off)
+            col += len(item) + 2
         self.assertIsNone(tui._tab_at(200, 120))
+
+        # narrow terminal: a middle tab must stay clickable and visible
+        text = tui.tab_bar(40, 3)
+        hit = tui._TAB_HIT
+        self.assertLessEqual(len(text), 40)
+        self.assertIn(3, [hit["first"] + i for i in range(len(hit["items"]))])
+        self.assertEqual(tui._tab_at(hit["start"] + hit["pad"], 40),
+                         hit["first"])
+        if hit["first"] > 0:
+            self.assertIsNone(tui._tab_at(0, 40))
+
+    def test_tab_bar_window_never_overflows(self):
+        for w in (34, 40, 60, 80, 120, 200):
+            for active in range(len(tui.TABS)):
+                text = tui.tab_bar(w, active)
+                self.assertLessEqual(len(text) + 2, w, (w, active, text))
+                items = tui._TAB_HIT["items"]
+                self.assertTrue(items, (w, active))
+                self.assertIn(active, [tui._TAB_HIT["first"] + i
+                                       for i in range(len(items))],
+                              (w, active))
+
+    def test_fit_footer_keeps_help_and_quit(self):
+        foot = (" [1-7]tabs  [S]ync  [P]ause  [D]ry-run  [L]og  [C]ron  "
+                "[O]pt  [A]cc  [N]otify  [E]repos  [T]ools  [W]izard  "
+                "[R]efresh  [?]Help  [Q]uit ")
+        for w in (40, 60, 80, 120):
+            out = tui.fit_footer(foot, w - 1)
+            self.assertLessEqual(len(out), w - 1, (w, out))
+            self.assertIn("[?]Help", out, (w, out))
+            self.assertIn("[Q]uit", out, (w, out))
+        # a footer that already fits is untouched
+        self.assertEqual(tui.fit_footer(" short ", 80), " short ")
 
     def test_platforms_title_counts_connected(self):
         tui.state['platforms'] = [('github', 'github', True, True, 'ok', '54'),
@@ -1599,6 +1708,45 @@ class TestWeb(unittest.TestCase):
                                  r.redact("error: push ...glpat-LEAK-ME..."))
             finally:
                 C.CONFIG_FILE = old
+
+    def test_public_record_reports_a_dry_run_as_one(self):
+        # a dry run used to be published as a plain success, so the
+        # dashboard showed "4 OK" for a preview that changed nothing
+        rec = {"finished_at": "t", "ok": 4, "failed": 0, "repos": 48,
+               "dry_run": True, "would_change": 9}
+        pub = W._public_record(rec)
+        self.assertTrue(pub["dry_run"])
+        self.assertEqual(pub["would_change"], 9)
+        real = W._public_record({"finished_at": "t", "ok": 4, "repos": 48})
+        self.assertFalse(real["dry_run"])
+        self.assertIsNone(real["would_change"])
+
+    def test_probe_cache_invalidates_after_a_mutation(self):
+        calls = []
+
+        def fn():
+            calls.append(1)
+            return "v%d" % len(calls)
+
+        W._invalidate("probe-test")
+        self.assertEqual(W._cached("probe-test", 60, fn), "v1")
+        self.assertEqual(W._cached("probe-test", 60, fn), "v1")
+        W._invalidate("probe-test")
+        self.assertEqual(W._cached("probe-test", 60, fn), "v2")
+
+    def test_a_none_result_is_cached_too(self):
+        # "no timer / no next run" is a real answer; caching only truthy
+        # values made /api/status shell out on every single poll
+        calls = []
+
+        def fn():
+            calls.append(1)
+            return None
+
+        W._invalidate("none-test")
+        for _ in range(3):
+            self.assertIsNone(W._cached("none-test", 60, fn))
+        self.assertEqual(len(calls), 1)
 
     def test_public_record_redacts_failure_errors(self):
         r = W._redactor()
@@ -1975,6 +2123,50 @@ class TestWebHttp(unittest.TestCase):
                                   headers=self._auth())
         self.assertEqual(code, 200)
         self.assertTrue(json.loads(body)["route"]["enabled"] is False)
+
+    def test_selection_file_rejects_a_path_as_the_platform(self):
+        # the platform name goes into the default file name, so "..%2f"
+        # style input must never reach the filesystem
+        code, body, _ = self._req("POST", "/api/repos/selection-file",
+                                  {"repos": ["hello"], "platform": "../../etc"},
+                                  headers=self._auth())
+        self.assertEqual(code, 400)
+        self.assertFalse(os.path.exists(os.path.join(self.td, "etc")))
+        self.assertFalse(os.path.exists(os.path.join(C.CONFIG_DIR, "..",
+                                                     "etc")))
+
+    def test_selection_file_needs_a_route_with_that_source(self):
+        code, _, _ = self._req("POST", "/api/repos/selection-file",
+                               {"repos": ["hello"], "platform": "dst"},
+                               headers=self._auth())
+        self.assertEqual(code, 400)
+        self.assertFalse(os.path.exists(os.path.join(C.CONFIG_DIR,
+                                                     "repos-dst.txt")))
+
+    def test_selection_file_is_confined_to_the_config_dir(self):
+        outside = os.path.join(self.td, "evil.txt")
+        code, body, _ = self._req("POST", "/api/repos/selection-file",
+                                  {"repos": ["hello", "world"],
+                                   "platform": "src", "path": outside},
+                                  headers=self._auth())
+        self.assertEqual(code, 200)
+        self.assertFalse(os.path.exists(outside))
+        path = json.loads(body)["path"]
+        self.assertTrue(path.startswith(os.path.realpath(C.CONFIG_DIR)))
+        self.assertTrue(os.path.exists(path))
+        with open(path, "r", encoding="utf-8") as f:
+            self.assertIn("hello", f.read())
+
+    def test_selection_file_sets_include_file_on_the_route(self):
+        code, body, _ = self._req("POST", "/api/repos/selection-file",
+                                  {"repos": ["hello"], "platform": "src"},
+                                  headers=self._auth())
+        self.assertEqual(code, 200)
+        with open(C.CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        route = [r for r in cfg["routes"] if r["name"] == "main"][0]
+        self.assertTrue(route.get("include_file"))
+        self.assertNotIn("include", route)
 
     def test_doctorfix_tool_is_accepted(self):
         code, body, _ = self._req("POST", "/api/jobs", {"kind": "doctorfix"},

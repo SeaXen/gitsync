@@ -180,10 +180,18 @@
   }
 
   function renderEdit(panel, r) {
-    var f = G.field("Include globs", '<input type="text" id="e-inc" name="include" placeholder="blank = all…" value="' +
-        G.esc((r.include || []).join(",")) + '">') +
+    var origInc = (r.include || []).join(",");
+    var origExc = (r.exclude || []).join(",");
+    var fileNote = r.include_file
+      ? G.field("Selection file", '<input type="text" value="' +
+          G.esc(r.include_file) + '" readonly>',
+          "written by Repos → Save to File; typing an include list replaces it")
+      : "";
+    var f = fileNote +
+      G.field("Include globs", '<input type="text" id="e-inc" name="include" placeholder="blank = all…" value="' +
+        G.esc(origInc) + '">') +
       G.field("Exclude globs", '<input type="text" id="e-exc" name="exclude" placeholder="comma-separated globs…" value="' +
-        G.esc((r.exclude || []).join(",")) + '">') +
+        G.esc(origExc) + '">') +
       G.field("Workers", G.select("e-workers", r.workers || "inherit", ["inherit", "1", "2", "4", "8"])) +
       G.field("Mirror mode", G.select("e-mode", r.mode || "inherit", ["inherit", "full", "safe"])) +
       (r.direction === "mesh"
@@ -198,16 +206,22 @@
       '<button class="btn" id="e-clear">Clear Filters</button></div></div>';
     document.getElementById("e-save").addEventListener("click", function () {
       var body = {
-        include: splitList(document.getElementById("e-inc").value),
-        exclude: splitList(document.getElementById("e-exc").value),
         workers: document.getElementById("e-workers").value,
         mode: document.getElementById("e-mode").value,
         schedule: document.getElementById("e-schedule").value
       };
+      // only send the filter fields when they changed: an untouched form
+      // must never replace an include_file selection with an empty list
+      var inc = document.getElementById("e-inc").value;
+      var exc = document.getElementById("e-exc").value;
+      if (inc !== origInc) body.include = splitList(inc);
+      if (exc !== origExc) body.exclude = splitList(exc);
       if (r.direction === "mesh") body.mesh_conflict = document.getElementById("e-conflict").value;
-      G.api("PUT", "/api/routes/" + encodeURIComponent(r.name), body)
-        .then(function () { G.toast(r.name + " saved", "ok"); loadRoutes(); })
-        .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+      G.busy(this, function () {
+        return G.api("PUT", "/api/routes/" + encodeURIComponent(r.name), body)
+          .then(function () { G.toast(r.name + " saved", "ok"); loadRoutes(); })
+          .catch(function (e) { G.toast(G.apiError(e), "bad"); });
+      });
     });
     document.getElementById("e-clear").addEventListener("click", function () {
       G.api("PUT", "/api/routes/" + encodeURIComponent(r.name), { clear_filters: true })
@@ -252,7 +266,9 @@
       state.showAdd = false; host.innerHTML = "";
       document.getElementById("add-btn").focus();
     });
-    document.getElementById("a-save").addEventListener("click", saveAdd);
+    document.getElementById("a-save").addEventListener("click", function () {
+      G.busy(this, saveAdd);
+    });
   }
 
   function saveAdd() {
@@ -262,8 +278,8 @@
       document.querySelectorAll(".t-target:checked")).map(function (c) {
         return c.value;
       }).filter(function (t) { return t !== source; });
-    if (!name) return G.toast("a route needs a name", "warn");
-    if (!targets.length) return G.toast("pick at least one target", "warn");
+    if (!name) { G.toast("a route needs a name", "warn"); return Promise.resolve(); }
+    if (!targets.length) { G.toast("pick at least one target", "warn"); return Promise.resolve(); }
     var body = {
       name: name, source: source, targets: targets,
       direction: document.getElementById("a-dir").value,
@@ -285,6 +301,7 @@
       .then(function (r) { showLive(name, r.job_id, dry); })
       .catch(function (e) {
         if (e.status === 409) G.toast(e.error || "already running", "warn");
+        else G.toast(G.apiError(e), "bad");
       });
   }
 

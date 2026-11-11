@@ -23,8 +23,17 @@
           return '<div class="mono l-bad" style="padding-left:14px">! ' +
             G.esc(f.route) + "/" + G.esc(f.repo) + ": " + G.esc(f.error) + "</div>";
         }).join("");
+        var okCell;
+        if (r.dry_run) {
+          var wc = (r.would_change === null || r.would_change === undefined)
+            ? (r.ok || 0) : r.would_change;
+          okCell = "<td class='mono' title='dry run — nothing was changed'>" +
+            wc + " would change</td>";
+        } else {
+          okCell = "<td class='mono " + (bad ? "l-bad" : "l-ok") + "'>" + (r.ok || 0) + " ok</td>";
+        }
         return "<tr><td class='mono'>" + G.esc(G.formatDate ? G.formatDate(r.finished_at) : r.finished_at) + "</td>" +
-          "<td class='mono " + (bad ? "l-bad" : "l-ok") + "'>" + (r.ok || 0) + " ok</td>" +
+          okCell +
           "<td class='mono'>" + (r.partial || 0) + "</td>" +
           "<td class='mono " + (r.failed ? "l-bad" : "") + "'>" + (r.failed || 0) + "</td>" +
           "<td class='mono muted'>" + (r.repos || 0) + "</td>" +
@@ -43,16 +52,22 @@
           var r = recs[idx];
           if (!r) return;
           var bad = (r.failed || 0) + (r.partial || 0);
-          var status = bad ? (r.failed ? "FAILED" : "PARTIAL") : "SUCCESS";
+          var status = r.dry_run ? "DRY RUN" :
+            (bad ? (r.failed ? "FAILED" : "PARTIAL") : "SUCCESS");
           var detail = "Status: " + status + "\n" +
             "Finished: " + r.finished_at + "\n" +
-            "Results: " + (r.ok || 0) + " OK, " + (r.partial || 0) + " partial, " + (r.failed || 0) + " failed of " + (r.repos || 0) + " repos\n" +
+            (r.dry_run
+              ? "Would change: " + ((r.would_change === null || r.would_change === undefined)
+                  ? (r.ok || 0) : r.would_change) + " of " + (r.repos || 0) + " repos (nothing was changed)\n"
+              : "Results: " + (r.ok || 0) + " OK, " + (r.partial || 0) + " partial, " + (r.failed || 0) + " failed of " + (r.repos || 0) + " repos\n") +
             "Duration: " + (r.elapsed_sec || "?") + "s\n\n";
           if (r.failures && r.failures.length) {
             detail += "Failures (" + r.failures.length + "):\n";
             r.failures.forEach(function (f) {
               detail += "• " + f.route + " / " + f.repo + ": " + f.error + "\n";
             });
+          } else if (r.dry_run) {
+            detail += "No sync errors were recorded for this preview.";
           } else {
             detail += "All repositories synced successfully with zero errors.";
           }

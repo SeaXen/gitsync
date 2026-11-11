@@ -859,8 +859,7 @@ def cmd_mirror(args):
                                                            conflict)
         else:
             status, detail, errors = SYNC.sync_repo(
-                repo, source, targets,
-                route.get("mode") or C.setting(cfg, "mode", "full"))
+                repo, source, targets, C.route_mode(cfg, route))
         print("%s: %s %s" % (name, status, detail))
         if status in ("ok", "partial"):
             ok += 1
@@ -1671,6 +1670,7 @@ def cmd_notify(args):
 def cmd_fix(args):
     """detect drift across a route and re-sync the mismatched repos"""
     cfg = C.load_config()
+    dry = getattr(args, "dry_run", False)
     routes = C.routes(cfg)
     if args.route:
         routes = [r for r in routes if r.get("name") == args.route]
@@ -1697,7 +1697,7 @@ def cmd_fix(args):
         print("route %s: checking %d repos against %s..."
               % (route.get("name"), len(repos), ", ".join(targets)))
         # the route's own mode and conflict policy, not just the globals
-        mode = route.get("mode") or C.setting(cfg, "mode", "full")
+        mode = C.route_mode(cfg, route)
         mesh = route.get("direction") == "mesh"
         conflict = route.get("mesh_conflict") or \
             C.setting(cfg, "mesh_conflict", "newest")
@@ -1713,8 +1713,12 @@ def cmd_fix(args):
                         drifted.append(tname)
                 if not drifted:
                     continue
-                print("  fixing %-28s -> %s" % (repo["name"],
-                                                ", ".join(drifted)))
+                print("  %s %-28s -> %s"
+                      % ("would fix" if dry else "fixing", repo["name"],
+                         ", ".join(drifted)))
+                if dry:
+                    fixed += 1
+                    continue
                 if mesh:
                     status, detail, errors = SYNC.mesh_sync_repo(
                         repo, peers, conflict)
@@ -1729,8 +1733,9 @@ def cmd_fix(args):
             except Exception as e:
                 failed += 1
                 print("    error: %s" % str(e)[:80])
-    print("\nchecked %d repos: %d fixed, %d failed" % (checked, fixed, failed))
-    if NT.enabled(cfg) and (fixed or failed):
+    print("\nchecked %d repos: %d %s, %d failed"
+          % (checked, fixed, "would fix" if dry else "fixed", failed))
+    if not dry and NT.enabled(cfg) and (fixed or failed):
         NT.send(cfg, "gitsync: drift repair",
                 [("Checked", str(checked), True),
                  ("Fixed", str(fixed), True),
@@ -2047,6 +2052,8 @@ def main(argv=None):
 
     sp = sub.add_parser("fix", help="detect drift and re-sync mismatched repos")
     sp.add_argument("--route", help="only this route")
+    sp.add_argument("--dry-run", action="store_true",
+                    help="report drift without pushing anything")
     sp.set_defaults(func=cmd_fix)
 
     sp = sub.add_parser("watch", help="sync every N seconds in the foreground")
