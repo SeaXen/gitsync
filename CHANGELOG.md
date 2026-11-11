@@ -4,9 +4,44 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.1] - 2026-11-11
+
+Security hardening, secret protection, test hermeticity, mobile responsiveness, and UI clarity improvements.
+
+### Security & Secret Handling
+- **Scrubbed stored credentials in mirrors (S2)**: Hub mirror configs rewritten to store clean, token-less URLs in `remote.origin.url`; credentials supplied per command via `GIT_ASKPASS`.
+- **Zero tokens in process arguments (S3)**: Git clone and push invocations pass clean URLs on argv; credentials delivered privately through environment variables and `gitsync/askpass.py`.
+- **Full error redaction (S1)**: `sync_repo` clone-failed error path now passes through `_redact()` so remote credential echoes never leak into logs or records.
+
+### Core & Platform Robustness
+- **HTTP error handling (B1)**: `_http()` honors `want_headers` on all failure and retry branches; `GitHubPlatform.token_info()` safely classifies unreachable endpoints without unpacking crashes.
+- **Unverified token telemetry (W2.1)**: `tokencheck.summary()` reports unverified/unknown tokens as unverified rather than asserting all tokens healthy.
+
+### Web UI & Mobile Responsiveness
+- **Zero mobile horizontal overflow (W1)**: Resolved 375px mobile viewport horizontal clipping; top bar buttons collapse gracefully to icon-only controls on narrow screens with accessible labels; accessible mobile sign-out button added.
+- **Dashboard clarity & error handling (W2)**: Replaced truncated platform error strings with clear plain-language diagnostic messages; accurate scheduler notice displayed when route schedule is active but no timer is installed; silenced non-security 401 audit logging on unauthenticated session probes.
+- **Visual polish & workflow features**: Route cards now show mode (`safe` / `full` warning badge) with proper spacing and streamlined action menus; form checkboxes styled with system theme; dirty state indicator added to settings; added "Retry failed" button and per-run execution report viewer modal linked from History.
+
+### TUI Resilience & Enhancements
+- **Crash diagnostics & logging (5.1)**: Full exception tracebacks written to `gitsync.log` with log file path surfaced to the user.
+- **Dynamic modal resizing & deduplication (5.2)**: All modal loops dynamically re-query terminal dimensions (`getmaxyx()`), preventing layout clipping on terminal resize; merged duplicate confirm dialog runners into a unified `_confirm_modal`.
+- **Unicode search & input (5.3)**: Search and prompt text inputs support full Unicode codepoints and multi-byte wide characters via `get_wch()`.
+- **Mouse support & text selection (5.4)**: Restricted mouse mask to left clicks and scroll wheel events, preventing terminal text selection hijacking; added wheel scrolling across views.
+- **NO_COLOR support (5.5)**: Honored the standard `NO_COLOR` environment variable with non-colored pairs while preserving explicit text badges (`[OK]`, `[FAIL]`, `[WARN]`).
+- **Global Help (5.6)**: Added searchable global keyboard shortcuts and usage guide screen bound to `?`, with persistent footer hints.
+- **Empty state guidance (5.7)**: Replaced blank panels on unconfigured installs with clear guidance to add platforms or run the setup wizard.
+- **Run progress & cancellation (5.8)**: Added live per-repo breakdown (ok, failed, skipped) and safe sync cancellation via `X`.
+- **Full mode safety confirmation (5.9)**: Required explicit route name or `yes` confirmation before executing any route in destructive `full` mode.
+- **Zero-subprocess draw guard (5.10)**: Offloaded background scheduler status checks so terminal drawing makes no synchronous subprocess calls.
+
+### Hermetic Testing & CI
+- **Hermetic test suite (T1, T2)**: Global test environment enforces offline hermeticity with local loopback socket filtering; `TestRestore` carries explicit committer identity and asserts commit setup status.
+- **Playwright suite cross-platform paths (T3, T4)**: Removed hardcoded screenshot paths; added automated mobile responsiveness assertions across all 9 pages; added optional Playwright jobs across GitHub Actions, Forgejo, and GitLab CI.
+- **TUI smoke & performance tests (T5, 5.10)**: Added TUI smoke test harness and draw performance verification ensuring zero subprocess calls during UI rendering. All 163 logic tests pass.
+
 ## [2.0.0] - 2026-11-10
 
-Major 2.0 milestone release — 10/10 quality standard across all sectors (CLI, TUI, Web UI, automation, and design system).
+Major 2.0 milestone release — Web UI, E2E testing, design system, and cross-platform hardening.
 
 ### Milestone Highlights
 - **Impeccable Design System & Craft Floor**: Eliminated all AI design antipatterns (zero-offset chromatic glow halos, side-tab borders); added themed browser surfaces (`::selection`, custom dark scrollbars, accent caret coloring); generated canonical `DESIGN.md` tokens and `PRODUCT.md` product record.

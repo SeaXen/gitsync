@@ -7,7 +7,7 @@
 
   function render(main) {
     main.innerHTML = G.bar("Settings", "Global defaults — a route can override most of these.") +
-      '<section class="card"><div class="bar"><span class="route-title">Options</span>' +
+      '<section class="card"><div class="bar"><span class="route-title">Options <span class="chip warn" id="settings-dirty" style="display:none;font-size:11px">● Unsaved changes</span></span>' +
         '<div class="actions"><button class="btn primary" id="save-settings">Save</button></div></div>' +
         '<div class="form-grid mt" id="settings-form">' + G.loading() + "</div></section>" +
 
@@ -78,18 +78,45 @@
         f("Parallel workers", G.select("s-workers", S.workers, [1, 2, 4, 8]), "repos synced in parallel") +
         f("Mirror mode", G.select("s-mode", S.mode, [{ v: "safe", l: "safe (never delete)" }, { v: "full", l: "full (prunes)" }])) +
         f("Mesh conflicts", G.select("s-conflict", S.mesh_conflict, [{ v: "newest", l: "newest wins" }, { v: "skip", l: "skip (report)" }])) +
-        f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "the timer fires at the finest route schedule") +
-        f("Include forks", '<label class="check"><input type="checkbox" id="s-forks" name="include_forks"' + (S.include_forks ? " checked" : "") + "> mirror forked repos</label>") +
-        f("Pause between repos", G.select("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "seconds — spare laptop heat / disk") +
-        f("Token warning", G.select("s-warn", S.token_warn_days || 30, [7, 14, 30, 60, 90]), "days before a credential warns") +
-        f("TUI theme", G.select("s-theme", S.theme, (S.themes || [])), "colours the terminal TUI only") +
-        f("Relax protection", '<label class="check"><input type="checkbox" id="s-relax" name="relax_protection"' + (S.relax_protection ? " checked" : "") + "> allow force-push over branch protection</label>", "hand-edit territory — off by default");
+        f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "The timer fires at the finest route schedule") +
+        f("Include forks", '<label class="check"><input type="checkbox" id="s-forks" name="include_forks"' + (S.include_forks ? " checked" : "") + "> Mirror forked repos</label>", "Include repositories you have forked") +
+        f("Pause between repos", G.select("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "Seconds — spare laptop heat / disk") +
+        f("Token warning", G.select("s-warn", S.token_warn_days || 30, [7, 14, 30, 60, 90]), "Days before a credential warns") +
+        f("TUI theme", G.select("s-theme", S.theme, (S.themes || [])), "Colours the terminal TUI only") +
+        f("Relax protection", '<label class="check danger-check"><input type="checkbox" id="s-relax" name="relax_protection"' + (S.relax_protection ? " checked" : "") + "> Allow force-push over branch protection</label>", "Advanced: allows overwriting protected branches. Off by default.");
       document.getElementById("sched-status").textContent = S.scheduler || "—";
       document.getElementById("n-on").value = (S.notify && S.notify.on) || "failure";
       document.getElementById("paths").innerHTML =
         "config " + G.esc(S.paths.config) + "<br>mirrors " + G.esc(S.paths.mirror) +
         "<br>log " + G.esc(S.paths.log) + "<br>data " + G.esc(S.paths.data);
       renderSignin(S.auth || {});
+
+      var relaxEl = document.getElementById("s-relax");
+      if (relaxEl) {
+        relaxEl.addEventListener("change", function () {
+          if (this.checked) {
+            var self = this;
+            G.modalConfirm({
+              title: "Relax branch protection?",
+              message: "Advanced setting: this allows force-pushing over branch protection rules on target platforms. Turning this on can overwrite protected branches.",
+              confirmText: "Enable relax protection",
+              danger: true
+            }).then(function (ok) {
+              if (!ok) self.checked = false;
+            });
+          }
+        });
+      }
+
+      var dirtyPill = document.getElementById("settings-dirty");
+      var setDirty = function () {
+        if (dirtyPill) dirtyPill.style.display = "inline-block";
+      };
+      var formEl = document.getElementById("settings-form");
+      if (formEl) {
+        formEl.addEventListener("change", setDirty);
+        formEl.addEventListener("input", setDirty);
+      }
     }).catch(function (e) {
       document.getElementById("settings-form").innerHTML = G.errorBox(e);
     });
@@ -133,6 +160,8 @@
     if (tv) { body.telegram_token = tv; body.telegram_chat_id = cv; }
     return G.api("PUT", "/api/settings", body).then(function () {
       G.toast("settings saved", "ok");
+      var dirtyPill = document.getElementById("settings-dirty");
+      if (dirtyPill) dirtyPill.style.display = "none";
       document.getElementById("n-discord").value = "";
       document.getElementById("n-tgtoken").value = "";
       G.refreshStatus();

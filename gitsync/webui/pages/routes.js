@@ -8,6 +8,8 @@
   function chips(r) {
     var c = [];
     c.push('<span class="chip">' + (r.direction === "mesh" ? "two-way mesh" : "one-way") + "</span>");
+    var mode = r.mode || "safe";
+    c.push('<span class="chip ' + (mode === "full" ? "warn" : "") + '">mode: ' + G.esc(mode) + "</span>");
     c.push('<span class="chip">' + G.esc(r.effective_schedule) +
       (r.schedule ? "" : " (inherited)") + "</span>");
     if (r.direction === "mesh" && r.mesh_conflict) {
@@ -41,14 +43,18 @@
       (r.include_file ? " file " + r.include_file : "");
     return '<section class="card" data-route="' + G.esc(r.name) + '">' +
       '<div class="bar"><div><span class="route-title">' + G.esc(r.name) + "</span> " +
-        chips(r) + '</div><div class="actions">' +
+        chips(r) + '</div><div class="actions" style="display:flex;align-items:center;gap:6px">' +
         '<button class="btn sm" data-a="run" data-n="' + G.esc(r.name) + '" aria-label="Run route ' + G.esc(r.name) + '">Run</button>' +
-        '<button class="btn sm" data-a="dry" data-n="' + G.esc(r.name) + '" aria-label="Dry run route ' + G.esc(r.name) + '">Dry Run</button>' +
-        '<button class="btn sm" data-a="pause" data-n="' + G.esc(r.name) + '" aria-label="' + (r.enabled ? "Pause" : "Resume") + ' route ' + G.esc(r.name) + '">' +
-          (r.enabled ? "Pause" : "Resume") + "</button>" +
-        '<button class="btn sm" data-a="manage" data-n="' + G.esc(r.name) + '" aria-label="Manage targets for route ' + G.esc(r.name) + '">Targets</button>' +
-        '<button class="btn sm" data-a="edit" data-n="' + G.esc(r.name) + '" aria-label="Edit route ' + G.esc(r.name) + '">Edit</button>' +
-        '<button class="btn sm danger" data-a="del" data-n="' + G.esc(r.name) + '" aria-label="Delete route ' + G.esc(r.name) + '">Delete</button>' +
+        '<button class="btn sm" data-a="dry" data-n="' + G.esc(r.name) + '" aria-label="Dry run route ' + G.esc(r.name) + '">Dry run</button>' +
+        '<details class="more-menu" style="display:inline-block;position:relative">' +
+          '<summary class="btn sm ghost" style="list-style:none;cursor:pointer" aria-label="More actions">⋯</summary>' +
+          '<div class="menu-pop" style="position:absolute;right:0;top:100%;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:110px;box-shadow:var(--shadow)">' +
+            '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="pause" data-n="' + G.esc(r.name) + '">' + (r.enabled ? "Pause" : "Resume") + '</button>' +
+            '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="manage" data-n="' + G.esc(r.name) + '">Targets</button>' +
+            '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="edit" data-n="' + G.esc(r.name) + '">Edit</button>' +
+            '<button class="btn ghost sm danger" style="text-align:left;justify-content:flex-start" data-a="del" data-n="' + G.esc(r.name) + '">Delete</button>' +
+          '</div>' +
+        '</details>' +
       "</div></div>" + flow(r) +
       '<div class="muted" style="margin-top:8px">next: ' + G.esc(r.next) +
         (filters ? ' · <span class="mono">' + G.esc(filters) + "</span>" : "") + "</div>" +

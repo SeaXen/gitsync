@@ -9,8 +9,10 @@ import fnmatch
 import json
 import os
 import re as _re
+import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 
@@ -18,6 +20,44 @@ from . import config as C
 from . import diskutil as DK
 from . import notify as NT
 from . import platforms as P
+
+
+def split_url_auth(url):
+    """Split (clean_url, user, token) from a git clone/push URL."""
+    if not url or not isinstance(url, str):
+        return url, None, None
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return url, None, None
+    parsed = urllib.parse.urlsplit(url)
+    if "@" not in parsed.netloc:
+        return url, None, None
+    userinfo, host = parsed.netloc.rsplit("@", 1)
+    user = None
+    token = None
+    if ":" in userinfo:
+        user, token = userinfo.split(":", 1)
+        user = urllib.parse.unquote(user)
+        token = urllib.parse.unquote(token)
+    else:
+        token = urllib.parse.unquote(userinfo)
+    clean_url = urllib.parse.urlunsplit((parsed.scheme, host, parsed.path, parsed.query, parsed.fragment))
+    return clean_url, user, token
+
+
+def askpass_env(user=None, token=None, base_env=None):
+    """Build an env dict configuring GIT_ASKPASS with safe credentials."""
+    env = dict(base_env if base_env is not None else os.environ)
+    here = os.path.dirname(os.path.abspath(__file__))
+    helper = os.path.join(here, "askpass.bat" if os.name == "nt" else "askpass.py")
+    env["GIT_ASKPASS"] = helper
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if os.name == "nt":
+        env["GITSYNC_PYTHON"] = sys.executable
+    if user:
+        env["GITSYNC_ASKPASS_USER"] = user
+    if token:
+        env["GITSYNC_ASKPASS_TOKEN"] = token
+    return env
 
 # the run lock lives here; web.py probes it so the dashboard can report a
 # timer/webhook sync that is already running (one owner for the lock's path)
@@ -181,20 +221,26 @@ def sync_repo(repo, source, targets, mode, claimants=None, relax=False):
     if os.path.isdir(hub) and not mirror_is_valid(hub):
         log("  removing incomplete mirror for %s" % name)
         P.run(["rm", "-rf", hub])
+    clean_src_url, src_user, src_token = split_url_auth(src_url)
     genv = source.git_env() if hasattr(source, "git_env") else None
+    if src_token or (genv and "GIT_ASKPASS" in genv):
+        genv = askpass_env(src_user, src_token, base_env=genv)
+
     if os.path.isdir(hub):
-        P.run(["git", "remote", "set-url", "origin", src_url], cwd=hub)
+        P.run(["git", "remote", "set-url", "origin", clean_src_url], cwd=hub)
         _secure_hub_config(hub)
         rc, _, err = P.run(["git", "remote", "update", "--prune"], cwd=hub,
                             timeout=P.GIT_TIMEOUT, env=genv)
         if rc != 0:
             return "mirror-update-failed", _redact(err.strip())[:200], []
     else:
-        rc, _, err = P.run(["git", "clone", "--mirror", src_url, hub],
+        rc, _, err = P.run(["git", "clone", "--mirror", clean_src_url, hub],
                             timeout=P.GIT_TIMEOUT, env=genv)
         if rc != 0:
             P.run(["rm", "-rf", hub])
-            return "clone-failed", err.strip()[:200], []
+            return "clone-failed", _redact(err.strip())[:200], []
+        P.run(["git", "remote", "set-url", "origin", clean_src_url], cwd=hub)
+        _secure_hub_config(hub)
 
     # 2. push to each target
     pushed = []
@@ -263,10 +309,13 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
     """
     try:
         push_url = tplat.ensure_repo(repo)
-        cmd = push_args(mode, tplat.ptype, push_url, refspecs)
+        clean_push_url, dst_user, dst_token = split_url_auth(push_url)
+        cmd = push_args(mode, tplat.ptype, clean_push_url, refspecs)
         if not cmd:
             return None
         tenv = tplat.git_env() if hasattr(tplat, "git_env") else None
+        if dst_token or (tenv and "GIT_ASKPASS" in tenv):
+            tenv = askpass_env(dst_user, dst_token, base_env=tenv)
         rc, _, err = P.run(cmd, cwd=hub, timeout=P.GIT_TIMEOUT, env=tenv)
         if rc != 0 and _protection_error(err):
             # A protected branch refused the push. Turning on force-push
@@ -298,11 +347,11 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
             rc2, head_ref, _ = P.run(["git", "symbolic-ref", "HEAD"],
                                      cwd=hub, timeout=30)
             if rc2 == 0 and head_ref.strip():
-                rc3, exists, _ = P.run(["git", "-C", push_url, "rev-parse",
+                rc3, exists, _ = P.run(["git", "-C", clean_push_url, "rev-parse",
                                         "--verify", "--quiet",
                                         head_ref.strip()], timeout=30)
                 if rc3 == 0 and exists.strip():
-                    P.run(["git", "-C", push_url, "symbolic-ref",
+                    P.run(["git", "-C", clean_push_url, "symbolic-ref",
                            "HEAD", head_ref.strip()], timeout=30)
         return None
     except Exception as e:
@@ -319,9 +368,12 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
 MESH_NS = "refs/gitsync-mesh"
 
 
-def _ls_remote_map(url, timeout=90):
+def _ls_remote_map(url, timeout=90, env=None):
     """{refname: sha} for one remote, or None when it cannot be reached"""
-    rc, out, _ = P.run(["git", "ls-remote", url], timeout=timeout)
+    clean_url, user, token = split_url_auth(url)
+    if token or (env and "GIT_ASKPASS" in env):
+        env = askpass_env(user, token, base_env=env)
+    rc, out, _ = P.run(["git", "ls-remote", clean_url], timeout=timeout, env=env)
     if rc != 0:
         return None
     refs = {}
@@ -445,9 +497,13 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
 
     # 1. fetch every reachable peer into the private namespace
     for pname, (url, _refs) in reachable.items():
+        plat = peers[pname]
+        clean_url, user, token = split_url_auth(url)
         penv = plat.git_env() if hasattr(plat, "git_env") else None
+        if token or (penv and "GIT_ASKPASS" in penv):
+            penv = askpass_env(user, token, base_env=penv)
         rc, _, err = P.run(
-            ["git", "fetch", "--prune", "--force", "--no-tags", url,
+            ["git", "fetch", "--prune", "--force", "--no-tags", clean_url,
              "+refs/heads/*:%s/%s/heads/*" % (MESH_NS, pname),
              "+refs/tags/*:%s/%s/tags/*" % (MESH_NS, pname)],
             cwd=hub, timeout=P.GIT_TIMEOUT, env=penv)
@@ -634,9 +690,12 @@ def _filter_repos(repos, route, only=None):
     return repos
 
 
-def _remote_head(url, timeout=60):
+def _remote_head(url, timeout=60, env=None):
     """HEAD sha of a remote, or None if unreachable / no refs"""
-    rc, out, _ = P.run(["git", "ls-remote", url, "HEAD"], timeout=timeout)
+    clean_url, user, token = split_url_auth(url)
+    if token or (env and "GIT_ASKPASS" in env):
+        env = askpass_env(user, token, base_env=env)
+    rc, out, _ = P.run(["git", "ls-remote", clean_url, "HEAD"], timeout=timeout, env=env)
     if rc != 0 or not out.strip():
         return None
     return out.split()[0]
@@ -812,7 +871,7 @@ def _protection_error(err):
 import re as _re
 
 _TOKEN_URL = _re.compile(
-    r"(https?://)[^/\s:@]+:[^/\s@]+@|x-access-token:[^@\s]+@")
+    r"(https?://)[^/\s@]+@|x-access-token:[^@\s]+@")
 
 
 def _redact(text):

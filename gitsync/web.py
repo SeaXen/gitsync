@@ -925,8 +925,9 @@ def make_handler():
                         return self._err(403, "bad Host header")
                     if not is_public:
                         if not self._authed():
-                            _audit("401 %s %s from %s"
-                                   % (method, path, self._client_ip()))
+                            if not (method == "GET" and path == "/api/session"):
+                                _audit("401 %s %s from %s"
+                                       % (method, path, self._client_ip()))
                             return self._err(401, "unauthorized")
                         g = self._guard(method)
                         if g:
@@ -1814,6 +1815,8 @@ def h_sync_start(handler):
     dry = bool(b.get("dry_run"))
     if dry:
         argv += ["--dry-run"]
+    if b.get("retry_failed"):
+        argv += ["--retry-failed"]
     try:
         job = start_job("sync", [sys.executable, "-m", "gitsync"] + argv,
                         mutating=True)

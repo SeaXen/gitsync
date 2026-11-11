@@ -48,6 +48,7 @@
       fillLastRun({ error: e });
     });
     G.api("GET", "/api/health").then(fillHealth).catch(fillHealthErr);
+    G.api("GET", "/api/routes").then(fillRoutes).catch(function () {});
     G.api("GET", "/api/log?tail=60").then(fillLog).catch(function (e) {
       fillLog({ error: e });
     });
@@ -56,9 +57,32 @@
   function fillStatus(s) {
     var sub = document.getElementById("dash-sub");
     if (sub) {
-      sub.textContent = "Timer: " + s.schedule + ", next run " +
-        (s.next_run || "—") + " · scheduler: " + s.scheduler;
+      if (s.schedule !== "off" && (!s.scheduler || s.scheduler.indexOf("not scheduled") !== -1 || s.scheduler.indexOf("none") !== -1)) {
+        sub.innerHTML = "Schedule set to " + G.esc(s.schedule) +
+          ' but no timer is installed — <a href="tools.html" style="text-decoration:underline">Install timer</a>';
+      } else {
+        sub.textContent = "Timer: " + s.schedule + ", next run " +
+          (s.next_run || "—") + " · scheduler: " + s.scheduler;
+      }
     }
+  }
+
+  function cleanPlatError(err) {
+    if (!err) return "unknown error";
+    var s = String(err);
+    if (/errno -2|name or service not known|getaddrinfo/i.test(s)) {
+      return "Can't reach host — check network or DNS";
+    }
+    if (/timed? out/i.test(s)) {
+      return "Connection timed out";
+    }
+    if (/401|403|bad credentials|rejected/i.test(s)) {
+      return "Authentication failed — check token";
+    }
+    if (s.indexOf("API failed:") === 0) {
+      return s.slice(11).trim();
+    }
+    return s;
   }
 
   function fillPlatforms(d) {
@@ -73,10 +97,15 @@
     }
     host.innerHTML = rows.map(function (r) {
       var dot = !r.enabled ? "off" : (r.ok ? "" : "bad");
-      var right = r.enabled
-        ? (r.ok ? (r.repo_count === null ? "?" : r.repo_count + " repos")
-                : '<span class="bad">' + G.esc(r.info.slice(0, 40)) + "</span>")
-        : '<span class="muted">disabled</span>';
+      var right;
+      if (!r.enabled) {
+        right = '<span class="muted">disabled</span>';
+      } else if (r.ok) {
+        right = r.repo_count === null ? "?" : r.repo_count + " repos";
+      } else {
+        var cleanErr = cleanPlatError(r.info);
+        right = '<span class="bad" title="' + G.esc(r.info) + '">' + G.esc(cleanErr) + "</span>";
+      }
       return '<div class="row"><span><i class="dot ' + dot + '"></i>' +
         G.esc(r.name) + '</span><span class="mono muted">' + right + "</span></div>";
     }).join("");
@@ -96,39 +125,76 @@
       return;
     }
     var bad = (last.failed || 0) + (last.partial || 0);
+    var retryBtn = (last.failed && last.failed > 0)
+      ? '<button class="btn btn-sm btn-warn" id="btn-retry-failed" style="margin-top:8px">Retry ' + last.failed + ' failed repo(s)</button>'
+      : "";
     host.innerHTML =
       '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " OK</div>" +
       '<div class="muted" style="margin-top:6px">' + (last.failed || 0) + " failed" +
       (last.partial ? ", " + last.partial + " partial" : "") + " of " +
       (last.repos || 0) + ", in " + (last.elapsed_sec || "?") + "s</div>" +
+      retryBtn +
       '<div class="mono spark">' + G.esc(G.spark(d.spark || [])) + "</div>" +
       '<div class="muted" style="font-size:12px">last ' + (d.spark || []).length + " runs</div>";
+    var btn = document.getElementById("btn-retry-failed");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        btn.disabled = true;
+        G.api("POST", "/api/sync", { retry_failed: true }).then(function (res) {
+          if (res.job_id) attachSync(res.job_id);
+          G.toast("Retrying failed repos…");
+        }).catch(function (err) {
+          btn.disabled = false;
+          G.toast(G.apiError(err), "bad");
+        });
+      });
+    }
   }
 
   function fillHealth(d) {
     var host = document.getElementById("health-body");
     var disk = d.disk || {};
-    var tokClass = d.token_bad ? "warn" : "ok";
+    var hasUnknown = (d.tokens || []).some(function (t) { return t.level === "unknown"; });
+    var tokClass = d.token_bad ? "bad" : (hasUnknown ? "warn" : "ok");
+    var diskPct = disk.pct;
+    var diskClass = diskPct === null ? "muted" : (diskPct >= 95 ? "bad" : (diskPct >= 85 ? "warn" : "muted"));
+    var diskAria = diskPct >= 95 ? ' role="alert" aria-label="Critical disk space"' : (diskPct >= 85 ? ' aria-label="Warning disk space"' : "");
     var rows = (d.tokens || []).map(function (t) {
       var cls = (t.level === "expired" || t.level === "critical") ? "bad"
-        : (t.level === "warning" ? "warn" : "muted");
+        : (t.level === "warning" || t.level === "unknown" ? "warn" : "muted");
       var detail = t.days_left === null || t.days_left === undefined
         ? "" : (t.days_left < 0 ? "expired " + (-t.days_left) + "d ago"
                                 : t.days_left + "d left");
       return '<div class="row" style="padding:1px 0"><span class="mono">' +
         G.esc(t.platform) + '</span><span class="' + cls + '" style="font-size:12px">' +
-        G.esc(detail || t.level) + "</span></div>";
+        G.esc(detail || t.note || t.level) + "</span></div>";
     }).join("");
     host.innerHTML =
       '<div class="mono" style="line-height:1.9">hub size <span class="muted">' +
       G.esc(d.disk_human.size) + '</span> · mirrors <span class="muted">' +
-      (disk.mirrors || 0) + '</span> · disk <span class="muted">' +
-      G.esc(disk.pct === null ? "—" : disk.pct + "% full") + "</span><br>" +
+      (disk.mirrors || 0) + '</span> · disk <span class="' + diskClass + '"' + diskAria + '>' +
+      G.esc(diskPct === null ? "—" : diskPct + "% full") + "</span><br>" +
       'tokens <span class="' + tokClass + '">' + G.esc(d.token_summary) + "</span></div>" +
       (rows ? '<div class="mt" style="font-size:12.5px">' + rows + "</div>" : "");
   }
   function fillHealthErr(e) {
     document.getElementById("health-body").innerHTML = G.errorBox(e);
+  }
+
+  function fillRoutes(d) {
+    var host = document.getElementById("routes-body");
+    if (!host) return;
+    var rows = d.routes || [];
+    if (!rows.length) {
+      host.innerHTML = '<div class="muted">No routes configured yet. <a href="routes.html">Create route →</a></div>';
+      return;
+    }
+    host.innerHTML = rows.map(function (r) {
+      var badge = '<span class="chip ' + (r.mode === "full" ? "warn" : "") + '">mode: ' + G.esc(r.mode || "safe") + '</span>';
+      var state = !r.enabled ? '<span class="chip paused">paused</span>' : '<span class="chip">active</span>';
+      return '<div class="row" style="padding:4px 0"><span><strong>' + G.esc(r.name) + '</strong> (' +
+        G.esc(r.source) + ' → ' + G.esc(r.targets.join(", ")) + ')</span><span>' + badge + ' ' + state + '</span></div>';
+    }).join("");
   }
 
   function fillLog(d) {
@@ -162,6 +228,9 @@
         '<section class="card"><p class="label">Disk &amp; Health</p>' +
           '<div id="health-body">' + G.loading() + "</div></section>" +
       "</div>" +
+      '<section class="card"><p class="label">Routes Status ' +
+        '<a href="routes.html" style="text-transform:none;letter-spacing:0">Manage routes →</a></p>' +
+        '<div class="stack" id="routes-body">' + G.loading() + "</div></section>" +
       '<section class="card"><p class="label">Log ' +
         '<a href="log.html" style="text-transform:none;letter-spacing:0">View full log →</a></p>' +
         '<div class="mono log" id="logtail">' + G.loading() + "</div></section>";

@@ -31,9 +31,52 @@ if curses is None:
         KEY_NPAGE = 338
         KEY_PPAGE = 339
         KEY_MOUSE = 409
+        KEY_BACKSPACE = 263
+        KEY_ENTER = 343
+        KEY_RESIZE = 410
+        BUTTON1_CLICKED = 4
+        BUTTON4_PRESSED = 0x10000
+        BUTTON5_PRESSED = 0x20000
         A_BOLD = 1
         A_DIM = 2
         A_REVERSE = 4
+
+        @staticmethod
+        def doupdate():
+            pass
+
+        @staticmethod
+        def color_pair(n):
+            return 0
+
+        @staticmethod
+        def init_pair(i, f, b):
+            pass
+
+        @staticmethod
+        def curs_set(v):
+            pass
+
+        @staticmethod
+        def has_colors():
+            return False
+
+        @staticmethod
+        def start_color():
+            pass
+
+        @staticmethod
+        def use_default_colors():
+            pass
+
+        @staticmethod
+        def mousemask(m):
+            return (0, 0)
+
+        @staticmethod
+        def getmouse():
+            return (0, 0, 0, 0, 0)
+
         class error(Exception):
             pass
     curses = _CursesFallback()
@@ -45,6 +88,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 from datetime import datetime
@@ -66,6 +110,8 @@ TABS = ["Dashboard", "Platforms", "Routes", "Stars", "Log", "History",
 
 state = {
     "platforms": [],       # [(name, type, on, ok, info, count)]
+    "platforms_loaded": False,
+    "sync_proc": None,
     "routes": [],
     "settings": {},
     "log_tail": [],
@@ -194,6 +240,7 @@ def _refresh_platforms_inner():
         for f in as_completed(futs):
             rows[futs[f]] = f.result()
     state["platforms"] = [r for r in rows if r]
+    state["platforms_loaded"] = True
     save_probe_cache(state["platforms"])
     state["routes"] = [(r.get("name"), r.get("source"),
                         list(r.get("targets", [])),
@@ -264,6 +311,7 @@ def run_sync(dry_run=False):
                                  stderr=subprocess.STDOUT, text=True,
                                  env=dict(os.environ,
                                           PYTHONPATH=_app_dir()))
+            state["sync_proc"] = p
             for line in p.stdout:
                 state["sync_lines"].append(line.rstrip())
                 state["dirty"] = True
@@ -274,6 +322,7 @@ def run_sync(dry_run=False):
         except Exception as e:
             state["sync_lines"].append("--- error: %s ---" % e)
         finally:
+            state["sync_proc"] = None
             state["syncing"] = False
             read_log_tail()
             state["records"] = SYNC.last_records(10)
@@ -286,8 +335,9 @@ def run_sync(dry_run=False):
     threading.Thread(target=worker, daemon=True).start()
 
 
-def sync_progress():
-    """(done, total, current_repo) read from the child sync's own output.
+def sync_progress(detailed=False):
+    """(done, total, current_repo) [or with detailed=True: (..., ok_n, fail_n, skip_n)]
+    read from the child sync's output.
 
     The sync runs in a subprocess, so SYNC.progress in *this* process is
     always empty — the bar used to show "starting..." forever. The child
@@ -295,15 +345,25 @@ def sync_progress():
     """
     done = total = 0
     current = ""
+    ok_n = fail_n = skip_n = 0
     for line in state.get("sync_lines") or []:
         parsed = SYNC.parse_progress_line(line)
         if not parsed:
             continue
-        d, t, _status, repo = parsed
+        d, t, st, repo = parsed
         if t:
             total = t
         done = max(done, d)
         current = repo
+        st_u = (st or "").upper()
+        if "OK" in st_u:
+            ok_n += 1
+        elif "FAIL" in st_u or "ERR" in st_u:
+            fail_n += 1
+        elif "SKIP" in st_u:
+            skip_n += 1
+    if detailed:
+        return done, total, current, ok_n, fail_n, skip_n
     return done, total, current
 
 
@@ -335,8 +395,15 @@ def apply_theme(name=None):
     """(re)load the four colour pairs from the configured theme.
 
     Called at start-up and again the moment the setting changes, so the
-    whole TUI recolours without a restart.
+    whole TUI recolours without a restart. Honors the NO_COLOR env var.
     """
+    if os.environ.get("NO_COLOR"):
+        try:
+            for i in range(1, 5):
+                curses.init_pair(i, -1, -1)
+        except curses.error:
+            pass
+        return
     if name is None:
         name = C.setting(C.load_config(), "theme", "default")
     spec = C.THEMES.get(name) or C.THEMES["default"]
@@ -699,8 +766,8 @@ def _test_platform(name):
 def _remove_platform_screen(stdscr, name):
     cfg = C.load_config()
     used = C.platform_used_by(cfg, name)
-    h, w = stdscr.getmaxyx()
     while True:
+        h, w = stdscr.getmaxyx()
         stdscr.erase()
         safe_add(stdscr, 0, 0,
                  (" REMOVE %s " % name).center(w - 1)[:w - 1],
@@ -853,11 +920,11 @@ def _edit_platform_screen(stdscr, name):
 
 def _input_line(stdscr, prompt, secret=False):
     """single-line text input (used by the notifications setup screen)"""
-    h, w = stdscr.getmaxyx()
     text = ""
     curses.curs_set(1)
     try:
         while True:
+            h, w = stdscr.getmaxyx()
             stdscr.erase()
             safe_add(stdscr, 0, 0, (" %s " % prompt).center(w - 1)[:w - 1],
                      curses.A_BOLD | curses.color_pair(1))
@@ -867,15 +934,32 @@ def _input_line(stdscr, prompt, secret=False):
                      " type, Enter = save, Esc = cancel ".center(w - 1)[:w - 1],
                      curses.A_REVERSE)
             commit_screen(stdscr)
-            ch = stdscr.getch()
+            try:
+                wch = stdscr.get_wch()
+                if isinstance(wch, str):
+                    ch = ord(wch)
+                    c_val = wch
+                else:
+                    ch = wch
+                    c_val = ""
+            except (curses.error, AttributeError):
+                ch = stdscr.getch()
+                c_val = chr(ch) if (32 <= ch < 0x110000 and ch != 127) else ""
             if ch in (27,):
                 return None
             if ch in (10, 13, curses.KEY_ENTER):
                 return text.strip()
             if ch in (curses.KEY_BACKSPACE, 127, 8):
                 text = text[:-1]
-            elif 32 <= ch < 127:
-                text += chr(ch)
+            elif c_val and c_val.isprintable():
+                text += c_val
+            elif 32 <= ch < 0x110000 and ch != 127:
+                try:
+                    c = chr(ch)
+                    if c.isprintable():
+                        text += c
+                except ValueError:
+                    pass
     finally:
         curses.curs_set(0)
 
@@ -1305,7 +1389,17 @@ def prompt_line(stdscr, label, initial=""):
         safe_add(stdscr, h - 1, 0, (label + buf + "_").ljust(w - 1)[:w - 1],
                  curses.A_REVERSE)
         commit_screen(stdscr)
-        ch = stdscr.getch()
+        try:
+            wch = stdscr.get_wch()
+            if isinstance(wch, str):
+                ch = ord(wch)
+                c_val = wch
+            else:
+                ch = wch
+                c_val = ""
+        except (curses.error, AttributeError):
+            ch = stdscr.getch()
+            c_val = chr(ch) if (32 <= ch < 0x110000 and ch != 127) else ""
         if ch in (10, 13, curses.KEY_ENTER):
             break
         if ch in (curses.KEY_BACKSPACE, 127, 8):
@@ -1313,8 +1407,15 @@ def prompt_line(stdscr, label, initial=""):
         elif ch == 27:
             buf = ""
             break
-        elif 32 <= ch < 127:
-            buf += chr(ch)
+        elif c_val and c_val.isprintable():
+            buf += c_val
+        elif 32 <= ch < 0x110000 and ch != 127:
+            try:
+                c = chr(ch)
+                if c.isprintable():
+                    buf += c
+            except ValueError:
+                pass
     curses.curs_set(0)
     return buf
 
@@ -1432,14 +1533,17 @@ _status_cache = {"txt": "checking...", "at": 0.0}
 
 
 def cached_status():
-    """scheduler status without shelling out on every frame"""
+    """scheduler status without shelling out on every frame (refreshed in background)"""
     now = time.time()
     if now - _status_cache["at"] > 15:
-        try:
-            _status_cache["txt"] = S.status()
-        except Exception:
-            _status_cache["txt"] = "unknown"
         _status_cache["at"] = now
+        def _bg():
+            try:
+                _status_cache["txt"] = S.status()
+            except Exception:
+                _status_cache["txt"] = "unknown"
+            state["dirty"] = True
+        threading.Thread(target=_bg, daemon=True).start()
     return _status_cache["txt"]
 
 
@@ -1531,16 +1635,16 @@ def draw(stdscr):
              curses.A_REVERSE)
     foot = (" [1-7]tabs  [S]ync  [D]ry-run  [L]og  [C]ron  [O]pt  "
             "[A]cc  [N]otify  [E]repos  [T]ools  [W]izard  [R]efresh  "
-            "[Q]uit ")
+            "[?]Help  [Q]uit ")
     if tab == 1:
         foot = (" [1-7]tabs  [S]ync  [D]ry-run  up/dn=scroll sites  "
-                "[A]cc  [R]efresh  [Q]uit ")
+                "[A]cc  [R]efresh  [?]Help  [Q]uit ")
     if tab == 2:
         foot = (" [1-7]tabs  [S]ync  [P]ause/resume  [O]ptions  "
-                "[R]efresh  [Q]uit ")
+                "[R]efresh  [?]Help  [Q]uit ")
     if tab == 3:
         foot = (" [1-7]tabs  [S]ource  [C]opy stars  up/dn=scroll  "
-                "[R]e-read  [Q]uit ")
+                "[R]e-read  [?]Help  [Q]uit ")
     if state["search_mode"]:
         foot = " filter: %s_   (Enter = apply, Esc = clear) " % state["search"]
     elif state["search"]:
@@ -1603,7 +1707,12 @@ def draw_platforms(stdscr, h, w, G, R, dim):
                      % (name, ptype, "ON" if on else "off",
                         "OK" if ok else "FAIL", count, info), attr))
     if not rows:
-        rows.append(("platforms: loading...", dim))
+        cfg = C.load_config()
+        if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
+            rows.append(("No platforms yet — press 'A' to add one or 'W' for wizard", curses.A_BOLD))
+            rows.append(("Or run: gitsync setup", dim))
+        else:
+            rows.append(("platforms: loading...", dim))
     avail = max(1, h - 4 - 2 - 1)          # panel body rows available
     top = state.get("plat_scroll", 0)
     top = max(0, min(top, max(0, len(rows) - 1)))
@@ -1813,6 +1922,7 @@ def _run_route(name, dry_run=False):
             p = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, env=dict(os.environ, PYTHONPATH=_app_dir()))
+            state["sync_proc"] = p
             for line in p.stdout:
                 state["sync_lines"].append(line.rstrip())
                 state["dirty"] = True
@@ -1826,6 +1936,7 @@ def _run_route(name, dry_run=False):
         except Exception as e:
             state["sync_lines"].append("--- error: %s ---" % e)
         finally:
+            state["sync_proc"] = None
             state["syncing"] = False
             read_log_tail()
             state["records"] = SYNC.last_records(10)
@@ -2135,7 +2246,14 @@ def routes_screen(stdscr):
         elif ch == curses.KEY_HOME:
             idx = 0
         elif ch in (ord("s"), ord("S")) and rows:
-            _run_route(rows[idx]["route"].get("name"))
+            cur_route = rows[idx]["route"]
+            r_name = cur_route.get("name")
+            if cur_route.get("mode") == "full":
+                conf = prompt_line(stdscr, " Route '%s' is in FULL mode (prunes branches). Type route name or 'yes': " % r_name)
+                if conf.strip().lower() not in (r_name.lower(), "yes"):
+                    flash("cancelled (full mode requires confirmation)", 5)
+                    continue
+            _run_route(r_name)
         elif ch in (ord("d"), ord("D")) and rows:
             _run_route(rows[idx]["route"].get("name"), dry_run=True)
         elif ch in (ord("o"), ord("O")) and rows:
@@ -2210,6 +2328,7 @@ def _stars_copy(targets):
             lines.append("--- error: %s ---" % e)
             state["sync_lines"] = lines
         finally:
+            state["sync_proc"] = None
             state["syncing"] = False
             state["dirty"] = True
     threading.Thread(target=worker, daemon=True).start()
@@ -2522,7 +2641,11 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
                 txt = txt[w - 1:]
                 row += 1
         else:
-            safe_add(stdscr, row, 0, " platforms: loading...", dim)
+            cfg = C.load_config()
+            if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
+                safe_add(stdscr, row, 0, " No platforms yet — press 'A' or 'W' for wizard", curses.A_BOLD)
+            else:
+                safe_add(stdscr, row, 0, " platforms: loading...", dim)
             row += 1
         row += 1
         lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
@@ -2549,7 +2672,11 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
                           % (name, ptype, "ON" if on else "off",
                              "OK" if ok else "FAIL", count, info), attr))
     if not plat_rows:
-        plat_rows.append(("platforms: loading...", dim))
+        cfg = C.load_config()
+        if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
+            plat_rows.append(("No platforms yet — press 'A' to add one or 'W' for wizard", curses.A_BOLD))
+        else:
+            plat_rows.append(("platforms: loading...", dim))
     hidden_plats = len(state["platforms"]) - len(shown_plats)
     if hidden_plats > 0:
         plat_rows.append(("... +%d more site(s) - see the Platforms tab"
@@ -2606,14 +2733,17 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
 
     top3 = top2 + len(route_rows) + 3
     if state["syncing"]:
-        done, total, current = sync_progress()
+        done, total, current, ok_n, fail_n, skip_n = sync_progress(detailed=True)
         pct = ("%d/%d" % (done, total)) if total else "starting..."
         bar_w = max(10, w - 44)
         filled = int(bar_w * done / total) if total else 0
+        stat_summary = "%d ok, %d fail" % (ok_n, fail_n)
+        if skip_n:
+            stat_summary += ", %d skip" % skip_n
         _panel_rows(stdscr, h, w, top3, [
-            ("[%s%s] %s" % ("#" * filled, "-" * (bar_w - filled), pct),
+            ("[%s%s] %s  (%s)" % ("#" * filled, "-" * (bar_w - filled), pct, stat_summary),
              curses.A_BOLD),
-            ("current: %s" % (current[:w - 20] or "..."), Y),
+            ("current: %s  [X=cancel]" % (current[:w - 28] or "..."), Y),
         ], "SYNC IN PROGRESS")
         top3 += 4
 
@@ -2698,8 +2828,63 @@ def main():
     except KeyboardInterrupt:
         pass
     except Exception as e:
-        print("TUI error: %s" % e)
+        tb = traceback.format_exc()
+        try:
+            C.ensure_dirs()
+            with open(C.LOG_FILE, "a", encoding="utf-8") as f:
+                f.write("\n--- TUI crash at %s ---\n%s\n"
+                        % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tb))
+        except Exception:
+            pass
+        print("TUI error: %s (details written to %s)" % (e, C.LOG_FILE))
         snapshot()
+
+
+def _global_help_screen(stdscr):
+    """Global keyboard shortcuts and usage guide."""
+    lines = [
+        "KEYBOARD SHORTCUTS & HELP",
+        "=" * 50,
+        "",
+        "NAVIGATION:",
+        "  1 - 6      Switch tabs (Dashboard, Platforms, Routes, Log, History, Settings)",
+        "  Up / Down  Scroll active list or panel (or j / k)",
+        "  PgUp/PgDn  Page scroll up / down",
+        "  Home / End Jump to top / bottom",
+        "  /          Search / filter repos or list items",
+        "  Esc        Clear search / dismiss modal / cancel",
+        "  Q          Quit gitsync",
+        "",
+        "ACTIONS:",
+        "  S          Sync now (syncs all enabled routes; prompts if FULL mode)",
+        "  D          Dry run (simulate sync without making changes)",
+        "  R          Refresh platforms status and health checks",
+        "  E          Browse repositories (view details, selective sync)",
+        "  A          Accounts / platforms manager (add, edit, test, delete)",
+        "  P          Pause / resume routes (on Routes tab or modal)",
+        "  C          Schedule timer (systemd / cron interval configuration)",
+        "  O          Options and global settings",
+        "  N          Notifications (Discord / Telegram webhooks)",
+        "  T          Tools menu (doctor, disk cleanup, drift fix, update)",
+        "  W          Launch setup wizard",
+        "  L          Full log viewer",
+        "  H          Sync run history and duration trends",
+        "  X          Cancel running sync",
+        "  ?          Show this help overlay",
+        "",
+        "MOUSE & TERMINAL:",
+        "  Left Click Click tab names (row 2) to switch tabs",
+        "  Wheel      Scroll active view up / down",
+        "  Selection  Hold Shift while dragging to select & copy terminal text",
+        "",
+        "SAFETY & MODES:",
+        "  SAFE mode  Keeps all destination refs; never deletes or prunes",
+        "  FULL mode  Exact mirror; prunes destination branches not in source",
+        "  MESH mode  Bidirectional; newest commit wins per branch; union refs",
+        "",
+        "Press B, Q, or Esc to return to dashboard.",
+    ]
+    _scroll_view(stdscr, " GLOBAL HELP (?) ", lines)
 
 
 def _run(stdscr):
@@ -2711,12 +2896,17 @@ def _run(stdscr):
         pass
     stdscr.timeout(1000)
     try:
-        curses.mousemask(curses.ALL_MOUSE_EVENTS)
+        mask = (curses.BUTTON1_CLICKED |
+                getattr(curses, "BUTTON4_PRESSED", 0) |
+                getattr(curses, "BUTTON5_PRESSED", 0))
+        curses.mousemask(mask)
     except (AttributeError, curses.error):
         pass
-    if curses.has_colors():
+    if curses.has_colors() and not os.environ.get("NO_COLOR"):
         curses.start_color()
         curses.use_default_colors()
+        apply_theme()
+    elif os.environ.get("NO_COLOR"):
         apply_theme()
     read_log_tail()
     state["records"] = SYNC.last_records(10)
@@ -2752,7 +2942,17 @@ def _run(stdscr):
             last_clock = now
             dirty = True
         _t0 = time.time()
-        ch = stdscr.getch()
+        try:
+            wch = stdscr.get_wch()
+            if isinstance(wch, str):
+                ch = ord(wch)
+                char_val = wch
+            else:
+                ch = wch
+                char_val = ""
+        except (curses.error, AttributeError):
+            ch = stdscr.getch()
+            char_val = chr(ch) if (32 <= ch < 0x110000 and ch != 127) else ""
         # a live terminal blocks ~1s in getch (timeout 1000) when idle; a
         # closed/orphaned terminal returns -1 instantly (EOF). Count instant
         # empty reads and exit, rather than busy-spinning a core forever.
@@ -2766,6 +2966,7 @@ def _run(stdscr):
             # a malformed event must not spin the loop: fall through as "no
             # key" rather than re-reading the same queued event
             ch = -1
+            char_val = ""
             try:
                 _eid, mx, my, _bz, bstate = curses.getmouse()
             except Exception:
@@ -2776,6 +2977,12 @@ def _run(stdscr):
                     if hit is not None:
                         state["tab"] = hit
                         state["scroll"] = 0
+            elif bstate & getattr(curses, "BUTTON4_PRESSED", 0):
+                state["scroll"] = max(0, state.get("scroll", 0) - 3)
+                state["dirty"] = True
+            elif bstate & getattr(curses, "BUTTON5_PRESSED", 0):
+                state["scroll"] = state.get("scroll", 0) + 3
+                state["dirty"] = True
         if ch != -1:
             dirty = True
 
@@ -2788,8 +2995,15 @@ def _run(stdscr):
                 state["search_mode"] = False
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 state["search"] = state["search"][:-1]
-            elif 32 <= ch < 127:
-                state["search"] += chr(ch)
+            elif char_val and char_val.isprintable():
+                state["search"] += char_val
+            elif 32 <= ch < 0x110000 and ch != 127:
+                try:
+                    c = chr(ch)
+                    if c.isprintable():
+                        state["search"] += c
+                except ValueError:
+                    pass
             continue
 
         if ch in (ord("q"), ord("Q")):
@@ -2800,6 +3014,13 @@ def _run(stdscr):
             STAR_STATE["scroll"] = 0
             state["plat_scroll"] = 0
         elif ch in (ord("s"), ord("S")):
+            _cfg_full = [r.get("name") for r in C.routes(C.load_config())
+                         if r.get("mode") == "full" and r.get("enabled") is not False]
+            if _cfg_full:
+                conf = prompt_line(stdscr, " FULL mode route(s) (%s) prune branches. Type 'yes': " % ",".join(_cfg_full))
+                if conf.strip().lower() != "yes":
+                    flash("sync cancelled (full mode requires confirmation)", 5)
+                    continue
             run_sync()
         elif ch in (ord("d"), ord("D")):
             run_sync(dry_run=True)
@@ -2857,6 +3078,13 @@ def _run(stdscr):
             state["search_mode"] = True
             state["search"] = ""
             flash("type to filter, Enter/Esc when done", 8)
+        elif ch in (ord("x"), ord("X")) and state["syncing"]:
+            proc = state.get("sync_proc")
+            if proc and proc.poll() is None:
+                flash("cancelling sync...", 5)
+                proc.terminate()
+        elif ch in (ord("?"),):
+            _global_help_screen(stdscr)
 
         if now - last_draw > 10:
             read_log_tail()
@@ -2899,6 +3127,7 @@ def _run_bg(title, cmd):
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                  stderr=subprocess.STDOUT, text=True,
                                  env=dict(os.environ, PYTHONPATH=_app_dir()))
+            state["sync_proc"] = p
             for line in p.stdout:
                 state["sync_lines"].append(line.rstrip())
                 state["dirty"] = True
@@ -2910,6 +3139,7 @@ def _run_bg(title, cmd):
         except Exception as e:
             state["sync_lines"].append("--- error: %s ---" % e)
         finally:
+            state["sync_proc"] = None
             state["syncing"] = False
             # keep the tool's output on screen instead of snapping back to
             # the log tail the moment it finishes
@@ -2918,10 +3148,10 @@ def _run_bg(title, cmd):
     threading.Thread(target=worker, daemon=True).start()
 
 
-def _confirm_run(stdscr, title, cmd, warning):
-    """ask before running something that changes every repo"""
-    h, w = stdscr.getmaxyx()
+def _confirm_modal(stdscr, title, warning, action_fn):
+    """ask before running something that changes every repo (updates dimensions on resize)"""
     while True:
+        h, w = stdscr.getmaxyx()
         stdscr.erase()
         safe_add(stdscr, 0, 0, (" %s " % title).center(w - 1)[:w - 1],
                  curses.A_BOLD | curses.color_pair(4))
@@ -2934,29 +3164,19 @@ def _confirm_run(stdscr, title, cmd, warning):
         if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
             return
         if ch in (ord("y"), ord("Y")):
-            _suspend_run(stdscr, cmd)
+            action_fn()
             return
+
+
+def _confirm_run(stdscr, title, cmd, warning):
+    """ask before running something that changes every repo"""
+    _confirm_modal(stdscr, title, warning, lambda: _suspend_run(stdscr, cmd))
 
 
 def _confirm_bg(stdscr, title, cmd, warning):
     """ask before running something that changes every repo, then run it in
     the background so the TUI keeps responding"""
-    h, w = stdscr.getmaxyx()
-    while True:
-        stdscr.erase()
-        safe_add(stdscr, 0, 0, (" %s " % title).center(w - 1)[:w - 1],
-                 curses.A_BOLD | curses.color_pair(4))
-        safe_add(stdscr, 2, 1, warning[:w - 4], curses.A_DIM)
-        safe_add(stdscr, 3, 1, "Dry-run first if you are unsure.",
-                 curses.A_DIM)
-        modal_footer(stdscr, h, w, " Y = run it   N = cancel ")
-        commit_screen(stdscr)
-        ch = stdscr.getch()
-        if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
-            return
-        if ch in (ord("y"), ord("Y")):
-            _run_bg(title, cmd)
-            return
+    _confirm_modal(stdscr, title, warning, lambda: _run_bg(title, cmd))
 
 
 def _tools_screen(stdscr):
@@ -2993,6 +3213,9 @@ def _tools_screen(stdscr):
                              ["python3", "-m", "gitsync", "fix"],
                              "This re-pushes every mismatched repo to all "
                              "of its targets.")),
+        ("Retry failed repos", "re-sync only repos that failed in last run",
+         lambda: bg("RETRY FAILED", ["python3", "-m", "gitsync", "sync",
+                                     "--retry-failed"])),
         ("Update gitsync", "pull the newest release and reinstall",
          lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
                                        "update"])),

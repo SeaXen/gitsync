@@ -218,7 +218,7 @@ backup folder: **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**
 | `gitsync install` | install the scheduler for the **finest** route schedule |
 | `gitsync install --schedule weekly --user` | user timer, weekly (never writes `/etc` without `--system`) |
 | `gitsync install --cron` | use cron instead of systemd |
-| `gitsync ci` | run the same checks CI runs (syntax, smoke, 142 unit tests) |
+| `gitsync ci` | run the same checks CI runs (syntax, shell, smoke, unit checks) |
 | `gitsync ci --install-hook` | add a `pre-push` hook so every push runs them first |
 | `gitsync restore --to gitlab` | **push the hub back out** — the source host is gone |
 | `gitsync restore --to backup --dry-run` | preview a restore (nothing is modified) |
@@ -1273,10 +1273,10 @@ no account, no runner, no verification:
 
 ```bash
 gitsync ci
-#   python syntax (gitsync/*.py)  PASS
-#   shell syntax (installers)     PASS
-#   CLI smoke tests               PASS
-#   unit checks (136 assertions)   PASS
+#   python syntax (gitsync/*.py)    PASS
+#   shell syntax (installers)       PASS
+#   CLI smoke tests                 PASS
+#   unit checks (tests.test_logic)  PASS
 # CI: all 4 checks passed
 ```
 

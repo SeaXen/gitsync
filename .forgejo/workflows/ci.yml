@@ -44,3 +44,26 @@ jobs:
         run: |
           export PYTHONPATH=$PWD
           python3 -m unittest tests.test_logic
+
+  webui:
+    name: webui
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Playwright & Chromium
+        run: |
+          pip install playwright
+          playwright install --with-deps chromium
+
+      - name: Web UI Playwright tests
+        run: |
+          export PYTHONPATH=$PWD
+          python3 -m unittest tests.test_webapp_playwright

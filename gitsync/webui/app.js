@@ -440,13 +440,15 @@
       return '<a class="nav' + (n.id === page ? " on" : "") + '" href="' +
         n.href + '"' + (n.id === page ? ' aria-current="page"' : "") + ">" +
         I[n.icon] + "<span>" + esc(n.label) + "</span></a>";
-    }).join("");
+    }).join("") +
+    '<button class="nav mobile-logout" id="side-logout" type="button" title="Sign out" aria-label="Sign out" style="background:transparent;border:0;cursor:pointer;white-space:nowrap;font:inherit">' +
+      I.logout + "<span>Sign out</span></button>";
     var app = document.getElementById("app");
     app.innerHTML =
       '<a class="skip" href="#main">Skip to content</a>' +
       '<div class="shell">' +
       '<nav class="side" aria-label="Sections">' +
-        '<div class="logo">' + I.logo + "gitsync</div>" + navHtml +
+        '<div class="logo">' + I.logo + "<span>gitsync</span></div>" + navHtml +
         '<div class="foot">' +
           '<div class="meta" id="side-version">gitsync</div>' +
           '<button class="nav" id="logout" type="button" style="background:transparent;border:0;cursor:pointer;width:100%;text-align:left;font:inherit">' +
@@ -455,13 +457,13 @@
       "</nav>" +
       '<div class="content">' +
         '<header class="top">' +
-          '<div class="brand">' + I.logo + "gitsync</div>" +
+          '<div class="brand">' + I.logo + "<span>gitsync</span></div>" +
           '<span class="status" id="top-status"><span class="pip"></span>' +
             '<span id="top-status-text" role="status">connecting…</span></span>' +
           '<div class="spacer"></div>' +
-          '<button class="btn ghost" id="top-dry">' + I.eye +
+          '<button class="btn ghost" id="top-dry" title="Dry run" aria-label="Dry run">' + I.eye +
             "<span>Dry run</span></button>" +
-          '<button class="btn primary" id="top-sync">' + I.sync +
+          '<button class="btn primary" id="top-sync" title="Sync now" aria-label="Sync now">' + I.sync +
             "<span>Sync now</span></button>" +
           '<button class="btn icon" id="top-logout" title="Sign out" ' +
             'aria-label="Sign out">' + I.logout + "</button>" +
@@ -472,6 +474,8 @@
       "</div></div>";
 
     document.getElementById("logout").addEventListener("click", doLogout);
+    var sideLogout = document.getElementById("side-logout");
+    if (sideLogout) sideLogout.addEventListener("click", doLogout);
     document.getElementById("top-logout").addEventListener("click", doLogout);
     wireTopbar();
     return document.getElementById("main");

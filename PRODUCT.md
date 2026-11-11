@@ -26,7 +26,7 @@ Developers, DevOps engineers, systems administrators, and power users managing g
 
 ## Capabilities and Constraints
 
-- **Engine**: Python 3.10+ stdlib only (`http.server`, `urllib.request`, `subprocess`, `sqlite3`/JSON).
+- **Engine**: Python 3.8+ stdlib only (`http.server`, `urllib.request`, `subprocess`, JSON).
 - **Frontend**: Vanilla ES6, HTML5 semantic markup, CSS3 custom properties; zero runtime JS or CSS dependencies.
 - **Supported Platforms**: GitHub, GitLab, Gitea, Bitbucket, Local bare git repositories, and generic git remotes.
 - **Core Modes**: `safe` (fast-forward only) and `full` (mirroring with force-push and tag pruning).
@@ -40,7 +40,7 @@ Developers, DevOps engineers, systems administrators, and power users managing g
 
 ## Evidence on Hand
 
-- Verified across 157 automated test cases (152 unit/logic tests + 5 Playwright end-to-end browser tests).
+- Verified across 168 automated test cases (163 unit/logic tests + 5 Playwright end-to-end browser tests).
 - Clean code architecture verified through continuous master checklist security, lint, and schema audits.
 
 ## Product Principles

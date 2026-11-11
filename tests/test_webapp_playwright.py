@@ -29,9 +29,24 @@ if APP_DIR not in sys.path:
 from gitsync import config as C
 from gitsync import web as W
 
-ARTIFACT_DIR = r"C:\Users\Sagar-EB\.gemini\antigravity-ide\brain\073b6219-0ebe-432a-8087-a1aa017dd210\screenshots"
+SHOTS_DIR = os.environ.get("GITSYNC_SHOTS_DIR")
+if not SHOTS_DIR:
+    SHOTS_DIR = os.path.join(tempfile.gettempdir(), "gitsync_screenshots")
+ARTIFACT_DIR = SHOTS_DIR
 
 
+def _have_playwright():
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            b = p.chromium.launch()
+            b.close()
+        return True
+    except Exception:
+        return False
+
+
+@unittest.skipUnless(_have_playwright(), "playwright or chromium not available")
 class TestGitsyncWebappPlaywright(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -228,7 +243,13 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
         expect(modal_backdrop).not_to_be_visible()
 
     def test_04_responsive_mobile_viewport(self):
-        """Test layout behavior under small mobile viewport (375x667)."""
+        """Test layout behavior under small mobile viewport (375x667).
+
+        Asserts that:
+        1. No page has horizontal overflow (scrollWidth <= clientWidth).
+        2. Top bar buttons ('Sync now' and 'Sign out') fit within viewport and are reachable.
+        3. Mobile nav contains a reachable sign-out button.
+        """
         mobile_page = self.context.new_page()
         mobile_page.set_viewport_size({"width": 375, "height": 667})
         mobile_page.goto(f"{self.base_url}/")
@@ -237,16 +258,55 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
         # Check login screen responsive layout
         token_input = mobile_page.locator("#tok")
         expect(token_input).to_be_visible()
+        scroll_width = mobile_page.evaluate("() => document.documentElement.scrollWidth")
+        client_width = mobile_page.evaluate("() => document.documentElement.clientWidth")
+        self.assertLessEqual(scroll_width, client_width,
+                             f"Login page has horizontal overflow: {scroll_width} > {client_width}")
         mobile_page.screenshot(path=os.path.join(ARTIFACT_DIR, "13_mobile_login.png"))
 
         # Login on mobile
         token_input.fill(self.token)
         mobile_page.locator("#loginbtn").click()
         mobile_page.wait_for_load_state("networkidle")
+        expect(mobile_page.locator("nav.side")).to_be_visible()
 
-        # Verify mobile dashboard adapts cleanly
-        expect(mobile_page.locator("#main")).to_be_visible()
+        pages = [
+            "index.html", "platforms.html", "routes.html", "repos.html",
+            "stars.html", "log.html", "history.html", "tools.html", "settings.html"
+        ]
+
+        for p in pages:
+            if p != "index.html":
+                mobile_page.goto(f"{self.base_url}/{p}")
+                mobile_page.wait_for_load_state("networkidle")
+            # Verify no horizontal page overflow
+            scroll_w = mobile_page.evaluate("() => document.documentElement.scrollWidth")
+            client_w = mobile_page.evaluate("() => document.documentElement.clientWidth")
+            self.assertLessEqual(scroll_w, client_w,
+                                 f"Page {p} has horizontal overflow: scrollWidth {scroll_w} > clientWidth {client_w}")
+
+            # Verify top buttons are visible and within viewport
+            top_sync = mobile_page.locator("#top-sync")
+            expect(top_sync).to_be_visible()
+            box_sync = top_sync.bounding_box()
+            self.assertIsNotNone(box_sync)
+            self.assertLessEqual(box_sync["x"] + box_sync["width"], 375 + 1,
+                                 f"Page {p} top-sync overflows viewport")
+
+            top_logout = mobile_page.locator("#top-logout")
+            expect(top_logout).to_be_visible()
+            box_logout = top_logout.bounding_box()
+            self.assertIsNotNone(box_logout)
+            self.assertLessEqual(box_logout["x"] + box_logout["width"], 375 + 1,
+                                 f"Page {p} top-logout overflows viewport")
+
+        # Verify mobile dashboard screenshot
         mobile_page.screenshot(path=os.path.join(ARTIFACT_DIR, "14_mobile_dashboard.png"))
+
+        # Test mobile sign-out click works
+        mobile_page.locator("#top-logout").click()
+        mobile_page.wait_for_load_state("networkidle")
+        expect(mobile_page.locator("#tok")).to_be_visible()
         mobile_page.close()
 
     def test_05_sign_out_flow(self):

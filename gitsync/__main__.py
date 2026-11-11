@@ -80,6 +80,18 @@ def cmd_sync(args):
             print("no route targets '%s'" % args.to)
             return 2
     only = [r for r in (args.repos or "").split(",") if r.strip()]
+    if getattr(args, "retry_failed", False):
+        recs = SYNC.last_records(1)
+        failed = []
+        if recs:
+            for f in recs[-1].get("failures", []):
+                r = f.get("repo")
+                if r and r != "-":
+                    failed.append(r)
+        if not failed:
+            print("no failed repos in last run to retry")
+            return 0
+        only = list(set(only + failed))
     t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet,
                       only=only or None, dry_run=args.dry_run,
                       scheduled=args.scheduled)
@@ -1577,9 +1589,20 @@ def cmd_ci(args):
                                                     (p.stderr or
                                                      p.stdout).strip()[-160:]))
 
+    def c_unit():
+        import unittest
+        loader = unittest.TestLoader()
+        suite = loader.loadTestsFromName("tests.test_logic")
+        runner = unittest.TextTestRunner(stream=open(os.devnull, "w"), verbosity=0)
+        res = runner.run(suite)
+        if not res.wasSuccessful():
+            raise RuntimeError("%d failed, %d errors across %d tests"
+                               % (len(res.failures), len(res.errors), res.testsRun))
+
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("CLI smoke tests", c_cli)
+    check("unit checks (tests.test_logic)", c_unit)
 
     width = max(len(n) for n, _, _ in checks)
     failed = 0
@@ -1768,6 +1791,8 @@ def main(argv=None):
     sp.add_argument("--route", help="only this route")
     sp.add_argument("--to", help="only push to this platform")
     sp.add_argument("--repos", help="comma-separated repo names to sync")
+    sp.add_argument("--retry-failed", action="store_true",
+                    help="only retry repos that failed in the last run")
     sp.add_argument("--dry-run", action="store_true",
                     help="show what would change, change nothing")
     sp.add_argument("--scheduled", action="store_true",

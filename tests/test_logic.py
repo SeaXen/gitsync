@@ -14,9 +14,13 @@ except ImportError:
     from gitsync.tui import curses
 import json
 import os
+import subprocess
+import sys
 import tempfile
+import socket
 import time
 import unittest
+from unittest.mock import patch
 
 import gitsync.__main__ as M
 from gitsync import config as C
@@ -40,10 +44,23 @@ _TOKEN_ENV = ("GITHUB_TOKEN", "FORGEJO_TOKEN", "GITEA_TOKEN", "GITLAB_TOKEN",
               "GITSYNC_TELEGRAM_TOKEN", "GITSYNC_TELEGRAM_CHAT_ID",
               "GITSYNC_NOTIFY_ON")
 
+_real_connect = socket.socket.connect
+
+def _hermetic_connect(self, address):
+    host = address[0] if isinstance(address, tuple) and len(address) > 0 else address
+    if isinstance(address, str) or host in ("127.0.0.1", "localhost", "::1"):
+        return _real_connect(self, address)
+    raise RuntimeError("Real network access blocked in hermetic unit tests: %r" % (address,))
+
 
 def setUpModule():
     for k in _TOKEN_ENV:
         os.environ.pop(k, None)
+    socket.socket.connect = _hermetic_connect
+
+
+def tearDownModule():
+    socket.socket.connect = _real_connect
 
 
 # --------------------------------------------------------------- platforms
@@ -212,11 +229,44 @@ class TestHttpErrorHeaders(unittest.TestCase):
     def test_token_info_reports_rejected(self):
         p = P.make('gh', {'type': 'github', 'token': 'bad',
                           'url': 'https://github.com'})
-        p._api = lambda path, method="GET", payload=None: (
-            401, {"message": "Bad credentials"}, {})
-        info = p.token_info()
+        orig_http = P._http
+        P._http = lambda *a, **kw: (401, {"message": "Bad credentials"}, {})
+        try:
+            info = p.token_info()
+        finally:
+            P._http = orig_http
         self.assertTrue(info["has_token"])
         self.assertEqual(info.get("error"), "token rejected")
+
+    def test_token_info_reports_unreachable(self):
+        p = P.make('gh', {'type': 'github', 'token': 'bad',
+                          'url': 'https://github.com'})
+        orig_http = P._http
+        P._http = lambda *a, **kw: (None, "DNS lookup failed", {})
+        try:
+            info = p.token_info()
+        finally:
+            P._http = orig_http
+        self.assertTrue(info["has_token"])
+        self.assertEqual(info.get("error"), "unreachable")
+
+    def test_http_want_headers_tuple_length(self):
+        import urllib.request
+        orig_urlopen = urllib.request.urlopen
+        def fail(*a, **kw):
+            raise OSError("network down")
+        urllib.request.urlopen = fail
+        try:
+            res2 = P._http("GET", "http://127.0.0.1:9999", want_headers=False)
+            self.assertEqual(len(res2), 2)
+            self.assertIsNone(res2[0])
+
+            res3 = P._http("GET", "http://127.0.0.1:9999", want_headers=True)
+            self.assertEqual(len(res3), 3)
+            self.assertIsNone(res3[0])
+            self.assertEqual(res3[2], {})
+        finally:
+            urllib.request.urlopen = orig_urlopen
 
 
 # ------------------------------------------------------------------ config
@@ -609,6 +659,108 @@ class TestRedaction(unittest.TestCase):
                               "/x denied")
         self.assertNotIn("glpat-SECRET", out)
         self.assertIn("gitlab.com", out)
+
+    def test_clone_failed_redacts_credentials(self):
+        with tempfile.TemporaryDirectory() as td:
+            hub = os.path.join(td, "hub.git")
+            repo = {"name": "testrepo",
+                    "clone_url": "https://u:ghp_SECRET@github.com/u/testrepo.git"}
+            class FakeSource:
+                ptype = "github"
+            orig_run = P.run
+            def fake_run(cmd, *a, **kw):
+                if cmd[:2] == ["git", "clone"]:
+                    return 1, "", "fatal: unable to access 'https://u:ghp_SECRET@github.com/u/testrepo.git': 401\n"
+                return orig_run(cmd, *a, **kw)
+            P.run = fake_run
+            try:
+                status, detail, errors = SY.sync_repo(repo, FakeSource(), {}, "safe")
+            finally:
+                P.run = orig_run
+            self.assertEqual(status, "clone-failed")
+            self.assertNotIn("ghp_SECRET", detail)
+            self.assertIn("***@", detail)
+
+    def test_split_url_auth(self):
+        clean, user, token = SY.split_url_auth("https://x-access-token:ghp_ABC123@github.com/org/repo.git")
+        self.assertEqual(clean, "https://github.com/org/repo.git")
+        self.assertEqual(user, "x-access-token")
+        self.assertEqual(token, "ghp_ABC123")
+
+        clean2, user2, token2 = SY.split_url_auth("https://oauth2:glpat-xyz@gitlab.com/org/repo.git")
+        self.assertEqual(clean2, "https://gitlab.com/org/repo.git")
+        self.assertEqual(user2, "oauth2")
+        self.assertEqual(token2, "glpat-xyz")
+
+        clean3, user3, token3 = SY.split_url_auth("/local/path/repo.git")
+        self.assertEqual(clean3, "/local/path/repo.git")
+        self.assertIsNone(user3)
+        self.assertIsNone(token3)
+
+    def test_s2_token_not_persisted_in_mirror_git_config(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            old_m, old_d = C.MIRROR_DIR, C.DATA_DIR
+            C.MIRROR_DIR = os.path.join(td, "mirrors")
+            C.DATA_DIR = td
+            os.makedirs(C.MIRROR_DIR, exist_ok=True)
+            hub = os.path.join(C.MIRROR_DIR, "demo.git")
+            subprocess.run(["git", "init", "--bare", "-q", hub], check=True)
+            # simulate an old mirror containing a stored token
+            subprocess.run(["git", "-C", hub, "config", "remote.origin.url",
+                            "https://u:old_SECRET@github.com/u/demo.git"], check=True)
+
+            repo = {"name": "demo", "clone_url": "https://u:new_SECRET@github.com/u/demo.git"}
+            class FakeSource:
+                ptype = "github"
+            orig_run = P.run
+            try:
+                def fake_run(cmd, *a, **kw):
+                    if "remote" in cmd and "update" in cmd:
+                        return 0, "", ""
+                    return orig_run(cmd, *a, **kw)
+                P.run = fake_run
+                SY.sync_repo(repo, FakeSource(), {}, "safe")
+            finally:
+                P.run = orig_run
+                C.MIRROR_DIR, C.DATA_DIR = old_m, old_d
+
+            # Verify that stored remote.origin.url has no credentials
+            r = subprocess.run(["git", "-C", hub, "config", "--get", "remote.origin.url"],
+                               capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), "https://github.com/u/demo.git")
+            self.assertNotIn("@", r.stdout)
+
+    def test_s3_tokens_not_visible_in_process_arguments(self):
+        with tempfile.TemporaryDirectory() as td:
+            hub = os.path.join(td, "hub.git")
+            os.makedirs(hub)
+            class FakeTarget:
+                ptype = "github"
+                def ensure_repo(self, repo):
+                    return "https://x-access-token:ghp_TESTSECRET@github.com/org/testrepo.git"
+            captured = []
+            orig_run = P.run
+            try:
+                def fake_run(cmd, *a, **kw):
+                    captured.append((cmd, kw.get("env") or {}))
+                    return 0, "", ""
+                P.run = fake_run
+                SY._push_target("gh", FakeTarget(), {"name": "testrepo"}, hub, "safe")
+            finally:
+                P.run = orig_run
+
+            self.assertTrue(captured)
+            cmd, env = captured[0]
+            # argv must contain no secrets
+            for arg in cmd:
+                self.assertNotIn("ghp_TESTSECRET", arg)
+                self.assertNotIn("@", arg)
+            # push_args must be pure with clean url
+            self.assertIn("https://github.com/org/testrepo.git", cmd)
+            # credentials passed in private env var
+            self.assertEqual(env.get("GITSYNC_ASKPASS_TOKEN"), "ghp_TESTSECRET")
+            self.assertIn("GIT_ASKPASS", env)
 
 
 class TestScheduleStamp(unittest.TestCase):
@@ -1035,11 +1187,16 @@ class TestRestore(unittest.TestCase):
         seed = os.path.join(td, "seed")
         os.makedirs(hub)
         os.makedirs(seed)
-        subprocess.run(["git", "init", "-q", seed], capture_output=True)
-        subprocess.run(["git", "-C", seed, "commit", "--allow-empty", "-q",
-                        "-m", "x", "--author", "t <t@t>",
-                        "--date", "2020-01-01T00:00:00"],
-                       capture_output=True)
+        r_init = subprocess.run(["git", "init", "-q", seed], capture_output=True)
+        self.assertEqual(r_init.returncode, 0)
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        r_commit = subprocess.run(["git", "-C", seed] + ident + [
+            "commit", "--allow-empty", "-q",
+            "-m", "x", "--author", "t <t@t>",
+            "--date", "2020-01-01T00:00:00"],
+            capture_output=True)
+        self.assertEqual(r_commit.returncode, 0,
+                         "seed commit failed: %s" % (r_commit.stderr or b"").decode())
         for n in names:
             subprocess.run(["git", "init", "--bare", "-q",
                             os.path.join(hub, n + ".git")], capture_output=True)
@@ -1830,6 +1987,167 @@ class TestTenOutOfTenFixes(unittest.TestCase):
         self.assertIn("modalConfirm: modalConfirm", app)
         self.assertIn("formatDate: formatDate", app)
         self.assertIn("Intl.RelativeTimeFormat", app)
+
+
+class TestTUIDrawPerformance(unittest.TestCase):
+    def test_draw_dashboard_makes_no_subprocess_calls(self):
+        from gitsync import tui
+
+        class DummyWin:
+            def __init__(self, h=30, w=120):
+                self.h, self.w = h, w
+                self.strings = []
+
+            def getmaxyx(self):
+                return self.h, self.w
+
+            def erase(self):
+                self.strings.clear()
+
+            def addnstr(self, y, x, s, n, attr=0):
+                self.strings.append((y, x, s[:n], attr))
+
+            def noutrefresh(self):
+                pass
+
+        calls = []
+        orig_run = subprocess.run
+        orig_popen = subprocess.Popen
+
+        def fake_run(*args, **kwargs):
+            calls.append(('run', args))
+            raise AssertionError(f"subprocess.run called: {args}")
+
+        def fake_popen(*args, **kwargs):
+            calls.append(('popen', args))
+            raise AssertionError(f"subprocess.Popen called: {args}")
+
+        # Warm up cached status to prevent background thread
+        tui._status_cache["at"] = time.time()
+        tui._status_cache["txt"] = "active (running)"
+        tui._health["at"] = time.time()
+
+        try:
+            subprocess.run = fake_run
+            subprocess.Popen = fake_popen
+
+            win = DummyWin(30, 120)
+            tui.draw_dashboard(win, 30, 120, 0, 0, 0, 0, 0)
+            self.assertEqual(len(calls), 0, "draw_dashboard made subprocess calls")
+
+            # Compact layout
+            win_compact = DummyWin(15, 60)
+            tui.draw_dashboard(win_compact, 15, 60, 0, 0, 0, 0, 0)
+            self.assertEqual(len(calls), 0, "draw_dashboard compact made subprocess calls")
+
+            # Full draw
+            tui.draw(win)
+            self.assertEqual(len(calls), 0, "draw made subprocess calls")
+        finally:
+            subprocess.run = orig_run
+            subprocess.Popen = orig_popen
+
+    def test_draw_terminal_too_small(self):
+        from gitsync import tui
+
+        class DummyWin:
+            def __init__(self, h=8, w=20):
+                self.h, self.w = h, w
+                self.strings = []
+
+            def getmaxyx(self):
+                return self.h, self.w
+
+            def erase(self):
+                self.strings.clear()
+
+            def addnstr(self, y, x, s, n, attr=0):
+                self.strings.append((y, x, s[:n], attr))
+
+            def noutrefresh(self):
+                pass
+
+        win = DummyWin(8, 20)
+        tui.draw(win)
+        self.assertTrue(any("terminal too small" in s for _, _, s, _ in win.strings))
+
+
+class TestTUISmoke(unittest.TestCase):
+    def test_tui_pty_smoke(self):
+        try:
+            import pty
+            import select
+            import termios
+            import struct
+            import fcntl
+        except ImportError:
+            self.skipTest("pty/termios not available on this platform (Windows)")
+
+        master, slave = pty.openpty()
+        winsize = struct.pack("HHHH", 24, 80, 0, 0)
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, winsize)
+
+        env = dict(os.environ,
+                   TERM="xterm-256color",
+                   GITSYNC_CONFIG_DIR=tempfile.mkdtemp(),
+                   GITSYNC_DATA_DIR=tempfile.mkdtemp())
+        proc = subprocess.Popen([sys.executable, "-m", "gitsync", "tui"],
+                                stdin=slave, stdout=slave, stderr=slave,
+                                close_fds=True, env=env)
+        os.close(slave)
+        output = b""
+        start = time.time()
+        try:
+            while time.time() - start < 5.0:
+                r, _, _ = select.select([master], [], [], 0.2)
+                if r:
+                    chunk = os.read(master, 1024)
+                    if not chunk:
+                        break
+                    output += chunk
+                    if b"Dashboard" in output or b"gitsync" in output:
+                        os.write(master, b"q")
+                        break
+            proc.wait(timeout=3)
+            self.assertEqual(proc.returncode, 0)
+        finally:
+            os.close(master)
+            if proc.poll() is None:
+                proc.kill()
+
+
+class TestRetryFailed(unittest.TestCase):
+    def test_retry_failed_no_failures(self):
+        from gitsync import __main__ as main_mod
+        from types import SimpleNamespace
+        with patch.object(main_mod.SYNC, "last_records", return_value=[{"failures": []}]), \
+             patch.object(main_mod.C, "load_config", return_value={"platforms": {"p": {"type": "local"}}, "routes": []}), \
+             patch.object(main_mod.C, "enabled_platforms", return_value={"p": {}}):
+            args = SimpleNamespace(route=None, to=None, repos="", retry_failed=True, quiet=True, dry_run=False, scheduled=False)
+            rc = main_mod.cmd_sync(args)
+            self.assertEqual(rc, 0)
+
+    def test_retry_failed_with_failures(self):
+        from gitsync import __main__ as main_mod
+        from types import SimpleNamespace
+        recs = [{"failures": [{"route": "r1", "repo": "failed_repo_1", "error": "err"},
+                              {"route": "r1", "repo": "failed_repo_2", "error": "err"}]}]
+        captured = {}
+
+        def fake_run_sync(cfg, route_name=None, quiet=False, only=None, dry_run=False, scheduled=False):
+            captured["only"] = only
+            return {"ok": 2, "partial": 0, "failed": 0, "repos": 2, "elapsed_sec": 1.0, "planned": []}
+
+        with patch.object(main_mod.SYNC, "last_records", return_value=recs), \
+             patch.object(main_mod.SYNC, "run_sync", fake_run_sync), \
+             patch.object(main_mod.C, "load_config", return_value={"platforms": {"p": {"type": "local"}}, "routes": []}), \
+             patch.object(main_mod.C, "enabled_platforms", return_value={"p": {}}):
+            args = SimpleNamespace(route=None, to=None, repos="", retry_failed=True, quiet=True, dry_run=False, scheduled=False)
+            rc = main_mod.cmd_sync(args)
+            self.assertEqual(rc, 0)
+            self.assertIsNotNone(captured.get("only"))
+            self.assertIn("failed_repo_1", captured["only"])
+            self.assertIn("failed_repo_2", captured["only"])
 
 
 if __name__ == '__main__':

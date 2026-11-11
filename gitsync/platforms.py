@@ -120,8 +120,8 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
             # "token rejected" instead of crashing on a 401
             return (e.code, body, hdrs) if want_headers else (e.code, body)
         except Exception as e:
-            return None, str(e)[:200]
-    return None, "request failed after retries"
+            return (None, str(e)[:200], {}) if want_headers else (None, str(e)[:200])
+    return (None, "request failed after retries", {}) if want_headers else (None, "request failed after retries")
 
 
 # ---------------------------------------------------------------- GitHub
@@ -264,6 +264,8 @@ class GitHubPlatform:
                     "note": "gh CLI auth — expiry not exposed"}
         rc, out, hdrs = _http("GET", self._api_base() + "/user",
                               token=self.token, want_headers=True)
+        if rc is None:
+            return {"has_token": True, "error": "unreachable"}
         if rc in (401, 403):
             return {"has_token": True, "error": "token rejected"}
         if not isinstance(out, dict) or not out.get("login"):

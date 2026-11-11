@@ -113,6 +113,9 @@ def summary(results):
     """one-line digest for the TUI / doctor"""
     b = bad(results)
     if not b:
+        unverified = [r for r in results if r.get("level") == "unknown"]
+        if unverified:
+            return "%d token(s) unverified" % len(unverified)
         return "all tokens healthy"
     worst = sorted(b, key=lambda r: (r["days_left"] is None,
                                      r["days_left"] if r["days_left"] is not None

@@ -57,6 +57,21 @@ push modes), plus `python3 -m unittest tests.test_logic` in all three
 workflows. A `pre-push` hook runs the same locally
 (`gitsync ci --install-hook`).
 
+### Web UI testing (Playwright)
+
+The Web UI has automated end-to-end browser tests in `tests/test_webapp_playwright.py`
+covering authentication, shell navigation across all 9 pages, mobile responsiveness
+(375×667 zero overflow), modal dialogs, and logout.
+
+Test-only dependencies are allowed for running this suite:
+```bash
+pip install playwright
+playwright install chromium
+python3 -m unittest tests.test_webapp_playwright
+```
+In CI, Web UI testing runs as an optional job. The runtime `gitsync` application
+remains strictly Python standard library only (zero runtime dependencies).
+
 ## Adding a platform
 
 1. Add an adapter class in `gitsync/platforms.py` implementing
