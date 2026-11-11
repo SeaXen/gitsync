@@ -48,7 +48,7 @@
         '<button class="btn sm" data-a="dry" data-n="' + G.esc(r.name) + '" aria-label="Dry run route ' + G.esc(r.name) + '">Dry run</button>' +
         '<details class="more-menu" style="display:inline-block;position:relative">' +
           '<summary class="btn sm ghost" style="list-style:none;cursor:pointer" aria-label="More actions">⋯</summary>' +
-          '<div class="menu-pop" style="position:absolute;right:0;top:100%;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:8px;padding:6px;display:flex;flex-direction:column;gap:4px;min-width:110px;box-shadow:var(--shadow)">' +
+          '<div class="menu-pop" style="position:absolute;right:0;top:100%;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:var(--radius-md);padding:6px;display:flex;flex-direction:column;gap:4px;min-width:110px;box-shadow:var(--shadow)">' +
             '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="pause" data-n="' + G.esc(r.name) + '">' + (r.enabled ? "Pause" : "Resume") + '</button>' +
             '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="manage" data-n="' + G.esc(r.name) + '">Targets</button>' +
             '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="edit" data-n="' + G.esc(r.name) + '">Edit</button>' +

@@ -22,6 +22,7 @@ Credential helper reliability, network fault tolerance in token telemetry, TUI w
 - **Interactive Window Resize Handling**: Integrated `KEY_RESIZE` / `curses.update_lines_cols()` handling across all 15 modal and full-screen loops, ensuring clean redraws upon terminal geometry changes (e.g., 120x30 to 80x24 to 40x12).
 
 ### UI Polish & Route Scoping
+- **Design System Token Harmony**: Enforced unified semantic tokens across WebUI CSS and component scripts, aligning all radii (4px/9px/12px/14px/99px), type ramp steps (12px caption/label), and modal backdrop elevation to zero-drift specification.
 - **Accessible Mobile Top Bar**: Mobile action buttons feature clear `aria-label` and `title` tooltips, distinct play icon for sync triggers, and responsive topbar layout.
 - **Web Scheduler Install Action**: Converted raw anchor link in dashboard notice to an accessible action `<button>` wired to the scheduler install endpoint.
 - **Scoped Retry Failed**: `--retry-failed` CLI option supports route isolation when combined with `--route <name>`.

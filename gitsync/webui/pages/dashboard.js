@@ -140,7 +140,7 @@
     }
     var bad = (last.failed || 0) + (last.partial || 0);
     var retryBtn = (last.failed && last.failed > 0)
-      ? '<button class="btn btn-sm btn-warn" id="btn-retry-failed" style="margin-top:8px">Retry ' + last.failed + ' failed repo(s)</button>'
+      ? '<button class="btn sm warn" id="btn-retry-failed" style="margin-top:8px">Retry ' + last.failed + ' failed repo(s)</button>'
       : "";
     host.innerHTML =
       '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " OK</div>" +

@@ -29,7 +29,7 @@
           "<td class='mono " + (r.failed ? "l-bad" : "") + "'>" + (r.failed || 0) + "</td>" +
           "<td class='mono muted'>" + (r.repos || 0) + "</td>" +
           "<td class='mono muted'>" + (r.elapsed_sec || "?") + "s</td>" +
-          "<td><button class='btn btn-xs btn-ghost btn-run-report' data-idx='" + i + "'>Report</button></td></tr>" +
+          "<td><button class='btn sm ghost btn-run-report' data-idx='" + i + "'>Report</button></td></tr>" +
           (fails ? "<tr><td colspan='7' style='padding-top:0'>" + fails + "</td></tr>" : "");
       }).join("");
       host.innerHTML = sparkHtml +

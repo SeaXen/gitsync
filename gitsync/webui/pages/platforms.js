@@ -58,7 +58,7 @@
       var extra = r.path || r.url || "";
       var rateHtml = "";
       if (r.rate_limit) {
-        rateHtml = "<div style='font-size:11px;color:#8b949e;margin-top:2px'>" +
+        rateHtml = "<div class='muted' style='font-size:12px;margin-top:2px'>" +
           "Rate: " + r.rate_limit.remaining + "/" + r.rate_limit.limit +
           " (" + r.rate_limit.resets_in_mins + "m)</div>";
       }
@@ -267,14 +267,14 @@
       var userCode = d.user_code;
       var uri = d.verification_uri;
       host.innerHTML =
-        '<div class="modal-backdrop" id="gh-backdrop">' +
-          '<div class="modal" role="dialog" aria-modal="true" style="max-width:480px">' +
-            '<div class="modal-head"><h2 class="modal-title">GitHub Browser Login</h2></div>' +
+        '<div class="modal-backdrop" id="gh-backdrop" role="presentation">' +
+          '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="gh-modal-title" style="max-width:480px">' +
+            '<div class="modal-head"><h2 class="modal-title" id="gh-modal-title">GitHub Browser Login</h2></div>' +
             '<div class="modal-body">' +
               '<p>Authorize <strong>gitsync</strong> using GitHub Device Flow:</p>' +
               '<div style="text-align:center;margin:16px 0">' +
-                '<div style="font-size:12px;color:#8b949e;margin-bottom:6px">Your one-time code:</div>' +
-                '<div style="font-family:monospace;font-size:24px;font-weight:bold;letter-spacing:3px;background:#161b22;padding:12px 18px;border:1px solid #30363d;border-radius:8px;display:inline-block;color:#58a6ff">' +
+                '<div class="muted" style="font-size:12px;margin-bottom:6px">Your one-time code:</div>' +
+                '<div style="font-family:var(--mono);font-size:24px;font-weight:bold;letter-spacing:3px;background:var(--panel2);padding:12px 18px;border:1px solid var(--line2);border-radius:var(--radius-md);display:inline-block;color:var(--accent)">' +
                   G.esc(userCode) +
                 '</div>' +
               '</div>' +
@@ -292,10 +292,22 @@
         '</div>';
 
       var closed = false;
-      document.getElementById("gh-modal-close").addEventListener("click", function () {
+      function dismiss() {
         closed = true;
+        document.removeEventListener("keydown", onModalKey);
         host.innerHTML = "";
-      });
+      }
+      function onModalKey(e) {
+        if (e.key === "Escape") { dismiss(); }
+      }
+      document.addEventListener("keydown", onModalKey);
+      document.getElementById("gh-modal-close").addEventListener("click", dismiss);
+      var backdropEl = document.getElementById("gh-backdrop");
+      if (backdropEl) {
+        backdropEl.addEventListener("click", function (e) {
+          if (e.target === backdropEl) dismiss();
+        });
+      }
 
       var pollInterval = (d.interval || 5) * 1000;
       function poll() {

@@ -18,6 +18,7 @@ colors:
   ok: "#3fb950"
   bad: "#f85149"
   warn: "#d29922"
+  shadow: "rgba(0,0,0,.5)"
 typography:
   sans:
     fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
@@ -28,6 +29,17 @@ typography:
     fontSize: "12.5px"
     lineHeight: "1.75"
     letterSpacing: "-0.01em"
+  label:
+    fontFamily: "{typography.sans.fontFamily}"
+    fontSize: "12px"
+    lineHeight: "1.4"
+    letterSpacing: "0.05em"
+    fontWeight: "600"
+    textTransform: "uppercase"
+  caption:
+    fontFamily: "{typography.sans.fontFamily}"
+    fontSize: "12px"
+    lineHeight: "1.4"
   h1:
     fontFamily: "{typography.sans.fontFamily}"
     fontSize: "24px"
