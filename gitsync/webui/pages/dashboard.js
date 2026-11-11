@@ -52,9 +52,15 @@
     G.api("GET", "/api/log?tail=60").then(fillLog).catch(function (e) {
       fillLog({ error: e });
     });
+    G.api("GET", "/api/settings").then(fillSettings).catch(function (e) {
+      fillSettings({ error: e });
+    });
   }
 
+  var lastStatus = null;
+
   function fillStatus(s) {
+    lastStatus = s;
     var sub = document.getElementById("dash-sub");
     if (sub) {
       if (s.schedule !== "off" && (!s.scheduler || s.scheduler.indexOf("not scheduled") !== -1 || s.scheduler.indexOf("none") !== -1)) {
@@ -103,8 +109,12 @@
     var host = document.getElementById("plats-body");
     var rows = d.platforms || [];
     var live = rows.filter(function (r) { return r.enabled && r.ok; }).length;
+    var totalRepos = rows.reduce(function (n, r) {
+      return n + (r.repo_count || 0);
+    }, 0);
     var lbl = document.getElementById("plats-label");
-    if (lbl) lbl.textContent = "Platforms: " + rows.length + " sites, " + live + " connected";
+    if (lbl) lbl.textContent = "Platforms: " + rows.length + " sites, " + live +
+      " connected · " + totalRepos + " repos";
     if (!rows.length) {
       host.innerHTML = G.emptyState("No platforms", "Add one on the Platforms page.", "platforms");
       return;
@@ -121,9 +131,111 @@
         right = '<span class="bad" title="' + G.esc(r.info) + '">' + G.esc(cleanErr) + "</span>";
       }
       return '<div class="row"><span><i class="dot ' + dot + '"></i>' +
-        G.esc(r.name) + '</span><span class="mono muted">' + right + "</span></div>";
+        G.esc(r.name) + '</span><span class="mono muted">' + right + "</span>" +
+        // "which repos?" — expandable list, fetched once per platform
+        (r.ok && r.enabled
+          ? ' <button class="linkbtn muted" data-repos="' + G.esc(r.name) +
+            '" title="Show the repositories on this site" style="font-size:12px">repos ▾</button>'
+          : "") + "</span></div>" +
+        '<div class="repo-list" data-repolist="' + G.esc(r.name) + '" hidden></div>';
     }).join("");
+    host.querySelectorAll("[data-repos]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var name = btn.getAttribute("data-repos");
+        var list = host.querySelector('[data-repolist="' + name + '"]');
+        if (!list) return;
+        if (!list.hidden) {          // collapse
+          list.hidden = true;
+          btn.textContent = "repos ▾";
+          return;
+        }
+        if (list.dataset.loaded) {
+          list.hidden = false;
+          btn.textContent = "repos ▴";
+          return;
+        }
+        list.textContent = "loading…";
+        list.hidden = false;
+        btn.textContent = "repos ▴";
+        G.api("GET", "/api/repos?platform=" + encodeURIComponent(name))
+          .then(function (d) {
+            var repos = (d.repos || []).slice().sort(function (a, b) {
+              return a.name.localeCompare(b.name);
+            });
+            list.dataset.loaded = "1";
+            if (!repos.length) {
+              list.innerHTML = '<div class="muted">no repositories</div>';
+              return;
+            }
+            list.innerHTML = repos.map(function (r) {
+              return '<div class="r"><span>' + G.esc(r.name) + '</span><span class="' +
+                (r.mirrored ? "ok" : "muted") + '">' +
+                (r.mirrored ? "mirrored" : "not mirrored") + "</span></div>";
+            }).join("");
+          })
+          .catch(function (e) {
+            list.innerHTML = G.errorBox(e);
+          });
+      });
+    });
   }
+  function modeChip(mode) {
+    var full = mode === "full";
+    return '<span class="chip ' + (full ? "warn" : "ok") + '" title="' +
+      (full
+        ? "full = exact mirror. Pushes --mirror and prunes destination branches and tags that no longer exist on the source — destructive."
+        : "safe = never deletes or force-pushes. Targets keep branches and tags the source no longer has.") +
+      '">' + (full ? "full — prunes" : "safe — never deletes") + "</span>";
+  }
+
+  // "what is it doing right now?" — mode, schedule, next run and the rest of
+  // the effective settings, on the dashboard instead of buried in Settings
+  function fillSettings(d) {
+    var host = document.getElementById("settings-body");
+    if (!host) return;
+    if (d.error) { host.innerHTML = G.errorBox(d.error); return; }
+    var st = d.settings || {};
+    var s = lastStatus || {};
+    var notify = st.notify || {};
+    var channels = [];
+    if (notify.discord_set) channels.push("Discord");
+    if (notify.telegram_set) channels.push("Telegram");
+    var sched = (st.schedules || {})[st.schedule] || st.schedule || "—";
+    var row = function (k, v) {
+      return "<dt>" + G.esc(k) + '</dt><dd class="mono">' + v + "</dd>";
+    };
+    host.innerHTML =
+      '<dl class="kv">' +
+      row("Sync mode", modeChip(st.mode) + ' <span class="muted">' +
+          (st.mode === "full"
+            ? "destinations are pruned to match the source"
+            : "destinations are never pruned or force-pushed") + "</span>") +
+      row("State", s.paused
+          ? '<span class="chip paused">paused — nothing will run</span>'
+          : '<span class="chip ok">running on schedule</span>') +
+      row("Schedule", G.esc(sched) + ' <span class="muted">next run ' +
+          G.esc(s.next_run || "—") + "</span>") +
+      row("Scheduler", G.esc(s.scheduler || st.scheduler || "—")) +
+      row("Workers / forks", G.esc(st.workers) + " · forks " +
+          (st.include_forks ? "included" : "excluded") +
+          " · pace " + (st.pace || 0) + "s") +
+      row("Mesh conflicts", G.esc(st.mesh_conflict || "newest")) +
+      row("Notify", channels.length
+          ? G.esc(channels.join(" + ")) + " on " + G.esc(notify.on)
+          : '<span class="muted">not set</span>') +
+      row("Config", '<span class="muted">' + G.esc((st.paths || {}).config) +
+          "</span>") +
+      row("Mirror hub", '<span class="muted">' + G.esc((st.paths || {}).mirror) +
+          "</span>") +
+      row("Log file", '<span class="muted">' + G.esc((st.paths || {}).log) +
+          "</span>") +
+      row("Version", G.esc(s.version || d.version || "—")) +
+      "</dl>" +
+      '<p class="muted" style="font-size:12.5px;margin:12px 0 0">' +
+      "Change these on the <a href=\"settings.html\">Settings</a> page, " +
+      "or from the terminal: <code>gitsync options</code>.</p>";
+  }
+
   function fillPlatErr(e) {
     document.getElementById("plats-body").innerHTML = G.errorBox(e);
   }
@@ -214,11 +326,19 @@
       return;
     }
     host.innerHTML = rows.map(function (r) {
-      var badge = '<span class="chip ' + (r.mode === "full" ? "warn" : "") + '">mode: ' + G.esc(r.mode || "safe") + '</span>';
+      var badge = '<span class="chip ' + (r.mode === "full" ? "warn" : "") + '" title="' +
+        (r.mode === "full"
+          ? "full: prunes destination branches and tags that no longer exist on the source"
+          : "safe: never deletes or force-pushes on destinations") +
+        '">mode: ' + G.esc(r.mode || "safe") + "</span>";
       var state = !r.enabled ? '<span class="chip paused">paused</span>' : '<span class="chip">active</span>';
       return '<div class="row" style="padding:4px 0"><span><strong>' + G.esc(r.name) + '</strong> (' +
         G.esc(r.source) + ' → ' + G.esc(r.targets.join(", ")) + ')</span><span>' + badge + ' ' + state + '</span></div>';
     }).join("");
+    host.innerHTML += '<p class="muted" style="font-size:12.5px;margin:10px 0 0">' +
+      "<strong>safe</strong> never deletes or force-pushes — destinations keep " +
+      "branches and tags the source no longer has. <strong>full</strong> is an " +
+      "exact mirror and prunes what the source dropped (destructive).</p>";
   }
 
   function fillLog(d) {
@@ -252,14 +372,32 @@
         '<section class="card"><p class="label">Disk &amp; Health</p>' +
           '<div id="health-body">' + G.loading() + "</div></section>" +
       "</div>" +
-      '<section class="card"><p class="label">Routes Status ' +
+      '<section class="card" id="settings-card"><p class="label">Current Settings ' +
+        '<a href="settings.html" style="text-transform:none;letter-spacing:0">Change →</a></p>' +
+        '<div id="settings-body">' + G.loading() + "</div></section>" +
+      '<section class="card" id="routes-card"><p class="label">Routes Status ' +
         '<a href="routes.html" style="text-transform:none;letter-spacing:0">Manage routes →</a></p>' +
         '<div class="stack" id="routes-body">' + G.loading() + "</div></section>" +
-      '<section class="card"><p class="label">Log ' +
+      '<section class="card" id="log-card"><p class="label">Log ' +
         '<a href="log.html" style="text-transform:none;letter-spacing:0">View full log →</a></p>' +
-        '<div class="mono log" id="logtail">' + G.loading() + "</div></section>";
+        '<div class="mono log" id="logtail">' + G.loading() + "</div></section>" +
+      '<section class="card" id="ref-card"><p class="label">Quick reference</p>' +
+        '<div class="mono" style="line-height:2">' +
+        '<div><b>gitsync sync</b> — sync every enabled route now</div>' +
+        '<div><b>gitsync sync --dry-run</b> — show what would change, change nothing</div>' +
+        '<div><b>gitsync fix --dry-run</b> — find drift without pushing</div>' +
+        '<div><b>gitsync doctor</b> — check tokens, mirrors and routes</div>' +
+        '<div><b>gitsync tui</b> — the terminal dashboard</div>' +
+        "</div>" +
+        '<p class="muted" style="font-size:12.5px;margin:12px 0 0">' +
+        "On this page: <b>Sync now</b> and <b>Dry run</b> are in the top bar, " +
+        "<b>Pause</b> suspends every run, and each panel has a minimise button.</p>" +
+      "</section>";
 
     refresh();
     G.onSync(function (jobId) { attachSync(jobId); });
+    ["settings-card", "routes-card", "log-card", "ref-card"].forEach(function (id) {
+      G.collapsible(document.getElementById(id), id);
+    });
   });
 })();

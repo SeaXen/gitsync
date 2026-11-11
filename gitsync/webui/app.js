@@ -25,7 +25,9 @@
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5"/></svg>',
     alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
     info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
-    box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></svg>'
+    box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></svg>',
+    caretd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg>',
+    caretr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg>'
   };
 
   var NAV = [
@@ -369,6 +371,31 @@
     return '<div class="state error">' + esc(apiError(err)) + "</div>";
   }
 
+  // ---- collapsible card ("minimise") — state remembered per card id ----
+  function collapsible(card, key) {
+    if (!card) return;
+    var label = card.querySelector(".label");
+    if (!label) return;
+    var btn = el('<button class="min" type="button" aria-expanded="true"></button>');
+    label.appendChild(btn);
+    var store = "gs:col:" + key;
+    var open = true;
+    try { open = localStorage.getItem(store) !== "0"; } catch (e) {}
+    function apply() {
+      card.classList.toggle("collapsed", !open);
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      btn.innerHTML = open ? I.caretd : I.caretr;
+      btn.title = open ? "Minimise panel" : "Expand panel";
+      btn.setAttribute("aria-label", btn.title);
+    }
+    btn.addEventListener("click", function () {
+      open = !open;
+      try { localStorage.setItem(store, open ? "1" : "0"); } catch (e) {}
+      apply();
+    });
+    apply();
+  }
+
   // ---- login gate ----
   function showLogin() {
     if (document.body.dataset.login) return;
@@ -588,7 +615,7 @@
     watchJob: watchJob, showLogin: showLogin, renderShell: renderShell,
     el: el, bar: bar, field: field, select: select, loading: loading,
     emptyState: emptyState, errorBox: errorBox, startSync: startSync,
-    onSync: onSync, refreshStatus: refreshStatus,
+    onSync: onSync, refreshStatus: refreshStatus, collapsible: collapsible,
     mount: function (name, fn) { pages[name] = fn; }
   };
 
