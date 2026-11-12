@@ -22,7 +22,9 @@
       toolCard("compare", "Compare (drift)", "Check every repo's HEAD matches across a route. Read-only, can be slow.",
         f("Route (blank = all)", '<input type="text" id="compare-route" name="route" placeholder="all…">')) +
       toolCard("fix", "Fix drift", "Detect divergence and re-sync the mismatched repos.",
-        f("Route (blank = all)", '<input type="text" id="fix-route" name="route" placeholder="all…">')) +
+        f("Route (blank = all)", '<input type="text" id="fix-route" name="route" placeholder="all…">') +
+        '<div class="field"><label>Options</label>' +
+        '<label class="check"><input type="checkbox" id="fix-dry" name="fix_dry_run"> dry run (report only)</label></div>') +
       toolCard("tokens", "Token health", "Check every credential for expiry / revocation.", "") +
       toolCard("disk", "Disk usage", "Hub size, per-platform size, free space, orphans.",
         f("Top N", '<input type="number" id="disk-top" name="top" value="10" min="0" inputmode="numeric">') +
@@ -65,7 +67,10 @@
     if (kind === "doctor") { body = {}; label = "doctor"; }
     else if (kind === "doctorfix") { body = { fix: true }; label = "doctor --fix"; }
     else if (kind === "compare") { body = { route: val("compare-route") }; label = "compare"; }
-    else if (kind === "fix") { body = { route: val("fix-route") }; label = "fix"; }
+    else if (kind === "fix") {
+      body = { route: val("fix-route") };
+      if (checked("fix-dry")) { body.dry_run = true; label = "fix --dry-run"; }
+    }
     else if (kind === "tokens") { body = {}; label = "tokens"; }
     else if (kind === "disk") { body = { top: val("disk-top"), orphans: checked("disk-orphans") }; label = "disk"; }
     else if (kind === "gc") {

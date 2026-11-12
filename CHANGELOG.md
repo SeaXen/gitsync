@@ -6,6 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Opt-in repository deletion (option C)
+- **Per-target opt-in**: a route gains `"prune_repos": ["gitlab"]` — set on the Routes page (“Delete extra repos”, one checkbox per target) or in `config.json`. Only names that are actually targets of that route are accepted; a string is accepted as well as a list.
+- **Four locks, all of which must be open**: the route names the target, the caller asks for it (`gitsync sync --prune-repos`, `gitsync prune --yes`, or the WebUI action), the route is in **full** mode, and the run is **not** scheduled — repo deletion is never something the timer decides.
+- **`gitsync prune`** (new command): dry-run by default, lists `target/repo` per extra repository, deletes only with `--yes`. `sync --prune-repos` does the same inside a normal sync and prints `repo deletion: N deleted, N failed`.
+- **WebUI**: the Repos matrix gains a **“Delete them…”** button when the route allows it and extras exist; it shows the exact list, then a second modal that requires **typing the route name** (a wrong entry deletes nothing). Deleting streams live output into its own card and re-runs the comparison afterwards. With no opt-in the button is replaced by a hint pointing at the Routes page.
+- **Platforms** gained `delete_repo()`: GitHub/GitLab/Forgejo/Gitea use their DELETE API (GitLab by project path), local folders `rmtree` the bare repo. Deleting something that is already gone is not an error.
+- **Refuses to delete when the source lists nothing** — a failed listing or an empty account must never be read as “delete everything”.
+- Tests: not-opted-in, unknown target filtered, dry-run plans and deletes nothing, `--yes` deletes only the extra repo, safe mode refuses, empty source refuses, local delete is idempotent.
+
+### WebUI gaps closed
+- **Stop button** in the top bar while a sync runs (`POST /api/sync/cancel`) — the browser had no equivalent of the TUI's `X`.
+- **Run while paused**: pausing used to be a one-way door from the browser; Sync/Dry-run now ask “Sync is paused — run anyway?” and pass `--force`.
+- **`fix --dry-run`** is reachable from the Tools page (checkbox), so drift can be previewed without pushing.
+- The shell polls `/api/status` every 15s (only while the tab is visible) so a run started by the timer or another browser still shows Stop.
+
+### Docs
+- README: the container's TUI command is `python3 -m gitsync tui` (`bin/` is not on `PATH`), and Docker is documented as having **no scheduler**, with a sidecar example.
+
 ### The matrix loads by default
 - **Repos page auto-runs the comparison** on open: `GET /api/compare` returns the last result (rendered immediately, ~2s on a revisit) and a stale or missing one refreshes in the background (~16s for 40 repos × 4 sites). "Compare all sites" / "Re-run" still forces it.
 - The server caches the last compare matrix for 5 minutes and **drops it when any sync/fix/restore/mirror job finishes**, because the answer just changed. A failed compare is never cached.

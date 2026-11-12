@@ -138,7 +138,7 @@ private visibility. If GitHub disappears tomorrow, you still have everything.
 |---|---|---|
 | **Install** | `curl -fsSL https://raw.githubusercontent.com/SeaXen/gitsync/main/quickinstall.sh \| bash` | `docker compose up -d` |
 | **You get** | CLI + **TUI** + **web UI** on the box | **web UI** in a container |
-| **Terminal UI** | `gitsync` / `gitsync tui` | `docker exec -it gitsync gitsync tui` |
+| **Terminal UI** | `gitsync` / `gitsync tui` | `docker exec -it gitsync python3 -m gitsync tui` |
 | **Browser UI** | `gitsync web` → `http://127.0.0.1:7765` (this machine) | `http://<host>:7765` (LAN, port published) |
 | **Share on the LAN** | `gitsync web --bind 0.0.0.0`, or always-on: `gitsync web --install` | already LAN via `-p 7765:7765` |
 | **Configure** | `gitsync setup`, the TUI, or the web UI | the web UI (Platforms + Routes) |
@@ -148,6 +148,21 @@ Pick one (or run both on different ports). The native web UI binds **localhost**
 by default so it's private to the machine; make it reachable from other devices
 with `--bind 0.0.0.0` or the always-on service. Docker is the "just serve the
 dashboard" path — configure it entirely from the browser, no host install.
+
+**Docker does not schedule syncs.** The image has no systemd and no cron — it
+runs `gitsync web` and nothing else, so nothing syncs until you press *Sync
+now*. To sync on a timer, run it on the host (the native path installs one for
+you) or add a sidecar:
+
+```yaml
+  gitsync-sync:
+    image: gitsync:latest
+    entrypoint: ["/bin/sh", "-c", "while true; do python3 -m gitsync sync --scheduled --quiet; sleep 3600; done"]
+    volumes: [gitsync-config:/data/config, gitsync-share:/data/share]
+```
+
+The CLI works inside the container too (`docker exec -it gitsync python3 -m
+gitsync sync`), which is handy for a one-off run.
 Either way, authentication is required on every request.
 
 ---

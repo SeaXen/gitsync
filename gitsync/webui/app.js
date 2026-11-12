@@ -22,6 +22,7 @@
     play: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><polygon points="7 4 20 12 7 20 7 4"/></svg>',
     eye: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>',
     logout: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>',
+    stop: '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none" aria-hidden="true" focusable="false"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M20 6L9 17l-5-5"/></svg>',
     alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
     info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
@@ -45,6 +46,7 @@
   var pages = {};
   var syncListeners = [];
   var _activeJob = null;
+  var pausedNow = false;      // set by refreshStatus(), gates "run anyway"
 
   // ---- escaping: all dynamic data goes through here before innerHTML ----
   function esc(s) {
@@ -160,6 +162,9 @@
       var cancelLabel = opts.cancelText || "Cancel";
       var danger = (opts.danger !== undefined) ? !!opts.danger
         : /remove|delete|disable|rewrite|prune/i.test(message + " " + title);
+      // prompt: the user must retype this exact text (used before anything
+      // that deletes); resolves with the typed string, or false
+      var prompt = opts.prompt || "";
 
       var prevFocus = document.activeElement;
       var backdrop = document.createElement("div");
@@ -178,6 +183,14 @@
           '<h2 class="modal-title" id="gs-modal-title">' + esc(title) + "</h2>" +
         "</div>" +
         '<div class="modal-body" id="gs-modal-desc">' + esc(message) + "</div>" +
+        (prompt
+          ? '<div class="modal-body" style="padding-top:0">' +
+            field("Type " + prompt,
+                  '<input type="text" id="gs-modal-prompt" autocomplete="off" ' +
+                  'spellcheck="false" placeholder="' + esc(prompt) + '">') +
+            '<p class="muted" id="gs-modal-prompt-err" role="alert" ' +
+            'style="min-height:16px;font-size:12.5px;margin:0"></p></div>'
+          : "") +
         '<div class="modal-foot">' +
           '<button class="btn" id="gs-modal-cancel" type="button">' + esc(cancelLabel) + "</button>" +
           '<button class="btn ' + (danger ? "danger" : "primary") + '" id="gs-modal-ok" type="button">' + esc(confirmLabel) + "</button>" +
@@ -188,6 +201,7 @@
 
       var okBtn = modal.querySelector("#gs-modal-ok");
       var cancelBtn = modal.querySelector("#gs-modal-cancel");
+      var promptEl = modal.querySelector("#gs-modal-prompt");
 
       function cleanup(result) {
         document.removeEventListener("keydown", onKey);
@@ -202,22 +216,36 @@
           cleanup(false);
         } else if (e.key === "Tab") {
           var focusable = [cancelBtn, okBtn];
+          if (promptEl) focusable = [promptEl, cancelBtn, okBtn];
           var idx = focusable.indexOf(document.activeElement);
           if (e.shiftKey) {
             if (idx <= 0) { focusable[focusable.length - 1].focus(); e.preventDefault(); }
           } else {
             if (idx === -1 || idx >= focusable.length - 1) { focusable[0].focus(); e.preventDefault(); }
           }
+        } else if (e.key === "Enter" && promptEl) {
+          e.preventDefault();
+          okBtn.click();
         }
       }
 
       cancelBtn.addEventListener("click", function () { cleanup(false); });
-      okBtn.addEventListener("click", function () { cleanup(true); });
+      okBtn.addEventListener("click", function () {
+        if (!promptEl) { cleanup(true); return; }
+        var typed = (promptEl.value || "").trim();
+        if (typed !== prompt) {
+          var err = modal.querySelector("#gs-modal-prompt-err");
+          if (err) err.textContent = "that does not match — nothing was deleted";
+          promptEl.focus();
+          return;
+        }
+        cleanup(typed);
+      });
       backdrop.addEventListener("click", function (e) {
         if (e.target === backdrop) cleanup(false);
       });
       document.addEventListener("keydown", onKey);
-      (danger ? cancelBtn : okBtn).focus();
+      (promptEl || (danger ? cancelBtn : okBtn)).focus();
     });
   }
 
@@ -494,6 +522,9 @@
           '<span class="status" id="top-status"><span class="pip"></span>' +
             '<span id="top-status-text" role="status">connecting…</span></span>' +
           '<div class="spacer"></div>' +
+          '<button class="btn ghost" id="top-stop" title="Stop the running sync" ' +
+            'aria-label="Stop the running sync" style="display:none">' + I.stop +
+            "<span>Stop</span></button>" +
           '<button class="btn ghost" id="top-pause" title="Pause / resume background sync" aria-label="Pause / resume background sync">' +
             '<span id="top-pause-icon" aria-hidden="true">' + I.pause + "</span>" +
             '<span id="top-pause-text">Pause</span></button>' +
@@ -533,16 +564,40 @@
   function wireTopbar() {
     var dry = document.getElementById("top-dry");
     var sync = document.getElementById("top-sync");
+    var stop = document.getElementById("top-stop");
     var pauseBtn = document.getElementById("top-pause");
     var bar = document.getElementById("top-progress");
     function run(d, btn) {
-      busy(btn, function () { return startSync({ dry_run: d }); })
-        .catch(function (e) {
+      var go = function (force) {
+        return busy(btn, function () {
+          return startSync({ dry_run: d, force: force });
+        }).catch(function (e) {
           if (e.status === 409) toast(e.error || "a sync is already running", "warn");
         });
+      };
+      // global pause is a real gate: without --force the engine refuses, so
+      // the browser could not run a sync at all until it was unpaused
+      if (pausedNow) {
+        return modalConfirm({
+          title: "Sync is paused",
+          message: "Background sync is paused globally. Run this sync anyway?",
+          confirmText: "Run anyway",
+          danger: false
+        }).then(function (ok) { if (ok) return go(true); });
+      }
+      return go(false);
     }
     if (dry) dry.addEventListener("click", function () { run(true, dry); });
     if (sync) sync.addEventListener("click", function () { run(false, sync); });
+    if (stop) {
+      stop.addEventListener("click", function () {
+        busy(stop, function () {
+          return api("POST", "/api/sync/cancel", {}).then(function () {
+            toast("stopping the sync…", "warn");
+          }).catch(function (e) { toast(apiError(e), "bad"); });
+        });
+      });
+    }
     if (pauseBtn) {
       pauseBtn.addEventListener("click", function () {
         busy(pauseBtn, function () {
@@ -556,6 +611,7 @@
 
     onSync(function (jobId) {
       setStatus("syncing…", "live");
+      if (stop) stop.style.display = "";        // show it the moment it starts
       if (bar) { bar.style.width = "4%"; bar.setAttribute("aria-valuenow", "4"); }
       watchJob("/api/sync/stream?job_id=" + encodeURIComponent(jobId), {
         onProgress: function (p) {
@@ -567,6 +623,7 @@
         },
         onDone: function (d) {
           if (bar) bar.style.width = "100%";
+          if (stop) stop.style.display = "none";
           setTimeout(function () { if (bar) bar.style.width = "0%"; }, 800);
           setStatus(d.exit === 0 ? "sync complete" :
                     "sync finished (exit " + d.exit + ")", d.exit === 0 ? "ok" : "");
@@ -585,12 +642,21 @@
         syncListeners.forEach(function (cb) { try { cb(s.job_id, {}); } catch (e) {} });
       }
     }).catch(function () {});
+    // a run started elsewhere (the timer, another browser) must still show
+    // the Stop button, so the status is polled — /api/status is cached and
+    // cheap, and this is the only always-on request the shell makes
+    setInterval(function () {
+      if (document.visibilityState === "visible") refreshStatus();
+    }, 15000);
   }
 
   function refreshStatus() {
     api("GET", "/api/status").then(function (s) {
       var v = document.getElementById("side-version");
       if (v) v.textContent = "gitsync " + s.version;
+      pausedNow = !!s.paused;
+      var stop = document.getElementById("top-stop");
+      if (stop) stop.style.display = s.syncing ? "" : "none";
       var pBtn = document.getElementById("top-pause");
       var pTxt = document.getElementById("top-pause-text");
       var pIcon = document.getElementById("top-pause-icon");

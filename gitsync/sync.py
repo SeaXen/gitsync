@@ -944,13 +944,17 @@ def _short_error(err, limit=160):
 
 
 def run_sync(cfg=None, route_name=None, quiet=False, only=None,
-             dry_run=False, scheduled=False, force=False):
+             dry_run=False, scheduled=False, force=False, prune_repos=False):
     """Run all routes (or one). Returns a summary dict.
 
     dry_run=True    computes what would change without touching anything.
     scheduled=True  skip routes whose own schedule says they are not due
                     yet (this is what the systemd timer uses).
     force=True      run even if sync is paused globally.
+    prune_repos=True delete, on the targets a route names in
+                    "prune_repos", every repository the source does not
+                    have. Refused when scheduled: repo deletion is never
+                    something an unattended timer decides.
     """
     global _start
     # one run at a time — the timer and manual runs must never overlap
@@ -1182,6 +1186,9 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                         {"route": route.get("name"), "repo": repo["name"],
                          "error": "; ".join(errors)[:200]})
 
+        if prune_repos:
+            _prune_route_repos(cfg, route, repos, dry_run, totals)
+
     elapsed = round(time.time() - _start, 1)
     totals["elapsed_sec"] = elapsed
     totals["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1211,6 +1218,94 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
     except OSError:
         pass
     return totals
+
+
+def prune_repos(cfg, route, dry_run=False):
+    """repositories to delete per target: present on a target, absent on the
+    source. Read-only; nothing is deleted here.
+
+    Returns {target: [{"name": …, "why": …}]} and skips any target the route
+    has not explicitly opted in via "prune_repos".
+    """
+    out = {}
+    source = P.make(route["source"], C.platform(cfg, route["source"]))
+    try:
+        src_names = {r["name"] for r in source.list_repos()}
+    except Exception as e:
+        log("  prune: cannot list the source — nothing will be deleted (%s)"
+            % str(e)[:120])
+        return out
+    if not src_names:
+        # an empty source list means the listing failed or the account is
+        # empty; either way deleting everything would be catastrophic
+        log("  prune: source lists no repositories — refusing to delete")
+        return out
+    for tname in C.prune_targets(cfg, route):
+        tp = C.platform(cfg, tname)
+        if not tp or not tp.get("enabled"):
+            continue
+        try:
+            have = P.make(tname, tp).list_repos()
+        except Exception as e:
+            log("  prune: cannot list %s — skipped (%s)"
+                % (tname, str(e)[:100]))
+            continue
+        gone = [{"name": r["name"], "why": "not on the source"}
+                for r in have if r["name"] not in src_names]
+        if gone:
+            out[tname] = gone
+    return out
+
+
+def _prune_route_repos(cfg, route, repos, dry_run, totals):
+    """delete the target repos the source does not have (opt-in, human-run).
+
+    Four locks, all of which must be open: the route names the target in
+    "prune_repos", the caller passed prune_repos=True (the CLI flag or the
+    WebUI action), the route is in full mode, and the run is not scheduled.
+    """
+    rname = route.get("name")
+    if C.route_mode(cfg, route) != "full":
+        log("route '%s': repo deletion needs full mode — skipped" % rname)
+        return
+    gone = prune_repos(cfg, route, dry_run=dry_run)
+    if not gone:
+        return
+    n = sum(len(v) for v in gone.values())
+    for tname, items in gone.items():
+        for it in items:
+            log("  %s: %s %s (%s)"
+                % (tname, "would delete" if dry_run else "deleting",
+                   it["name"], it["why"]))
+    log("=== route '%s': %d repo(s) %s the source does not have%s ==="
+        % (rname, n, "would be deleted from" if dry_run else "deleted from",
+           ", ".join(sorted(gone))))
+    if dry_run:
+        totals.setdefault("prune_planned", []).extend(
+            [{"target": t, "name": it["name"]}
+             for t, items in gone.items() for it in items])
+        return
+    deleted = failed = 0
+    for tname, items in gone.items():
+        plat = P.make(tname, C.platform(cfg, tname))
+        for it in items:
+            try:
+                ok, err = plat.delete_repo({"name": it["name"]})
+            except Exception as e:
+                ok, err = False, str(e)[:120]
+            if ok:
+                deleted += 1
+                log("  deleted %s/%s" % (tname, it["name"]))
+            else:
+                failed += 1
+                log("  FAILED to delete %s/%s: %s"
+                    % (tname, it["name"], err))
+    totals["pruned"] = deleted
+    totals["prune_failed"] = failed
+    if failed:
+        totals["failures"].append({"route": rname, "repo": "prune",
+                                   "error": "%d repo(s) could not be deleted"
+                                   % failed})
 
 
 def _record(summary):

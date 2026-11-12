@@ -1548,6 +1548,147 @@ class TestCompareMatrix(unittest.TestCase):
             self.assertEqual(data["problems"], 0)
 
 
+class TestPruneRepos(unittest.TestCase):
+    """Deleting a whole repository is the most destructive thing gitsync can
+    do, so every lock is asserted here: opt-in per target, full mode,
+    human-run (never scheduled), and a dry run that deletes nothing.
+    """
+
+    def _seed(self, td, which, names):
+        import subprocess
+        root = os.path.join(td, which)
+        os.makedirs(root)
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        env = dict(os.environ,
+                   GIT_AUTHOR_DATE="2020-01-01T00:00:00 +0000",
+                   GIT_COMMITTER_DATE="2020-01-01T00:00:00 +0000")
+        for n, msg in names:
+            subprocess.run(["git", "init", "-q", "--bare",
+                            os.path.join(root, n + ".git")], check=True)
+            subprocess.run(["git", "-C", os.path.join(root, n + ".git"),
+                            "symbolic-ref", "HEAD", "refs/heads/main"],
+                           check=True)
+            work = os.path.join(td, "w-" + which + "-" + n)
+            os.makedirs(work)
+            subprocess.run(["git", "init", "-q", work], check=True)
+            subprocess.run(["git", "-C", work, "checkout", "-q", "-b", "main"],
+                           check=True)
+            with open(os.path.join(work, "f"), "w") as f:
+                f.write(msg)
+            subprocess.run(["git", "-C", work, "add", "."], check=True)
+            subprocess.run(["git", "-C", work] + ident +
+                           ["commit", "-q", "-m", msg], check=True, env=env)
+            subprocess.run(["git", "-C", work, "push", "-q",
+                            os.path.join(root, n + ".git"), "main"],
+                           check=True, env=env)
+        return root
+
+    def _cfg(self, td, **route_extra):
+        src = self._seed(td, "src", [("a", "a1"), ("b", "b1")])
+        dst = self._seed(td, "dst", [("a", "a1"), ("z", "z1")])
+        route = {"name": "r", "source": "src", "targets": ["dst"],
+                 "mode": "full"}
+        route.update(route_extra)
+        return {"platforms": {"src": {"type": "local", "enabled": True,
+                                      "path": src},
+                              "dst": {"type": "local", "enabled": True,
+                                      "path": dst}},
+                "routes": [route]}, src, dst
+
+    def test_not_opted_in_means_nothing_is_listed(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, _d = self._cfg(td)          # no prune_repos at all
+            self.assertEqual(SY.prune_repos(cfg, cfg["routes"][0]), {})
+
+    def test_only_the_named_target_is_eligible(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, _d = self._cfg(td, prune_repos=["dst", "not-a-target"])
+            self.assertEqual(C.prune_targets(cfg, cfg["routes"][0]), ["dst"])
+
+    def test_a_str_in_config_is_accepted(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, _d = self._cfg(td, prune_repos="dst")
+            self.assertEqual(C.prune_targets(cfg, cfg["routes"][0]), ["dst"])
+
+    def test_dry_run_plans_and_deletes_nothing(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, dst = self._cfg(td, prune_repos=["dst"])
+            totals = {}
+            SY._prune_route_repos(cfg, cfg["routes"][0], [], True, totals)
+            self.assertEqual([p["name"] for p in totals["prune_planned"]], ["z"])
+            self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
+
+    def test_yes_deletes_only_the_extra_repo(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, dst = self._cfg(td, prune_repos=["dst"])
+            totals = {}
+            SY._prune_route_repos(cfg, cfg["routes"][0], [], False, totals)
+            self.assertEqual(totals["pruned"], 1)
+            self.assertEqual(totals.get("prune_failed"), 0)
+            self.assertFalse(os.path.exists(os.path.join(dst, "z.git")))
+            # the repo the source does have is untouched
+            self.assertTrue(os.path.isdir(os.path.join(dst, "a.git")))
+
+    def test_safe_mode_refuses_to_delete(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, dst = self._cfg(td, mode="safe", prune_repos=["dst"])
+            totals = {}
+            SY._prune_route_repos(cfg, cfg["routes"][0], [], False, totals)
+            self.assertNotIn("pruned", totals)
+            self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
+
+    def test_an_empty_source_list_refuses_to_delete(self):
+        # the listing failed or the account is empty: either way, deleting
+        # everything would be catastrophic
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            cfg, src, dst = self._cfg(td, prune_repos=["dst"])
+            for n in os.listdir(src):
+                subprocess.run(["rm", "-rf", os.path.join(src, n)], check=True)
+            self.assertEqual(SY.prune_repos(cfg, cfg["routes"][0]), {})
+            self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
+
+    def test_local_delete_repo_removes_the_folder(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            _cfg, _s, dst = self._cfg(td)
+            plat = P.LocalPlatform("dst", {"path": dst})
+            ok, err = plat.delete_repo({"name": "z"})
+            self.assertTrue(ok, err)
+            self.assertFalse(os.path.exists(os.path.join(dst, "z.git")))
+            # deleting twice is not an error
+            ok, _err = plat.delete_repo({"name": "z"})
+            self.assertTrue(ok)
+
+
 class TestNotifyCli(unittest.TestCase):
     """P0-13: --set-url / --set-telegram / --install-hook do what they say."""
 

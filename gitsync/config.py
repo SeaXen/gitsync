@@ -312,3 +312,16 @@ def route_mode(cfg, route=None):
     so a config without settings["mode"] force-pushed and pruned.
     """
     return (route or {}).get("mode") or setting(cfg, "mode", DEFAULT_MODE)
+
+
+def prune_targets(cfg, route=None):
+    """targets of this route that may have whole repositories deleted.
+
+    Opt-in per target, never global and never implied by "full": a full
+    mirror can only express refs, so deleting a repository (with its
+    issues, MRs, wiki and stars) is a separate, explicit choice.
+    """
+    want = (route or {}).get("prune_repos") or []
+    if isinstance(want, str):
+        want = [want]
+    return [t for t in want if t in ((route or {}).get("targets") or [])]

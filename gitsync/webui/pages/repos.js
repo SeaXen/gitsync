@@ -242,7 +242,94 @@
         '<div class="mono muted" style="font-size:12px;margin-top:4px">' +
         G.esc(d.extra[t].join(", ")) + "</div></div>";
     }).join("");
-    body.innerHTML = head + table + (extra || "");
+    body.innerHTML = head + table + (extra || "") + pruneBox(d);
+    var btn = document.getElementById("r-prune");
+    if (btn) btn.addEventListener("click", doPrune);
+  }
+
+  // deletion is opt-in per target (route -> prune_repos) and per click, so
+  // the button only exists when the route allows it — and always asks for
+  // the route name before anything is removed
+  function pruneBox(d) {
+    var n = Object.keys(d.extra || {}).reduce(function (a, t) {
+      return a + d.extra[t].length;
+    }, 0);
+    if (!n) return "";
+    var allowed = (d.prune_repos || []);
+    if (!allowed.length) {
+      return '<p class="muted" style="font-size:12.5px;margin-top:14px">' +
+        "To delete these, tick the target under “Delete extra repos” on the " +
+        '<a href="routes.html">Routes</a> page (full mode only).</p>';
+    }
+    return '<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">' +
+      '<div class="row"><span><strong>' + n + " repo(s)</strong> can be " +
+      "permanently deleted from " + G.esc(allowed.join(", ")) + "</span>" +
+      '<button class="btn danger" id="r-prune">Delete them…</button></div>' +
+      '<p class="muted" style="font-size:12.5px;margin-top:6px">' +
+      "Deleting removes the repository and everything in it — issues, merge " +
+      "requests, wiki, stars. It cannot be undone.</p></div>";
+  }
+
+  function doPrune() {
+    var d = state.cmp;
+    var n = Object.keys(d.extra || {}).reduce(function (a, t) {
+      return a + d.extra[t].length;
+    }, 0);
+    var list = Object.keys(d.extra || {}).map(function (t) {
+      return t + ": " + d.extra[t].join(", ");
+    }).join("\n");
+    G.modalConfirm({
+      title: "Delete " + n + " repo(s)?",
+      message: "Route " + d.route + " — the following repositories exist on a " +
+        "target but not on " + d.source + ":\n\n" + list +
+        "\n\nThis is permanent. Type the route name to confirm.",
+      confirmText: "I understand — show me the confirmation",
+      danger: true
+    }).then(function (ok) {
+      if (!ok) return;
+      return G.modalConfirm({
+        title: "Type the route name",
+        message: "Type “" + d.route + "” to delete " + n + " repo(s) from " +
+          (d.prune_repos || []).join(", ") + ".",
+        confirmText: "Delete permanently",
+        danger: true,
+        prompt: d.route
+      });
+    }).then(function (typed) {
+      // the second modal resolves with the typed text, not a boolean
+      if (!typed) return;
+      return G.api("POST", "/api/jobs", { kind: "prune", route: d.route })
+        .then(function (r) {
+          G.toast("deleting " + n + " repo(s)…");
+          var host = document.getElementById("r-live");
+          host.innerHTML =
+            '<section class="card"><div class="bar"><span class="route-title">' +
+            "Deleting " + n + " repo(s) from " + G.esc(d.route) + "</span>" +
+            '<span class="muted mono" id="rp-state">running…</span></div>' +
+            '<div class="viewer mt" id="rp-lines" role="log" aria-live="polite"></div></section>';
+          var lines = document.getElementById("rp-lines");
+          host.scrollIntoView({ behavior: "smooth", block: "nearest" });
+          G.watchJob("/api/jobs/" + encodeURIComponent(r.job_id) + "/stream", {
+            onLine: function (line, cls) {
+              var div = document.createElement("div");
+              div.className = cls;
+              div.textContent = line;
+              lines.appendChild(div);
+              lines.scrollTop = lines.scrollHeight;
+            },
+            onDone: function (ev) {
+              var st = document.getElementById("rp-state");
+              if (st) st.textContent = ev && ev.exit === 0 ? "done" : "exit " + (ev ? ev.exit : "?");
+              state.cmp = null;
+              runCompare(null);
+            }
+          });
+        })
+        .catch(function (e) {
+          if (e.status === 409) G.toast(e.error || "another job is running", "warn");
+          else G.toast(G.apiError(e), "bad");
+        });
+    });
   }
 
   function loadRepos() {

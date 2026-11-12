@@ -197,7 +197,20 @@
       (r.direction === "mesh"
         ? G.field("Conflicts", G.select("e-conflict", r.mesh_conflict || "inherit", ["inherit", "newest", "skip"]))
         : "") +
-      G.field("Schedule", G.select("e-schedule", r.schedule || "inherit", SCHED));
+      G.field("Schedule", G.select("e-schedule", r.schedule || "inherit", SCHED)) +
+      '<div class="field"><label>Delete extra repos</label>' +
+        '<div style="display:flex;flex-direction:column;gap:6px">' +
+        r.targets.map(function (t) {
+          var on = (r.prune_repos || []).indexOf(t) >= 0;
+          return '<label class="check"><input type="checkbox" name="prune_repos" ' +
+            'value="' + G.esc(t) + '"' + (on ? " checked" : "") + "> " +
+            G.esc(t) + "</label>";
+        }).join("") +
+        "</div>" +
+        '<div class="hint">Permanently delete repositories on these targets ' +
+        "that the source no longer has. Off by default, never run by the " +
+        "timer, and only in full mode — see the Repos page to preview " +
+        "first.</div></div>";
     panel.innerHTML =
       '<div class="mt" style="border-top:1px solid var(--line)">' +
       '<p class="label mt">Filters &amp; options</p>' +
@@ -217,6 +230,9 @@
       if (inc !== origInc) body.include = splitList(inc);
       if (exc !== origExc) body.exclude = splitList(exc);
       if (r.direction === "mesh") body.mesh_conflict = document.getElementById("e-conflict").value;
+      body.prune_repos = Array.prototype.slice.call(
+        panel.querySelectorAll("input[name=prune_repos]:checked"))
+        .map(function (c) { return c.value; });
       G.busy(this, function () {
         return G.api("PUT", "/api/routes/" + encodeURIComponent(r.name), body)
           .then(function () { G.toast(r.name + " saved", "ok"); loadRoutes(); })

@@ -512,6 +512,13 @@ def _remember_job_result(job):
         _CMP_CACHE["at"] = 0.0
         _CMP_CACHE["data"] = None
 
+
+def _drop_compare_cache():
+    """a route edit changes the answer (prune_repos, filters), so the cached
+    matrix is no longer the current configuration."""
+    _CMP_CACHE["at"] = 0.0
+    _CMP_CACHE["data"] = None
+
 def _app_dir():
     return C.APP_DIR
 
@@ -651,7 +658,9 @@ def _route_view(cfg, r):
             "exclude": list(r.get("exclude") or []),
             "include_file": r.get("include_file", ""),
             "workers": r.get("workers"), "mode": r.get("mode"),
-            "mesh_conflict": r.get("mesh_conflict")}
+            "mesh_conflict": r.get("mesh_conflict"),
+            "effective_mode": C.route_mode(cfg, r),
+            "prune_repos": C.prune_targets(cfg, r)}
 
 
 def _public_record(r):
@@ -712,7 +721,15 @@ def _tool_argv(kind, b):
     if kind == "doctorfix":                     # alias for doctor --fix
         return ["doctor", "--fix"], True
     if kind == "fix":
-        return ["fix"] + (["--route", route] if route else []), True
+        argv = ["fix"] + (["--route", route] if route else [])
+        if b.get("dry_run"):
+            argv.append("--dry-run")
+        return argv, not b.get("dry_run")
+    if kind == "prune":
+        # deletion is opt-in per target and per run: the route must name the
+        # target in prune_repos, and this job only ever runs from an
+        # explicit click (never from the timer)
+        return ["prune"] + (["--route", route] if route else []) + ["--yes"], True
     if kind == "tokens":
         return ["tokens"], False
     if kind == "disk":
@@ -1652,6 +1669,7 @@ def h_route_add(handler):
                     route[key] = v
         cfg.setdefault("routes", []).append(route)
         _audit("route added: %s" % name)
+        _drop_compare_cache()
         return {"ok": True, "route": _route_view(cfg, route)}
 
     payload, code = _locked(do)
@@ -1703,7 +1721,23 @@ def h_route_edit(handler, name):
                 raise _Http(400, "invalid schedule")
         if "enabled" in b:
             route["enabled"] = bool(b["enabled"])
+        if "prune_repos" in b:
+            # per-target opt-in for whole-repository deletion; only names
+            # that are actually targets of this route are accepted
+            want = b.get("prune_repos") or []
+            if isinstance(want, str):
+                want = [want]
+            want = [t for t in want if isinstance(t, str)]
+            bad = [t for t in want if t not in (route.get("targets") or [])]
+            if bad:
+                raise _Http(400, "not a target of this route: %s"
+                            % ", ".join(bad)[:80])
+            if want:
+                route["prune_repos"] = sorted(set(want))
+            else:
+                route.pop("prune_repos", None)
         _audit("route edited: %s" % name)
+        _drop_compare_cache()
         return {"ok": True, "route": _route_view(cfg, route)}
 
     payload, code = _locked(do)
@@ -1718,6 +1752,7 @@ def h_route_delete(handler, name):
         if len(cfg["routes"]) == before:
             raise _Http(404, "no such route: %s" % name)
         _audit("route removed: %s" % name)
+        _drop_compare_cache()
         return {"ok": True}
 
     payload, code = _locked(do)
@@ -1752,6 +1787,7 @@ def _pause_resume(handler, name, pause):
                 route["paused_targets"] = cur
             else:
                 route.pop("paused_targets", None)
+        _drop_compare_cache()
         _audit("route %s: %s %s" % (name, "paused" if pause else "resumed",
                                     ",".join(want) or "(whole)"))
         return {"ok": True, "route": _route_view(cfg, route)}
@@ -2075,6 +2111,10 @@ def h_sync_start(handler):
         argv += ["--dry-run"]
     if b.get("retry_failed"):
         argv += ["--retry-failed"]
+    if b.get("force"):
+        # the TUI and the CLI can run while globally paused; without this
+        # the WebUI's Pause button was a one-way door
+        argv += ["--force"]
     try:
         job = start_job("sync", [sys.executable, "-m", "gitsync"] + argv,
                         mutating=True)
@@ -2089,6 +2129,21 @@ def h_sync_start(handler):
               len(repos), dry, handler._client_ip()))
     handler._json({"ok": True, "job_id": job.id, "dry_run": dry,
                    "kind": "sync"}, 202)
+
+
+def h_sync_cancel(handler):
+    """stop the running sync/job — the WebUI had no equivalent of the TUI's
+    X or Ctrl-C, so a runaway sync could only be stopped from a terminal."""
+    job = _current_sync
+    proc = getattr(job, "proc", None) if job else None
+    if not job or job.done or proc is None or proc.poll() is not None:
+        return handler._err(409, "nothing is running")
+    try:
+        proc.terminate()
+    except Exception as e:
+        return handler._err(500, "could not stop it: %s" % str(e)[:80])
+    _audit("sync cancelled from %s" % handler._client_ip())
+    handler._json({"ok": True, "job_id": job.id})
 
 
 def h_sync_state(handler):
@@ -2219,6 +2274,7 @@ ROUTES = [
     ("GET", re.compile(r"^/api/webhooks$"), lambda h: h_webhooks_get(h)),
     ("POST", re.compile(r"^/api/webhooks$"), lambda h: h_webhooks_action(h)),
     ("POST", re.compile(r"^/api/sync$"), lambda h: h_sync_start(h)),
+    ("POST", re.compile(r"^/api/sync/cancel$"), lambda h: h_sync_cancel(h)),
     ("GET", re.compile(r"^/api/sync/state$"), lambda h: h_sync_state(h)),
     ("GET", re.compile(r"^/api/sync/stream$"), lambda h: h_sync_stream(h)),
     ("GET", re.compile(r"^/api/compare$"), lambda h: h_compare_cached(h)),

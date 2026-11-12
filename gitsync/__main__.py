@@ -52,6 +52,66 @@ def cmd_setup(args):
     wizard.run_wizard()
 
 
+def cmd_prune(args):
+    """delete, on opt-in targets, repos the source does not have.
+
+    Dry-run by default: `gitsync prune --route X` only lists. Deleting
+    needs --yes, a target named in the route's prune_repos, full mode, and
+    is refused from the timer.
+    """
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if args.route:
+        routes = [r for r in routes if r.get("name") == args.route]
+    if not routes:
+        print("no routes configured")
+        return 2
+    rc = 0
+    for route in routes:
+        name = route.get("name")
+        if not C.prune_targets(cfg, route):
+            print("route %s: no target is opted in — add \"prune_repos\": "
+                  "[\"target\"] to the route first" % name)
+            rc = 2
+            continue
+        if C.route_mode(cfg, route) != "full":
+            print("route %s: repo deletion needs full mode (it is %s)"
+                  % (name, C.route_mode(cfg, route)))
+            rc = 2
+            continue
+        gone = SYNC.prune_repos(cfg, route)
+        if not gone:
+            print("route %s: nothing to delete" % name)
+            continue
+        n = sum(len(v) for v in gone.values())
+        if not args.yes:
+            print("route %s: %d repo(s) exist on a target but not on the "
+                  "source:" % (name, n))
+            for tname, items in sorted(gone.items()):
+                for it in items:
+                    print("  %s/%s" % (tname, it["name"]))
+            print("\nre-run with --yes to delete them permanently.")
+            continue
+        deleted = failed = 0
+        for tname, items in sorted(gone.items()):
+            plat = P.make(tname, C.platform(cfg, tname))
+            for it in items:
+                try:
+                    ok, err = plat.delete_repo({"name": it["name"]})
+                except Exception as e:
+                    ok, err = False, str(e)[:120]
+                if ok:
+                    deleted += 1
+                    print("  deleted %s/%s" % (tname, it["name"]))
+                else:
+                    failed += 1
+                    print("  FAILED %s/%s: %s" % (tname, it["name"], err))
+        print("route %s: %d deleted, %d failed" % (name, deleted, failed))
+        if failed:
+            rc = 1
+    return rc
+
+
 def cmd_sync(args):
     cfg = C.load_config()
     if not C.enabled_platforms(cfg):
@@ -97,7 +157,8 @@ def cmd_sync(args):
     t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet,
                       only=only or None, dry_run=args.dry_run,
                       scheduled=args.scheduled,
-                      force=getattr(args, "force", False))
+                      force=getattr(args, "force", False),
+                      prune_repos=getattr(args, "prune_repos", False))
     if t.get("paused"):
         return 0
     if args.dry_run:
@@ -107,6 +168,9 @@ def cmd_sync(args):
                     if p.get("verdict") == "error")
         print("\n%d of %d repos would change (nothing was modified)"
               % (n_upd, t.get("repos", 0)))
+        for p in t.get("prune_planned", []):
+            print("  would delete %s/%s (not on the source)"
+                  % (p["target"], p["name"]))
         print("\n%d ok, %d partial, %d failed of %d repos in %ss"
               % (t["ok"], t["partial"], t["failed"], t["repos"],
                  t["elapsed_sec"]))
@@ -115,6 +179,9 @@ def cmd_sync(args):
     print("\n%d ok, %d partial, %d failed of %d repos in %ss"
           % (t["ok"], t["partial"], t["failed"], t["repos"],
              t["elapsed_sec"]))
+    if t.get("pruned") or t.get("prune_failed"):
+        print("repo deletion: %d deleted, %d failed"
+              % (t.get("pruned", 0), t.get("prune_failed", 0)))
     # partial is not success: a target that refused the push, or a mesh that
     # skipped a conflict, must be visible in the exit code (the timer mails
     # on non-zero)
@@ -794,7 +861,8 @@ def compare_matrix(cfg, route, log=None):
             problems += 1
     return {"route": route.get("name"), "source": route["source"],
             "targets": sorted(targets), "repos": rows, "extra": extra,
-            "problems": problems, "unknown": unknown}
+            "problems": problems, "unknown": unknown,
+            "prune_repos": C.prune_targets(cfg, route)}
 
 
 def cmd_compare(args):
@@ -1956,6 +2024,14 @@ def main(argv=None):
     sp = sub.add_parser("setup", help="guided first-run configuration")
     sp.set_defaults(func=cmd_setup)
 
+    sp = sub.add_parser("prune",
+                        help="delete target repos the source does not have "
+                             "(dry-run unless --yes)")
+    sp.add_argument("--route", help="only this route")
+    sp.add_argument("--yes", action="store_true",
+                    help="actually delete (without it, only a list is shown)")
+    sp.set_defaults(func=cmd_prune)
+
     sp = sub.add_parser("sync", help="run a sync now")
     sp.add_argument("--route", help="only this route")
     sp.add_argument("--to", help="only push to this platform")
@@ -1968,6 +2044,10 @@ def main(argv=None):
                     help="skip routes whose own schedule is not due yet")
     sp.add_argument("--force", action="store_true",
                     help="run sync even if sync is paused globally")
+    sp.add_argument("--prune-repos", action="store_true",
+                    help="delete target repos the source does not have "
+                         "(needs full mode + a target named in the route's "
+                         "prune_repos; never runs from the timer)")
     sp.add_argument("--quiet", action="store_true")
     sp.set_defaults(func=cmd_sync)
 

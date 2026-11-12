@@ -14,6 +14,7 @@ so no ambient git credential helper is required.
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.error
@@ -387,6 +388,16 @@ class GitHubPlatform:
         """allow a mirror force-push to succeed. GitHub: nothing to do."""
         return []
 
+    def delete_repo(self, repo):
+        """permanently delete a repository. Opt-in only (see sync.prune_repos):
+        a sync never calls this unless the route names this target."""
+        owner = self.owner or (self.user() or "")
+        rc, out = self._api("/repos/%s/%s" % (owner, repo["name"]), "DELETE")
+        if rc in (204, 200):
+            return True, ""
+        return False, _short_text(out if isinstance(out, str) else
+                                  (out or {}).get("message", ""))
+
     def token_info(self):
         """expiry + scopes + rate limit, for the token-expiry warning"""
         if not self.token:
@@ -651,6 +662,18 @@ class GitLabPlatform:
             return urllib.request.quote("%s/%s" % (owner, path), safe="")
         return None
 
+    def delete_repo(self, repo):
+        """permanently delete a project. Opt-in only (see sync.prune_repos)."""
+        path = gitlab_path(repo["name"])
+        proj = "%s/%s" % (self.owner, path) if self.owner else path
+        rc, out = self._api("/projects/%s" % urllib.request.quote(proj,
+                                                                  safe=""),
+                            "DELETE")
+        if rc in (202, 204, 200):
+            return True, ""
+        return False, _short_text(out if isinstance(out, str) else
+                                  (out or {}).get("message", ""))
+
     def token_info(self):
         """expiry + scopes, for the token-expiry warning"""
         if not self.token:
@@ -880,6 +903,16 @@ class ForgejoPlatform:
                            % (self.ptype,
                               out.get("message") if isinstance(out, dict) else out))
 
+    def delete_repo(self, repo):
+        """permanently delete a repository. Opt-in only (see sync.prune_repos):
+        no sync path calls this unless the route names this target."""
+        owner = self.owner or (self.user() or "")
+        rc, out = self._api("/repos/%s/%s" % (owner, repo["name"]), "DELETE")
+        if rc in (204, 200):
+            return True, ""
+        return False, _short_text(out if isinstance(out, str) else
+                                  (out or {}).get("message", ""))
+
 
 class GiteaPlatform(ForgejoPlatform):
     ptype = "gitea"
@@ -930,6 +963,18 @@ class LocalPlatform:
     def prepare_push(self, repo, push_url):
         """a bare folder has no branch protection"""
         return []
+
+    def delete_repo(self, repo):
+        """remove the bare folder for a repo. Opt-in only (see
+        sync.prune_repos) — this is the most destructive of the four."""
+        path = os.path.join(self.path, _fs_safe(repo["name"]) + ".git")
+        if not os.path.isdir(path):
+            return True, ""                     # already gone
+        try:
+            shutil.rmtree(path)
+        except OSError as e:
+            return False, str(e)[:120]
+        return True, ""
 
     def token_info(self):
         """local folders need no credentials"""
