@@ -147,7 +147,12 @@
     });
   }
 
-  function cell(sha, src) {
+  function cell(sha, src, err) {
+    if (err) {
+      // a failed probe is NOT a missing repo — say so instead of guessing
+      return '<td class="warn" title="could not check: ' + G.esc(err) +
+        '">⚠ not checked</td>';
+    }
     if (!sha) return '<td class="bad" title="not on this site">✗ missing</td>';
     var short = sha.slice(0, 8);
     if (sha === src) {
@@ -165,7 +170,11 @@
     });
     var tgts = d.targets || [];
     var ok = rows.filter(function (r) {
-      return r.src && tgts.every(function (t) { return r.targets[t] === r.src; });
+      return r.src && !Object.keys(r.errors || {}).length &&
+        tgts.every(function (t) { return r.targets[t] === r.src; });
+    }).length;
+    var unknown = rows.filter(function (r) {
+      return Object.keys(r.errors || {}).length > 0;
     }).length;
     var extraBits = Object.keys(d.extra || {}).map(function (t) {
       return '<span class="chip warn">' + G.esc(t) + " +" +
@@ -175,11 +184,14 @@
       '<span class="chip">route ' + G.esc(d.route) + "</span>" +
       '<span class="chip">source ' + G.esc(d.source) + "</span>" +
       '<span class="chip ' + (d.problems ? "warn" : "ok") + '">' + rows.length +
-      " repos · " + ok + " in sync · " + (rows.length - ok) + " off</span>" +
+      " repos · " + ok + " in sync · " + (rows.length - ok - unknown) + " off</span>" +
+      (unknown ? '<span class="chip warn">' + unknown +
+        " could not be checked</span>" : "") +
       extraBits +
       "</div>" +
       '<p class="muted" style="font-size:12.5px;margin:0 0 12px">' +
-      "✓ same commit · ⇄ different commit · ✗ repo not on that site. " +
+      "✓ same commit · ⇄ different commit · ✗ not on that site · " +
+      "⚠ the site could not be reached, so nothing is known about that repo. " +
       "<b>full</b> mode prunes refs inside a repo; it never deletes a whole " +
       "repository from a target, which is what the “extra” counts are.</p>";
     if (!rows.length) {
@@ -193,9 +205,14 @@
       tgts.map(function (t) { return "<th>" + G.esc(t) + "</th>"; }).join("") +
       "</tr></thead><tbody>" +
       rows.map(function (r) {
+        var errs = r.errors || {};
         return "<tr><td class=\"mono\">" + G.esc(r.name) + "</td>" +
-          '<td class="mono">' + (r.src ? r.src.slice(0, 8) : "—") + "</td>" +
-          tgts.map(function (t) { return cell(r.targets[t], r.src); }).join("") +
+          '<td class="mono ' + (errs.__src__ ? "warn" : "") + '" title="' +
+          G.esc(errs.__src__ || "") + '">' +
+          (r.src ? r.src.slice(0, 8) : (errs.__src__ ? "⚠" : "—")) + "</td>" +
+          tgts.map(function (t) {
+            return cell(r.targets[t], r.src, errs[t]);
+          }).join("") +
           "</tr>";
       }).join("") + "</tbody></table></div>";
     var extra = Object.keys(d.extra || {}).map(function (t) {

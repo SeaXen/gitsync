@@ -667,11 +667,47 @@ def cmd_route_sched(args):
     return 2
 
 
+def _head_probe(plat, repo):
+    """(sha, err) for one repo on one platform.
+
+    err set means "could not tell" — a rate limit, a timeout, an unreadable
+    folder. It must never be rendered as "missing": a remote ls-remote that
+    fails for any transient reason returns nothing, and reporting that as an
+    absent repo is exactly the false alarm that makes a drift view useless.
+    """
+    name = repo["name"]
+    if plat.ptype == "local":
+        path = os.path.join(plat.path, P._fs_safe(name) + ".git")
+        if not os.path.isdir(path):
+            return None, None                     # definitively not here
+        rc, out, _ = P.run(["git", "rev-parse", "--verify", "HEAD"],
+                           cwd=path, timeout=30)
+        if rc == 0 and out.strip():
+            return out.strip(), None
+        rc, out, _ = P.run(["git", "for-each-ref", "--format=%(objectname)",
+                            "refs/heads/"], cwd=path, timeout=30)
+        if rc == 0 and out.strip():
+            return out.strip().splitlines()[0], None
+        if rc == 0:
+            return None, None                     # empty repo: no refs at all
+        return None, "cannot read %s" % path
+    # the platform's own URL, never the source's clone_url (which made every
+    # target probe the source and report a false "in sync") and never
+    # ensure_repo (a read-only check must not create repositories)
+    url = plat.repo_url(repo)
+    rc, out, err = P.run(["git", "ls-remote", url, "HEAD"], timeout=120)
+    if rc == 0:
+        # empty output with a clean exit is the one reliable "not there"
+        return (out.split("\t")[0] or None), None
+    return None, SYNC._short_error(err) or "ls-remote failed"
+
+
 def compare_matrix(cfg, route, log=None):
     """drift matrix for one route: HEAD sha of every repo on every site.
 
-    Returns {"repos": [{name, src, targets: {name: sha|None}}],
-             "extra": {target: [names]}, "problems": n}.
+    Returns {"repos": [{name, src, targets: {name: sha|None},
+                        errors: {name: reason}}],
+             "extra": {target: [names]}, "problems": n, "unknown": n}.
     "extra" is the answer to "why does gitlab have 58 repos when github has
     48": full mode prunes *refs* inside a repo, never whole repositories —
     gitsync creates what is missing but never deletes a repo on a target.
@@ -687,19 +723,25 @@ def compare_matrix(cfg, route, log=None):
     except Exception as e:
         raise RuntimeError("cannot list %s: %s" % (route["source"], e))
     names = [r["name"] for r in repos if not r.get("fork")] or \
-            [r["name"] for r in repos]
+        [r["name"] for r in repos]
     say("route %s: %d repos × %d sites" % (route.get("name"), len(names),
                                            len(targets) + 1))
 
     def head(plat, repo):
-        try:
-            return _head_of(plat, {"name": repo})
-        except Exception:
-            return None
+        """probe twice: the first pass is a burst, and a rate-limited
+        ls-remote returns nothing — which would otherwise read as a repo
+        that is not on the site at all."""
+        err = None
+        for attempt in range(2):
+            sha, err = _head_probe(plat, {"name": repo})
+            if not err:
+                return sha, None
+            time.sleep(1.0 + attempt)
+        return None, err
 
-    rows = [None] * len(names)
     srcs = [None] * len(names)
     tgts = [{} for _ in range(len(names))]
+    errs = [{} for _ in range(len(names))]
     with _cf.ThreadPoolExecutor(max_workers=min(12, max(1, len(names)))) as ex:
         futs = {}
         for i, n in enumerate(names):
@@ -710,20 +752,24 @@ def compare_matrix(cfg, route, log=None):
         for f in _cf.as_completed(futs):
             kind, i = futs[f]
             try:
-                sha = f.result()
+                sha, err = f.result()
             except Exception:
-                sha = None
+                sha, err = None, "probe failed"
             # a target future can finish before the source's, so the row is
             # assembled once every future is in
             if kind == "src":
                 srcs[i] = sha
+                if err:
+                    errs[i]["__src__"] = err
             else:
                 tgts[i][kind] = sha
+                if err:
+                    errs[i][kind] = err
             done += 1
             if done % 25 == 0:
                 say("  resolved %d/%d heads" % (done, len(futs)))
-    rows = [{"name": names[i], "src": srcs[i], "targets": tgts[i]}
-            for i in range(len(names))]
+    rows = [{"name": names[i], "src": srcs[i], "targets": tgts[i],
+             "errors": errs[i]} for i in range(len(names))]
     for r in rows:
         for t in targets:
             r["targets"].setdefault(t, None)
@@ -739,11 +785,16 @@ def compare_matrix(cfg, route, log=None):
         if gone:
             extra[tname] = gone
             say("  %s has %d repo(s) the source does not" % (tname, len(gone)))
-    problems = sum(1 for r in rows if not r["src"] or
-                   any(v != r["src"] for v in r["targets"].values()))
+    problems = unknown = 0
+    for r in rows:
+        if any(r["errors"].values()):
+            unknown += 1
+            continue
+        if not r["src"] or any(v != r["src"] for v in r["targets"].values()):
+            problems += 1
     return {"route": route.get("name"), "source": route["source"],
             "targets": sorted(targets), "repos": rows, "extra": extra,
-            "problems": problems}
+            "problems": problems, "unknown": unknown}
 
 
 def cmd_compare(args):

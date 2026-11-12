@@ -1448,6 +1448,57 @@ class TestCompareMatrix(unittest.TestCase):
             # "extra" list is for
             self.assertEqual(out["extra"], {"dst": ["z"]})
             self.assertEqual(out["problems"], 2)      # b differs, c missing
+            self.assertEqual(out["unknown"], 0)
+            for r in out["repos"]:
+                self.assertEqual(r["errors"], {})
+
+    def test_an_unreachable_site_is_unknown_not_missing(self):
+        # a probe that fails must never be rendered as "repo not on that
+        # site": the first compare run reported two healthy repos as missing
+        # because a rate-limited ls-remote returned nothing
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+
+        class FakeRemote(object):
+            ptype = "github"
+
+            def list_repos(self):
+                return []
+
+            def repo_url(self, repo):
+                return "https://invalid.invalid/" + repo["name"] + ".git"
+
+        with tempfile.TemporaryDirectory() as td:
+            src = self._seed(td, "src", [("a", "a1")])
+            dst = self._seed(td, "dst", [("a", "a1")])
+            cfg = {"platforms": {"src": {"type": "local", "enabled": True,
+                                         "path": src},
+                                 "dst": {"type": "github", "enabled": True}},
+                   "routes": [{"name": "r", "source": "src",
+                               "targets": ["dst"]}]}
+            real_run = P.run
+
+            def flaky(argv, *a, **kw):
+                if argv and "ls-remote" in argv:
+                    return 1, "", "fatal: unable to access: 429 rate limited"
+                return real_run(argv, *a, **kw)
+
+            real_make = P.make
+            P.run = flaky
+            P.make = lambda n, c: FakeRemote() if n == "dst" else real_make(n, c)
+            try:
+                out = M.compare_matrix(cfg, cfg["routes"][0])
+            finally:
+                P.run = real_run
+                P.make = real_make
+            row = out["repos"][0]
+            self.assertIsNone(row["targets"]["dst"])
+            self.assertIn("dst", row["errors"])
+            self.assertEqual(out["problems"], 0)      # nothing is proven wrong
+            self.assertEqual(out["unknown"], 1)
 
     def test_compare_json_is_the_last_line_a_job_prints(self):
         # the web UI starts the job and parses the final line, so --json must
