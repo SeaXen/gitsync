@@ -258,17 +258,22 @@
       ? '<button class="btn sm warn" id="btn-retry-failed" style="margin-top:8px">Retry ' + last.failed + ' failed repo(s)</button>'
       : "";
     var head, subline;
-    if (last.dry_run) {
+    if (!last.dry_run && last.skipped && !last.repos && !bad) {
+      // the timer fired but no route was due (schedules are hourly/daily):
+      // "0 OK of 0" read like a failed run instead of a no-op
+      head = '<div class="big muted">skipped</div>';
+      subline = "the timer ran — no route was due yet";
+    } else if (last.dry_run) {
       var wc = (last.would_change === null || last.would_change === undefined)
         ? (last.ok || 0) : last.would_change;
       head = '<div class="big">' + wc + " would change</div>";
       subline = "dry run — " + (last.ok || 0) + " of " + (last.repos || 0) +
-        " already in sync, in " + (last.elapsed_sec || "?") + "s";
+        " already in sync, in " + (last.elapsed_sec === null || last.elapsed_sec === undefined ? "?" : last.elapsed_sec) + "s";
     } else {
       head = '<div class="big ' + (bad ? "bad" : "ok") + '">' + (last.ok || 0) + " OK</div>";
       subline = (last.failed || 0) + " failed" +
         (last.partial ? ", " + last.partial + " partial" : "") + " of " +
-        (last.repos || 0) + ", in " + (last.elapsed_sec || "?") + "s";
+        (last.repos || 0) + ", in " + (last.elapsed_sec === null || last.elapsed_sec === undefined ? "?" : last.elapsed_sec) + "s";
     }
     host.innerHTML =
       head +

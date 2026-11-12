@@ -718,6 +718,10 @@ def _public_record(r):
             "repos": r.get("repos", 0), "elapsed_sec": r.get("elapsed_sec"),
             "routes": r.get("routes", 0), "failures": fails,
             "dry_run": bool(r.get("dry_run")),
+            # a scheduled run where no route was due still records, with
+            # skipped=1: without this the dashboard read "0 OK of 0" as a
+            # run that did nothing rather than "nothing was due yet"
+            "skipped": r.get("skipped", 0),
             "would_change": r.get("would_change")}
 
 

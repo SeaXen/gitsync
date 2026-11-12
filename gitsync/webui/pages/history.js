@@ -24,7 +24,11 @@
             G.esc(f.route) + "/" + G.esc(f.repo) + ": " + G.esc(f.error) + "</div>";
         }).join("");
         var okCell;
-        if (r.dry_run) {
+        if (!r.dry_run && r.skipped && !r.repos && !bad) {
+          // scheduled tick with nothing due: not a 0-repo run
+          okCell = "<td class='mono muted' title='the timer ran, no route was " +
+            "due'>skipped</td>";
+        } else if (r.dry_run) {
           var wc = (r.would_change === null || r.would_change === undefined)
             ? (r.ok || 0) : r.would_change;
           okCell = "<td class='mono' title='dry run — nothing was changed'>" +
@@ -37,7 +41,7 @@
           "<td class='mono'>" + (r.partial || 0) + "</td>" +
           "<td class='mono " + (r.failed ? "l-bad" : "") + "'>" + (r.failed || 0) + "</td>" +
           "<td class='mono muted'>" + (r.repos || 0) + "</td>" +
-          "<td class='mono muted'>" + (r.elapsed_sec || "?") + "s</td>" +
+          "<td class='mono muted'>" + (r.elapsed_sec === null || r.elapsed_sec === undefined ? "?" : r.elapsed_sec) + "s</td>" +
           "<td><button class='btn sm ghost btn-run-report' data-idx='" + i + "'>Report</button></td></tr>" +
           (fails ? "<tr><td colspan='7' style='padding-top:0'>" + fails + "</td></tr>" : "");
       }).join("");
@@ -52,15 +56,16 @@
           var r = recs[idx];
           if (!r) return;
           var bad = (r.failed || 0) + (r.partial || 0);
-          var status = r.dry_run ? "DRY RUN" :
-            (bad ? (r.failed ? "FAILED" : "PARTIAL") : "SUCCESS");
+          var status = (r.skipped && !r.repos && !bad && !r.dry_run)
+            ? "SKIPPED (no route was due)" : (r.dry_run ? "DRY RUN" :
+              (bad ? (r.failed ? "FAILED" : "PARTIAL") : "SUCCESS"));
           var detail = "Status: " + status + "\n" +
             "Finished: " + r.finished_at + "\n" +
             (r.dry_run
               ? "Would change: " + ((r.would_change === null || r.would_change === undefined)
                   ? (r.ok || 0) : r.would_change) + " of " + (r.repos || 0) + " repos (nothing was changed)\n"
               : "Results: " + (r.ok || 0) + " OK, " + (r.partial || 0) + " partial, " + (r.failed || 0) + " failed of " + (r.repos || 0) + " repos\n") +
-            "Duration: " + (r.elapsed_sec || "?") + "s\n\n";
+            "Duration: " + (r.elapsed_sec === null || r.elapsed_sec === undefined ? "?" : r.elapsed_sec) + "s\n\n";
           if (r.failures && r.failures.length) {
             detail += "Failures (" + r.failures.length + "):\n";
             r.failures.forEach(function (f) {

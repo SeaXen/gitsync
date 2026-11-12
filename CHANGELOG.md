@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.2] - 2026-11-12
+
+### A skipped run no longer looks like a failed one
+- A scheduled tick where **no route was due** records `skipped: 1, repos: 0`, and the dashboard summarised that as “**0 OK**, 0 failed of 0, in ?s” — a green run that appeared to have done nothing. `_public_record` dropped the field, so the UI could not tell. It is published now, the LAST RUN card says **skipped — the timer ran, no route was due yet**, and the history table shows `skipped` with `Status: SKIPPED (no route was due)` in the report (instead of `SUCCESS` with 0 repos).
+- A real `0.0s` duration rendered as `?` in both views; only a missing value is `?` now.
+
 ## [2.1.1] - 2026-11-12
 
 ### Tests no longer write runs into the real data dir

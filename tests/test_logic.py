@@ -2037,6 +2037,15 @@ class TestWeb(unittest.TestCase):
         self.assertFalse(real["dry_run"])
         self.assertIsNone(real["would_change"])
 
+    def test_public_record_keeps_the_skipped_count(self):
+        # a scheduled tick where no route was due records skipped=1 and
+        # repos=0; dropping the field made the dashboard read "0 OK of 0"
+        # as a run that failed to do anything
+        pub = W._public_record({"finished_at": "t", "routes": 1, "repos": 0,
+                                "skipped": 1})
+        self.assertEqual(pub["skipped"], 1)
+        self.assertEqual(W._public_record({"finished_at": "t"})["skipped"], 0)
+
     def test_probe_cache_invalidates_after_a_mutation(self):
         calls = []
 
