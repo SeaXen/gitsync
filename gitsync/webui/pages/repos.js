@@ -101,6 +101,7 @@
       state.cmpQ = e.target.value.toLowerCase();
       if (state.cmp) renderMatrix();
     });
+    autoCompare();
   }
 
   // ---- repo × site matrix (drift) ----
@@ -108,11 +109,14 @@
     var card = document.getElementById("r-cmp");
     var body = document.getElementById("r-cmp-body");
     card.style.display = "";
-    body.innerHTML = G.loading("comparing HEADs across every site…") +
-      '<div class="viewer mt" id="r-cmp-lines" role="log" aria-live="polite"></div>';
+    var had = !!state.cmp;
+    if (!had) {
+      body.innerHTML = G.loading("comparing HEADs across every site…") +
+        '<div class="viewer mt" id="r-cmp-lines" role="log" aria-live="polite"></div>';
+    }
     var lines = document.getElementById("r-cmp-lines");
-    lines.textContent = "starting…";
-    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (lines) lines.textContent = had ? "re-checking…" : "starting…";
+    if (!had) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
     G.busy(btn, function () {
       return G.api("POST", "/api/jobs", { kind: "compare" })
         .then(function (r) {
@@ -120,6 +124,7 @@
           G.watchJob("/api/jobs/" + encodeURIComponent(r.job_id) + "/stream", {
             onLine: function (line) {
               last = line;
+              if (!lines) return;
               var div = document.createElement("div");
               div.className = G.stateClass(line);
               div.textContent = line;
@@ -130,8 +135,10 @@
               var data = null;
               try { data = JSON.parse(last); } catch (e) {}
               if (!data || !data.repos) {
-                body.innerHTML = G.errorBox("compare produced no data (exit " +
-                  (d.exit === undefined ? "?" : d.exit) + ")");
+                if (!state.cmp) {
+                  body.innerHTML = G.errorBox("compare produced no data (exit " +
+                    (d.exit === undefined ? "?" : d.exit) + ")");
+                }
                 return;
               }
               state.cmp = data;
@@ -142,9 +149,21 @@
         .catch(function (e) {
           if (e.status === 409) G.toast(e.error || "another job is running", "warn");
           else G.toast(G.apiError(e), "bad");
-          body.innerHTML = G.errorBox(e);
+          if (!state.cmp) body.innerHTML = G.errorBox(e);
         });
     });
+  }
+
+  // the matrix is the point of the page, so it loads on its own: the cached
+  // answer renders instantly and a stale one refreshes in the background
+  function autoCompare() {
+    G.api("GET", "/api/compare").then(function (d) {
+      if (d.cached && d.repos) {
+        state.cmp = d;
+        renderMatrix();
+      }
+      if (!d.cached || d.age_sec > 120) runCompare(null);
+    }).catch(function () { runCompare(null); });
   }
 
   function cell(sha, src, err) {
@@ -163,6 +182,8 @@
 
   function renderMatrix() {
     var body = document.getElementById("r-cmp-body");
+    var card = document.getElementById("r-cmp");
+    if (card) card.style.display = "";      // auto-load renders with no click
     var d = state.cmp;
     var q = state.cmpQ;
     var rows = d.repos.filter(function (r) {

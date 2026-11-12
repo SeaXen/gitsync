@@ -1898,6 +1898,32 @@ class TestWeb(unittest.TestCase):
         W._invalidate("probe-test")
         self.assertEqual(W._cached("probe-test", 60, fn), "v2")
 
+    def test_compare_cache_is_filled_and_invalidated(self):
+        # the Repos page shows the matrix with no click, so the last compare
+        # result is cached — and a sync must drop it, because the answer
+        # just changed
+        import threading
+
+        class FakeJob(object):
+            def __init__(self, kind, code, lines):
+                self.kind, self.exit, self.lines = kind, code, lines
+                self.cond = threading.Lock()
+
+        W._CMP_CACHE.update(at=0.0, data=None)
+        W._remember_job_result(FakeJob("compare", 0, [
+            "route r: 1 repos x 1 sites",
+            '{"route": "r", "repos": [{"name": "a"}], "problems": 0}']))
+        self.assertIsNotNone(W._CMP_CACHE["data"])
+        self.assertEqual(W._CMP_CACHE["data"]["route"], "r")
+        # a failed compare must not be cached
+        W._CMP_CACHE.update(at=0.0, data=None)
+        W._remember_job_result(FakeJob("compare", 1, ["boom"]))
+        self.assertIsNone(W._CMP_CACHE["data"])
+        # ... and a finished sync invalidates whatever was cached
+        W._CMP_CACHE.update(at=0.0, data={"route": "r", "repos": []})
+        W._remember_job_result(FakeJob("sync", 0, []))
+        self.assertIsNone(W._CMP_CACHE["data"])
+
     def test_a_none_result_is_cached_too(self):
         # "no timer / no next run" is a real answer; caching only truthy
         # values made /api/status shell out on every single poll

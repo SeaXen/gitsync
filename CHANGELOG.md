@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### The matrix loads by default
+- **Repos page auto-runs the comparison** on open: `GET /api/compare` returns the last result (rendered immediately, ~2s on a revisit) and a stale or missing one refreshes in the background (~16s for 40 repos × 4 sites). "Compare all sites" / "Re-run" still forces it.
+- The server caches the last compare matrix for 5 minutes and **drops it when any sync/fix/restore/mirror job finishes**, because the answer just changed. A failed compare is never cached.
+
 ### Compare must not report a failed probe as a missing repo
 - **`_head_probe()` returns `(sha, err)`** instead of a bare sha. A remote `ls-remote` that fails — rate limit, timeout, DNS — returns nothing, and the first version of the matrix rendered that as `✗ missing`, which reported two healthy repos as absent. A failed probe is now `⚠ not checked` with the reason in the tooltip, counted separately as "N could not be checked", and excluded from the problem count.
 - Each probe retries once with a short backoff before it is declared unknown.

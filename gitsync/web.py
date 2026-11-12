@@ -433,6 +433,7 @@ def _run_job(job):
                 job.cond.notify_all()
         job.proc.wait()
         job.exit = job.proc.returncode
+        _remember_job_result(job)
     except Exception as e:
         job.error = _redactor().redact(str(e)[:200])
         with job.cond:
@@ -482,6 +483,34 @@ def start_job(kind, argv, mutating=True):
 def _engine_sync_busy():
     return SYNC.engine_busy()
 
+
+# ---- compare cache, so the Repos page shows the matrix with no click ----
+_CMP_CACHE = {"at": 0.0, "data": None}
+_CMP_TTL = 300.0
+
+
+def _remember_job_result(job):
+    """keep the last compare matrix (and drop it when a sync ran).
+
+    A compare is 40 repos x 4 sites of git ls-remote (~15s); caching it
+    makes the Repos page instant on every revisit, and a finished sync
+    invalidates it because the answer just changed.
+    """
+    if job.kind == "compare" and job.exit == 0:
+        with job.cond:
+            lines = list(job.lines)
+        for line in reversed(lines):
+            try:
+                data = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(data, dict) and "repos" in data:
+                _CMP_CACHE["at"] = time.time()
+                _CMP_CACHE["data"] = data
+                return
+    elif job.kind in ("sync", "fix", "restore", "mirror"):
+        _CMP_CACHE["at"] = 0.0
+        _CMP_CACHE["data"] = None
 
 def _app_dir():
     return C.APP_DIR
@@ -2082,6 +2111,17 @@ def h_sync_stream(handler):
     handler._sse(job)
 
 
+def h_compare_cached(handler):
+    """the last compare matrix, so the Repos page renders without a click."""
+    data = _CMP_CACHE["data"]
+    if data is None or (time.time() - _CMP_CACHE["at"]) > _CMP_TTL:
+        return handler._json({"cached": False})
+    out = {"cached": True,
+           "age_sec": int(time.time() - _CMP_CACHE["at"])}
+    out.update(data)
+    handler._json(out)
+
+
 def h_job_start(handler):
     b = handler._body()
     kind = (b.get("kind") or "").strip()
@@ -2181,6 +2221,7 @@ ROUTES = [
     ("POST", re.compile(r"^/api/sync$"), lambda h: h_sync_start(h)),
     ("GET", re.compile(r"^/api/sync/state$"), lambda h: h_sync_state(h)),
     ("GET", re.compile(r"^/api/sync/stream$"), lambda h: h_sync_stream(h)),
+    ("GET", re.compile(r"^/api/compare$"), lambda h: h_compare_cached(h)),
     ("POST", re.compile(r"^/api/jobs$"), lambda h: h_job_start(h)),
     ("GET", re.compile(r"^/api/jobs/(?P<job_id>[^/]+)$"),
      lambda h, job_id: h_job_state(h, job_id)),
