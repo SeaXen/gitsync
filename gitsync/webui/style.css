@@ -103,6 +103,9 @@ a:hover{text-decoration:underline}
 .qr .c{font-weight:600;color:var(--text);white-space:nowrap}
 .qr .d{color:var(--muted)}
 .repo-list{margin:6px 0 0;padding:2px 0 2px 22px;display:flex;flex-direction:column;gap:1px;font-family:var(--mono);font-size:12px;color:var(--nav);max-height:260px;overflow:auto}
+/* [hidden] must win over .repo-list's display:flex, or the list never
+   collapses again after it is expanded */
+.repo-list[hidden]{display:none}
 .repo-list .r{display:flex;justify-content:space-between;gap:10px}
 .card .log{max-height:340px;overflow-y:auto}
 .label{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin:0 0 10px;font-weight:600;display:flex;align-items:center;gap:8px;flex-wrap:wrap}

@@ -675,7 +675,9 @@ def _tool_argv(kind, b):
     frontend contract can never silently drift again."""
     route = (b.get("route") or "").strip()
     if kind in ("compare",):
-        return ["compare"] + (["--route", route] if route else []), False
+        # --json: the last line the job prints is the matrix the Repos page
+        # renders (progress lines come first)
+        return ["compare", "--json"] + (["--route", route] if route else []), False
     if kind == "doctor":
         return ["doctor"] + (["--fix"] if b.get("fix") else []), bool(b.get("fix"))
     if kind == "doctorfix":                     # alias for doctor --fix

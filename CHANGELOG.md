@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Repo × site matrix + dashboard expander fix
+- **Repos page: "Compare all sites"** builds a repo × platform table from `gitsync compare --json`: each row is a repo with its source commit and, per target, `✓` same commit, `⇄` different commit, or `✗` not on that site. Chips summarise `N repos · N in sync · N off` plus `+N extra` per target, and an "extra" list names the repos a target has that the source does not. Runs as a job (progress streams, non-mutating), re-runnable and filterable.
+- **`compare --json`** prints one JSON object (`repos`, `extra`, `problems`) as its final line, with progress lines before it; HEADs resolve in a thread pool (40 repos × 4 sites ≈ 15s).
+- **Dashboard platform expander could not be collapsed** — `.repo-list{display:flex}` overrode the `hidden` attribute, so the list stayed open. Fixed with `.repo-list[hidden]{display:none}`.
+- **Answer to "why doesn't full mode match github?"**: `full` prunes *refs* inside a repo; it never deletes a whole repository from a target (gitsync creates what is missing and pushes, but deleting a repo is not something it will do). The matrix's `extra` list is exactly that gap — e.g. 40 source repos, 18 extra on gitlab, 17 on forgejo, 13 on backup.
+
 ### Web UI polish (post-2.0.3)
 - **Favicon**: every page ships an inline SVG icon, so the browser stops requesting a missing `/favicon.ico` and logging a 404 on every load.
 - **Version on the dashboard**: `/api/settings` now reports `version`, and the Current Settings card shows it instead of "—".

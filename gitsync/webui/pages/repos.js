@@ -2,13 +2,15 @@
    (all targets / one site / local only), or save the selection to a file. */
 (function () {
   var G = window.Gitsync;
-  var state = { platform: "", platforms: [], repos: [], sel: {}, q: "", to: "" };
+  var state = { platform: "", platforms: [], repos: [], sel: {}, q: "", to: "",
+                cmp: null, cmpQ: "" };
 
   function render(main) {
     main.innerHTML =
       G.bar("Repos", "Browse an account and sync a selection.",
         '<button class="btn" id="r-none">Select None</button>' +
-        '<button class="btn" id="r-all">Select All</button>') +
+        '<button class="btn" id="r-all">Select All</button>' +
+        '<button class="btn" id="r-cmp-btn">Compare all sites</button>') +
       '<section class="card">' +
         '<div class="inline mb">' +
           '<div style="min-width:200px">' +
@@ -31,7 +33,16 @@
         '<div class="muted mt">“Sync selected” pushes to the chosen target, ' +
         "or every target on the route if you leave it on “all targets”.</div>" +
       "</section>" +
-      '<div id="r-live"></div>';
+      '<div id="r-live"></div>' +
+      '<section class="card" id="r-cmp" style="display:none">' +
+        '<div class="bar"><span class="route-title">Repo × site matrix</span>' +
+        '<div class="actions">' +
+          '<div class="grow" style="min-width:180px">' +
+            G.field("Find repo", '<input type="text" id="r-cmp-q" name="cmp_filter" autocomplete="off" placeholder="type to filter…">') + "</div>" +
+          '<button class="btn" id="r-cmp-again">Re-run</button>' +
+        "</div></div>" +
+        '<div id="r-cmp-body">' + G.loading("comparing HEADs across every site…") + "</div>" +
+      "</section>";
 
     G.api("GET", "/api/platforms?probe=0").then(function (d) {
       state.platforms = d.platforms || [];
@@ -80,6 +91,120 @@
       doSync(local.name);
     });
     document.getElementById("r-save").addEventListener("click", saveSelection);
+    document.getElementById("r-cmp-btn").addEventListener("click", function () {
+      runCompare(this);
+    });
+    document.getElementById("r-cmp-again").addEventListener("click", function () {
+      runCompare(this);
+    });
+    document.getElementById("r-cmp-q").addEventListener("input", function (e) {
+      state.cmpQ = e.target.value.toLowerCase();
+      if (state.cmp) renderMatrix();
+    });
+  }
+
+  // ---- repo × site matrix (drift) ----
+  function runCompare(btn) {
+    var card = document.getElementById("r-cmp");
+    var body = document.getElementById("r-cmp-body");
+    card.style.display = "";
+    body.innerHTML = G.loading("comparing HEADs across every site…") +
+      '<div class="viewer mt" id="r-cmp-lines" role="log" aria-live="polite"></div>';
+    var lines = document.getElementById("r-cmp-lines");
+    lines.textContent = "starting…";
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    G.busy(btn, function () {
+      return G.api("POST", "/api/jobs", { kind: "compare" })
+        .then(function (r) {
+          var last = "";
+          G.watchJob("/api/jobs/" + encodeURIComponent(r.job_id) + "/stream", {
+            onLine: function (line) {
+              last = line;
+              var div = document.createElement("div");
+              div.className = G.stateClass(line);
+              div.textContent = line;
+              lines.appendChild(div);
+              lines.scrollTop = lines.scrollHeight;
+            },
+            onDone: function (d) {
+              var data = null;
+              try { data = JSON.parse(last); } catch (e) {}
+              if (!data || !data.repos) {
+                body.innerHTML = G.errorBox("compare produced no data (exit " +
+                  (d.exit === undefined ? "?" : d.exit) + ")");
+                return;
+              }
+              state.cmp = data;
+              renderMatrix();
+            }
+          });
+        })
+        .catch(function (e) {
+          if (e.status === 409) G.toast(e.error || "another job is running", "warn");
+          else G.toast(G.apiError(e), "bad");
+          body.innerHTML = G.errorBox(e);
+        });
+    });
+  }
+
+  function cell(sha, src) {
+    if (!sha) return '<td class="bad" title="not on this site">✗ missing</td>';
+    var short = sha.slice(0, 8);
+    if (sha === src) {
+      return '<td class="ok mono" title="' + G.esc(sha) + '">' + short + " ✓</td>";
+    }
+    return '<td class="warn mono" title="' + G.esc(sha) + '">' + short + " ⇄</td>";
+  }
+
+  function renderMatrix() {
+    var body = document.getElementById("r-cmp-body");
+    var d = state.cmp;
+    var q = state.cmpQ;
+    var rows = d.repos.filter(function (r) {
+      return !q || r.name.toLowerCase().indexOf(q) >= 0;
+    });
+    var tgts = d.targets || [];
+    var ok = rows.filter(function (r) {
+      return r.src && tgts.every(function (t) { return r.targets[t] === r.src; });
+    }).length;
+    var extraBits = Object.keys(d.extra || {}).map(function (t) {
+      return '<span class="chip warn">' + G.esc(t) + " +" +
+        d.extra[t].length + " extra</span>";
+    }).join("");
+    var head = '<div class="inline mb">' +
+      '<span class="chip">route ' + G.esc(d.route) + "</span>" +
+      '<span class="chip">source ' + G.esc(d.source) + "</span>" +
+      '<span class="chip ' + (d.problems ? "warn" : "ok") + '">' + rows.length +
+      " repos · " + ok + " in sync · " + (rows.length - ok) + " off</span>" +
+      extraBits +
+      "</div>" +
+      '<p class="muted" style="font-size:12.5px;margin:0 0 12px">' +
+      "✓ same commit · ⇄ different commit · ✗ repo not on that site. " +
+      "<b>full</b> mode prunes refs inside a repo; it never deletes a whole " +
+      "repository from a target, which is what the “extra” counts are.</p>";
+    if (!rows.length) {
+      body.innerHTML = head + G.emptyState("No matching repos",
+        "clear the filter to see all", "repos");
+      return;
+    }
+    var table =
+      '<div style="overflow-x:auto"><table aria-label="Repository commit per site">' +
+      "<thead><tr><th>Repo</th><th>" + G.esc(d.source) + " (source)</th>" +
+      tgts.map(function (t) { return "<th>" + G.esc(t) + "</th>"; }).join("") +
+      "</tr></thead><tbody>" +
+      rows.map(function (r) {
+        return "<tr><td class=\"mono\">" + G.esc(r.name) + "</td>" +
+          '<td class="mono">' + (r.src ? r.src.slice(0, 8) : "—") + "</td>" +
+          tgts.map(function (t) { return cell(r.targets[t], r.src); }).join("") +
+          "</tr>";
+      }).join("") + "</tbody></table></div>";
+    var extra = Object.keys(d.extra || {}).map(function (t) {
+      return '<div class="mt"><strong>' + G.esc(t) + "</strong> has " +
+        d.extra[t].length + " repo(s) the source does not:" +
+        '<div class="mono muted" style="font-size:12px;margin-top:4px">' +
+        G.esc(d.extra[t].join(", ")) + "</div></div>";
+    }).join("");
+    body.innerHTML = head + table + (extra || "");
   }
 
   function loadRepos() {

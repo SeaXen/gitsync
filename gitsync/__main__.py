@@ -667,6 +667,85 @@ def cmd_route_sched(args):
     return 2
 
 
+def compare_matrix(cfg, route, log=None):
+    """drift matrix for one route: HEAD sha of every repo on every site.
+
+    Returns {"repos": [{name, src, targets: {name: sha|None}}],
+             "extra": {target: [names]}, "problems": n}.
+    "extra" is the answer to "why does gitlab have 58 repos when github has
+    48": full mode prunes *refs* inside a repo, never whole repositories —
+    gitsync creates what is missing but never deletes a repo on a target.
+    """
+    import concurrent.futures as _cf
+    say = log or (lambda m: None)
+    source = P.make(route["source"], C.platform(cfg, route["source"]))
+    targets = {t: P.make(t, C.platform(cfg, t))
+               for t in route.get("targets", [])
+               if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")}
+    try:
+        repos = source.list_repos()
+    except Exception as e:
+        raise RuntimeError("cannot list %s: %s" % (route["source"], e))
+    names = [r["name"] for r in repos if not r.get("fork")] or \
+            [r["name"] for r in repos]
+    say("route %s: %d repos × %d sites" % (route.get("name"), len(names),
+                                           len(targets) + 1))
+
+    def head(plat, repo):
+        try:
+            return _head_of(plat, {"name": repo})
+        except Exception:
+            return None
+
+    rows = [None] * len(names)
+    srcs = [None] * len(names)
+    tgts = [{} for _ in range(len(names))]
+    with _cf.ThreadPoolExecutor(max_workers=min(12, max(1, len(names)))) as ex:
+        futs = {}
+        for i, n in enumerate(names):
+            futs[ex.submit(head, source, n)] = ("src", i)
+            for tname, tplat in targets.items():
+                futs[ex.submit(head, tplat, n)] = (tname, i)
+        done = 0
+        for f in _cf.as_completed(futs):
+            kind, i = futs[f]
+            try:
+                sha = f.result()
+            except Exception:
+                sha = None
+            # a target future can finish before the source's, so the row is
+            # assembled once every future is in
+            if kind == "src":
+                srcs[i] = sha
+            else:
+                tgts[i][kind] = sha
+            done += 1
+            if done % 25 == 0:
+                say("  resolved %d/%d heads" % (done, len(futs)))
+    rows = [{"name": names[i], "src": srcs[i], "targets": tgts[i]}
+            for i in range(len(names))]
+    for r in rows:
+        for t in targets:
+            r["targets"].setdefault(t, None)
+
+    extra = {}
+    for tname, tplat in targets.items():
+        try:
+            have = {r["name"] for r in tplat.list_repos()}
+        except Exception as e:
+            say("  cannot list %s: %s" % (tname, str(e)[:60]))
+            have = set()
+        gone = sorted(have - set(names))
+        if gone:
+            extra[tname] = gone
+            say("  %s has %d repo(s) the source does not" % (tname, len(gone)))
+    problems = sum(1 for r in rows if not r["src"] or
+                   any(v != r["src"] for v in r["targets"].values()))
+    return {"route": route.get("name"), "source": route["source"],
+            "targets": sorted(targets), "repos": rows, "extra": extra,
+            "problems": problems}
+
+
 def cmd_compare(args):
     """drift check: compare the HEAD of every repo across a route"""
     cfg = C.load_config()
@@ -676,6 +755,17 @@ def cmd_compare(args):
     if not routes:
         print("no routes configured")
         return 2
+    if getattr(args, "json", False):
+        # machine-readable matrix for the web UI's Repos page
+        out = []
+        for route in routes:
+            try:
+                out.append(compare_matrix(cfg, route, log=print))
+            except RuntimeError as e:
+                print(str(e))
+                return 2
+        print(json.dumps(out if len(out) > 1 else out[0]))
+        return 0
     problems = 0
     for route in routes:
         sp = C.platform(cfg, route["source"])
@@ -1939,6 +2029,8 @@ def main(argv=None):
 
     sp = sub.add_parser("compare", help="drift check: HEADs across platforms")
     sp.add_argument("--route", help="only this route")
+    sp.add_argument("--json", action="store_true",
+                    help="one JSON object (used by the web UI's Repos page)")
     sp.set_defaults(func=cmd_compare)
 
     sp = sub.add_parser("mirror", help="sync one or more repos now")

@@ -1384,6 +1384,119 @@ class TestRestore(unittest.TestCase):
         self.assertEqual(SY._hub_repo_name("legacy"), "legacy")
 
 
+class TestCompareMatrix(unittest.TestCase):
+    """the Repos page's repo × site matrix: same / different / missing / extra.
+
+    Real bare repos, so it needs git on PATH (same rule as TestRestore).
+    """
+
+    def _seed(self, td, which, names):
+        import subprocess
+        root = os.path.join(td, which)
+        os.makedirs(root)
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        # fixed dates, or identical content on both sides still hashes
+        # differently and every comparison reads as drift
+        env = dict(os.environ,
+                   GIT_AUTHOR_DATE="2020-01-01T00:00:00 +0000",
+                   GIT_COMMITTER_DATE="2020-01-01T00:00:00 +0000")
+        for n, msg in names:
+            subprocess.run(["git", "init", "-q", "--bare",
+                            os.path.join(root, n + ".git")], check=True)
+            subprocess.run(["git", "-C", os.path.join(root, n + ".git"),
+                            "symbolic-ref", "HEAD", "refs/heads/main"],
+                           check=True)
+            work = os.path.join(td, "w-" + which + "-" + n)
+            os.makedirs(work)
+            subprocess.run(["git", "init", "-q", work], check=True)
+            subprocess.run(["git", "-C", work, "checkout", "-q", "-b", "main"],
+                           check=True)
+            with open(os.path.join(work, "f"), "w") as f:
+                f.write(msg)
+            subprocess.run(["git", "-C", work, "add", "."], check=True)
+            subprocess.run(["git", "-C", work] + ident +
+                           ["commit", "-q", "-m", msg], check=True, env=env)
+            subprocess.run(["git", "-C", work, "push", "-q",
+                            os.path.join(root, n + ".git"), "main"],
+                           check=True, env=env)
+        return root
+
+    def test_matrix_marks_same_different_missing_and_extra(self):
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            src = self._seed(td, "src", [("a", "a1"), ("b", "b1"), ("c", "c1")])
+            # dst: a is current, b is a different commit, c is absent,
+            # and z exists only on the destination
+            dst = self._seed(td, "dst", [("a", "a1"), ("b", "b2"), ("z", "z1")])
+            cfg = {"platforms": {"src": {"type": "local", "enabled": True,
+                                         "path": src},
+                                 "dst": {"type": "local", "enabled": True,
+                                         "path": dst}},
+                   "routes": [{"name": "r", "source": "src",
+                               "targets": ["dst"]}]}
+            out = M.compare_matrix(cfg, cfg["routes"][0])
+            rows = {r["name"]: r for r in out["repos"]}
+            self.assertEqual(sorted(rows), ["a", "b", "c"])
+            self.assertEqual(rows["a"]["targets"]["dst"], rows["a"]["src"])
+            self.assertNotEqual(rows["b"]["targets"]["dst"], rows["b"]["src"])
+            self.assertIsNone(rows["c"]["targets"]["dst"])
+            # full mode prunes refs, never whole repos — that is what the
+            # "extra" list is for
+            self.assertEqual(out["extra"], {"dst": ["z"]})
+            self.assertEqual(out["problems"], 2)      # b differs, c missing
+
+    def test_compare_json_is_the_last_line_a_job_prints(self):
+        # the web UI starts the job and parses the final line, so --json must
+        # print exactly one JSON object and nothing after it
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True, check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            src = self._seed(td, "src", [("a", "a1")])
+            dst = self._seed(td, "dst", [("a", "a1")])
+            cfgdir = os.path.join(td, "config")
+            datadir = os.path.join(td, "data")
+            os.makedirs(cfgdir)
+            os.makedirs(datadir)
+            with open(os.path.join(cfgdir, "config.json"), "w") as f:
+                json.dump({"platforms": {
+                    "src": {"type": "local", "enabled": True, "path": src},
+                    "dst": {"type": "local", "enabled": True, "path": dst}},
+                    "routes": [{"name": "r", "source": "src",
+                                "targets": ["dst"]}],
+                    "settings": {}}, f)
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR,
+                   C.LOG_FILE)
+            C.CONFIG_DIR, C.CONFIG_FILE = cfgdir, os.path.join(cfgdir,
+                                                              "config.json")
+            C.DATA_DIR, C.MIRROR_DIR = datadir, os.path.join(datadir,
+                                                             "mirrors")
+            C.LOG_FILE = os.path.join(datadir, "gitsync.log")
+            env = dict(os.environ, PYTHONPATH=os.path.dirname(
+                os.path.dirname(os.path.abspath(M.__file__))),
+                GITSYNC_CONFIG_DIR=cfgdir, GITSYNC_DATA_DIR=datadir)
+            try:
+                r = subprocess.run([sys.executable, "-m", "gitsync",
+                                    "compare", "--json"],
+                                   capture_output=True, text=True, env=env,
+                                   timeout=120)
+            finally:
+                (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR,
+                 C.LOG_FILE) = old
+            self.assertEqual(r.returncode, 0, r.stderr[-300:])
+            lines = [l for l in r.stdout.splitlines() if l.strip()]
+            data = json.loads(lines[-1])          # must not raise
+            self.assertEqual(data["route"], "r")
+            self.assertEqual([x["name"] for x in data["repos"]], ["a"])
+            self.assertEqual(data["problems"], 0)
+
+
 class TestNotifyCli(unittest.TestCase):
     """P0-13: --set-url / --set-telegram / --install-hook do what they say."""
 
@@ -1763,9 +1876,11 @@ class TestWeb(unittest.TestCase):
                 r._secrets = saved
 
     def test_tool_argv_builds_the_right_command(self):
-        self.assertEqual(W._tool_argv("compare", {}), (["compare"], False))
+        # compare runs with --json: the Repos page parses the job's last line
+        self.assertEqual(W._tool_argv("compare", {}), (["compare", "--json"],
+                                                      False))
         self.assertEqual(W._tool_argv("compare", {"route": "main"}),
-                         (["compare", "--route", "main"], False))
+                         (["compare", "--json", "--route", "main"], False))
         self.assertEqual(W._tool_argv("fix", {"route": "main"}),
                          (["fix", "--route", "main"], True))
         self.assertEqual(W._tool_argv("doctor", {"fix": True}),
