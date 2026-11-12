@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.3] - 2026-11-12
+
+### The TUI quit instead of hanging on `Q`
+- Platform probing ran in a `ThreadPoolExecutor`, and that pool registers an `atexit` hook that **joins its workers**. A probe caught in `urllib` — GitHub answers 429 and `_http` honours `Retry-After` for up to three attempts — therefore kept the process alive after `Q`, so the TUI appeared to ignore the quit (observed: still running 8 s after the keypress). The probes now run on named daemon threads (`probe-<platform>`) that feed a `queue.Queue`, and exit no longer waits for them: quit is ~1.5 s again, and `TestTUISmoke` passes.
+- A regression test asserts the refresh uses daemon `probe-*` threads and no `ThreadPoolExecutor*` thread exists while it runs.
+
 ## [2.1.2] - 2026-11-12
 
 ### A skipped run no longer looks like a failed one

@@ -83,13 +83,13 @@ if curses is None:
 
 import json
 import os
+import queue
 import re
 import subprocess
 import sys
 import threading
 import time
 import traceback
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 from datetime import datetime
 
@@ -241,10 +241,26 @@ def _refresh_platforms_inner():
     # them together cuts it to the slowest single site.
     plats = list((cfg.get("platforms") or {}).items())
     rows = [None] * len(plats)
-    with ThreadPoolExecutor(max_workers=max(1, len(plats))) as ex:
-        futs = {ex.submit(_probe, n, p): i for i, (n, p) in enumerate(plats)}
-        for f in as_completed(futs):
-            rows[futs[f]] = f.result()
+    # Plain daemon threads, deliberately not ThreadPoolExecutor: the pool
+    # registers an atexit hook that JOINS its workers, so a probe sleeping
+    # inside urllib (GitHub answers 429 and _http honours Retry-After, up to
+    # 30s x 3 attempts) kept the process alive after Q — the TUI looked like
+    # it ignored the quit. Daemon threads are abandoned at exit; the counts
+    # are cosmetic, nothing waits for them.
+    done = queue.Queue()
+
+    def _one(idx, name, pcfg):
+        try:
+            done.put((idx, _probe(name, pcfg)))
+        except Exception:                    # _probe already guards; be sure
+            done.put((idx, None))
+
+    for i, (n, p) in enumerate(plats):
+        threading.Thread(target=_one, args=(i, n, p), daemon=True,
+                         name="probe-%s" % n).start()
+    for _ in plats:
+        i, row = done.get()
+        rows[i] = row
     state["platforms"] = [r for r in rows if r]
     state["platforms_loaded"] = True
     save_probe_cache(state["platforms"])

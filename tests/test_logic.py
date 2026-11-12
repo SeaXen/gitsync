@@ -1796,6 +1796,46 @@ class TestStartupCaches(unittest.TestCase):
             key = tui._log_cache["key"]
             self.assertIsNotNone(key)
 
+    def test_platform_probes_run_on_daemon_threads(self):
+        # The probes used to run in a ThreadPoolExecutor, whose atexit hook
+        # JOINS its workers: a probe sleeping in urllib (GitHub 429 +
+        # Retry-After, up to 90s) kept the process alive after Q, so the TUI
+        # looked like it ignored the quit. Nothing may block exit now.
+        release = threading.Event()
+        started = []
+
+        def fake_probe(name, p):
+            started.append(name)
+            release.wait(5)
+            return (name, p.get("type", "?"), True, True, "ok", "1")
+
+        cfg = {"platforms": {"a": {"type": "local", "enabled": True},
+                             "b": {"type": "local", "enabled": True}}}
+        refresher = threading.Thread(target=tui.refresh_platforms, daemon=True)
+        with patch.object(tui, "_probe", side_effect=fake_probe), \
+             patch.object(tui.C, "load_config", return_value=cfg):
+            refresher.start()
+            deadline = time.time() + 5
+            while len(started) < 2 and time.time() < deadline:
+                time.sleep(0.02)
+            names = [t.name for t in threading.enumerate()]
+            try:
+                self.assertEqual(sorted(started), ["a", "b"],
+                                 "both platforms must be probed")
+                self.assertIn("probe-a", names)
+                self.assertIn("probe-b", names)
+                self.assertFalse(
+                    [n for n in names if n.startswith("ThreadPoolExecutor")],
+                    "a pool thread would be joined at exit and hang the quit")
+                self.assertTrue(
+                    all(t.daemon for t in threading.enumerate()
+                        if t.name.startswith("probe-")),
+                    "probe threads must be daemons")
+            finally:
+                release.set()
+                refresher.join(5)
+        self.assertEqual([r[0] for r in tui.state["platforms"]], ["a", "b"])
+
 
 class TestTui(unittest.TestCase):
     def setUp(self):
