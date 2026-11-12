@@ -23,8 +23,22 @@ DATA_DIR = os.environ.get(
     "GITSYNC_DATA_DIR",
     os.path.expanduser("~/.local/share/%s" % APP))
 MIRROR_DIR = os.path.join(DATA_DIR, "mirrors")
-LOG_FILE = os.path.join(DATA_DIR, "gitsync.log")
-RECORDS_FILE = os.path.join(DATA_DIR, "records.json")
+
+
+def log_file():
+    """the run log, resolved at call time.
+
+    LOG_FILE/RECORDS_FILE used to be module constants bound at import, so a
+    caller (or a test) that pointed DATA_DIR at a temp dir still wrote runs
+    into the real log and the real records.json — the live dashboard then
+    showed a fake "last run". Every reader and writer resolves now.
+    """
+    return os.path.join(DATA_DIR, "gitsync.log")
+
+
+def records_file():
+    """the run history, resolved at call time (see log_file())."""
+    return os.path.join(DATA_DIR, "records.json")
 
 DEFAULT_CONFIG = {
     "version": 1,

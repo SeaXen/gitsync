@@ -81,14 +81,13 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
                 }
             }, f)
 
-        cls._old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR, C.LOG_FILE)
+        cls._old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
         C.CONFIG_DIR = cfgdir
         C.CONFIG_FILE = os.path.join(cfgdir, "config.json")
         C.DATA_DIR = datadir
         C.MIRROR_DIR = os.path.join(datadir, "mirrors")
-        C.LOG_FILE = os.path.join(datadir, "gitsync.log")
 
-        with open(C.LOG_FILE, "w", encoding="utf-8") as f:
+        with open(C.log_file(), "w", encoding="utf-8") as f:
             f.write("[2026-11-10 12:00:00] === gitsync webapp test initialized ===\n")
 
         cls.token = "test-token-playwright-secret"
@@ -115,7 +114,7 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
             cls.srv.server_close()
         except Exception:
             pass
-        C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR, C.LOG_FILE = cls._old
+        C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = cls._old
         shutil.rmtree(cls.td, ignore_errors=True)
 
     def setUp(self):

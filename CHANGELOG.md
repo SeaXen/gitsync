@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.1] - 2026-11-12
+
+### Tests no longer write runs into the real data dir
+- `LOG_FILE` and `RECORDS_FILE` were module constants computed once at import, so any caller that redirected `C.DATA_DIR` — the tests, or an embedded user — still appended to the **real** `gitsync.log` and `records.json`. Running the unit tests on the live box therefore recorded fake runs (route `r`, `cannot list`) and the dashboard's LAST RUN card showed a failure that never happened. Both paths are now resolved at call time via `config.log_file()` / `config.records_file()` (with `_route_state_path()` already following `DATA_DIR`), and `tests/test_logic.py` redirects `DATA_DIR`/`MIRROR_DIR` for the whole module in `setUpModule`, so no test can touch the operator's log, records or hub mirrors even if it forgets to.
+- A regression test asserts the paths follow `DATA_DIR`; the previous 2.1.0 release notes stand.
+
 ## [2.1.0] - 2026-11-12
 
 ### Web UI audit fixes (36 page × viewport combinations, real browser)

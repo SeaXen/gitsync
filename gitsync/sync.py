@@ -172,9 +172,9 @@ def log(msg):
         try:
             C.ensure_dirs()
             _rotate_log()
-            with open(C.LOG_FILE, "a") as f:
+            with open(C.log_file(), "a") as f:
                 f.write(line + "\n")
-            os.chmod(C.LOG_FILE, 0o600)
+            os.chmod(C.log_file(), 0o600)
         except OSError:
             pass
 
@@ -189,9 +189,9 @@ def _rotate_log():
     bound and `read_log_tail` pays for it on every TUI frame.
     """
     try:
-        if os.path.getsize(C.LOG_FILE) < LOG_MAX_BYTES:
+        if os.path.getsize(C.log_file()) < LOG_MAX_BYTES:
             return
-        os.replace(C.LOG_FILE, C.LOG_FILE + ".1")
+        os.replace(C.log_file(), C.log_file() + ".1")
     except OSError:
         pass
 
@@ -1312,19 +1312,19 @@ def _record(summary):
     try:
         C.ensure_dirs()
         records = []
-        if os.path.exists(C.RECORDS_FILE):
+        if os.path.exists(C.records_file()):
             try:
-                with open(C.RECORDS_FILE, "r", encoding="utf-8") as rf:
+                with open(C.records_file(), "r", encoding="utf-8") as rf:
                     records = json.load(rf)
             except (OSError, ValueError):
                 records = []
         records.append(summary)
         records = records[-200:]          # keep the last 200 runs
-        tmp = C.RECORDS_FILE + ".tmp"
+        tmp = C.records_file() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(records, f, indent=2)
-        os.replace(tmp, C.RECORDS_FILE)
-        os.chmod(C.RECORDS_FILE, 0o600)   # failure text can name a remote
+        os.replace(tmp, C.records_file())
+        os.chmod(C.records_file(), 0o600)   # failure text can name a remote
     except OSError:
         pass
 
@@ -1333,8 +1333,8 @@ def _record(summary):
 
 def last_records(n=10):
     try:
-        if os.path.exists(C.RECORDS_FILE):
-            with open(C.RECORDS_FILE, "r", encoding="utf-8") as rf:
+        if os.path.exists(C.records_file()):
+            with open(C.records_file(), "r", encoding="utf-8") as rf:
                 return json.load(rf)[-n:]
     except (OSError, ValueError):
         pass

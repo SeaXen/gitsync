@@ -261,11 +261,11 @@ def cmd_status(args):
 
 
 def cmd_log(args):
-    if not os.path.exists(C.LOG_FILE):
+    if not os.path.exists(C.log_file()):
         print("no log yet")
         return 0
     n = args.lines
-    with open(C.LOG_FILE, "r", encoding="utf-8", errors="replace") as lf:
+    with open(C.log_file(), "r", encoding="utf-8", errors="replace") as lf:
         lines = lf.read().splitlines()
     for line in lines[-n:]:
         print(line)

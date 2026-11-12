@@ -333,7 +333,7 @@ def run_wizard():
     hr("saved")
     print(" Config : %s" % C.CONFIG_FILE)
     print(" Mirrors: %s" % C.MIRROR_DIR)
-    print(" Log    : %s" % C.LOG_FILE)
+    print(" Log    : %s" % C.log_file())
     print("\n Next steps:")
     print("   gitsync sync       # run the first sync now")
     print("   gitsync tui        # open the dashboard")

@@ -131,11 +131,11 @@ def _audit(msg):
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"), _redactor().redact(msg))
     try:
         C.ensure_dirs()
-        if os.path.exists(C.LOG_FILE) and os.path.getsize(C.LOG_FILE) > (2 << 20):
-            os.replace(C.LOG_FILE, C.LOG_FILE + ".1")
-        with open(C.LOG_FILE, "a") as f:
+        if os.path.exists(C.log_file()) and os.path.getsize(C.log_file()) > (2 << 20):
+            os.replace(C.log_file(), C.log_file() + ".1")
+        with open(C.log_file(), "a") as f:
             f.write(line + "\n")
-        os.chmod(C.LOG_FILE, 0o600)
+        os.chmod(C.log_file(), 0o600)
     except OSError:
         pass
 
@@ -1283,7 +1283,7 @@ def h_status(handler):
         "scheduler": _cached_scheduler(),
         "next_run": _cached_next_run(),
         "config_file": C.CONFIG_FILE, "mirror_dir": C.MIRROR_DIR,
-        "log_file": C.LOG_FILE, "bind": handler.server.bind_host,
+        "log_file": C.log_file(), "bind": handler.server.bind_host,
         "port": handler.server.port,
         "last_run": _public_record(last) if last else None,
         "counts": {"platforms": len(cfg.get("platforms") or {}),
@@ -1925,7 +1925,7 @@ def h_log(handler):
     q = (handler._qs().get("q") or [""])[0].lower()
     lines = []
     try:
-        with open(C.LOG_FILE) as f:
+        with open(C.log_file()) as f:
             lines = f.read().splitlines()
     except OSError:
         pass
@@ -1955,7 +1955,7 @@ def h_settings_get(handler):
     st = _public_settings(cfg)
     a = get_auth()
     st["paths"] = {"config": C.CONFIG_FILE, "mirror": C.MIRROR_DIR,
-                   "log": C.LOG_FILE, "data": C.DATA_DIR}
+                   "log": C.log_file(), "data": C.DATA_DIR}
     st["schedules"] = {k: v["label"] for k, v in C.SCHEDULES.items()}
     st["themes"] = list(C.THEMES)
     st["scheduler"] = _cached_scheduler()

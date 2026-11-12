@@ -51,7 +51,7 @@ def log(msg):
     print(line, flush=True)
     try:
         C.ensure_dirs()
-        with open(C.LOG_FILE, "a") as f:
+        with open(C.log_file(), "a") as f:
             f.write(line + "\n")
     except OSError:
         pass

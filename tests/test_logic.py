@@ -62,10 +62,23 @@ def setUpModule():
     for k in _TOKEN_ENV:
         os.environ.pop(k, None)
     socket.socket.connect = _hermetic_connect
+    # No test may write into the real data dir: cmd_sync and the prune path
+    # record every run, and one test that forgot to redirect C.DATA_DIR wrote
+    # fake "runs" into the live records.json and gitsync.log — the operator's
+    # dashboard then showed a run that never happened. Redirect the whole
+    # module; tests that want their own dir still override it.
+    global _REAL_DATA_DIR, _TEST_DATA_DIR
+    _REAL_DATA_DIR = (C.DATA_DIR, C.MIRROR_DIR)
+    _TEST_DATA_DIR = tempfile.mkdtemp(prefix="gitsync-test-data-")
+    C.DATA_DIR = _TEST_DATA_DIR
+    C.MIRROR_DIR = os.path.join(_TEST_DATA_DIR, "mirrors")
 
 
 def tearDownModule():
     socket.socket.connect = _real_connect
+    C.DATA_DIR, C.MIRROR_DIR = _REAL_DATA_DIR
+    import shutil
+    shutil.rmtree(_TEST_DATA_DIR, ignore_errors=True)
 
 
 # --------------------------------------------------------------- platforms
@@ -530,6 +543,29 @@ class TestWebhooks(unittest.TestCase):
 # -------------------------------------------------------------- sync engine
 
 class TestSyncHelpers(unittest.TestCase):
+    def test_log_and_records_follow_data_dir(self):
+        # LOG_FILE/RECORDS_FILE were module constants bound at import, so a
+        # caller that redirected DATA_DIR still appended runs to the real
+        # log and records.json — the operator's dashboard then showed a
+        # "last run" that never happened.
+        self.assertEqual(C.log_file(),
+                         os.path.join(C.DATA_DIR, "gitsync.log"))
+        self.assertEqual(C.records_file(),
+                         os.path.join(C.DATA_DIR, "records.json"))
+        td = tempfile.mkdtemp()
+        old = (C.DATA_DIR, C.MIRROR_DIR)
+        C.DATA_DIR, C.MIRROR_DIR = td, os.path.join(td, "mirrors")
+        try:
+            self.assertEqual(C.log_file(), os.path.join(td, "gitsync.log"))
+            self.assertEqual(C.records_file(),
+                             os.path.join(td, "records.json"))
+            self.assertFalse(SY._route_state_path().startswith(
+                os.path.expanduser("~/.local/share")))
+        finally:
+            C.DATA_DIR, C.MIRROR_DIR = old
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
+
     def test_protection_error(self):
         self.assertTrue(SY._protection_error(
             'remote: You are not allowed to force push code to a protected '
@@ -1522,13 +1558,11 @@ class TestCompareMatrix(unittest.TestCase):
                     "routes": [{"name": "r", "source": "src",
                                 "targets": ["dst"]}],
                     "settings": {}}, f)
-            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR,
-                   C.LOG_FILE)
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
             C.CONFIG_DIR, C.CONFIG_FILE = cfgdir, os.path.join(cfgdir,
                                                               "config.json")
             C.DATA_DIR, C.MIRROR_DIR = datadir, os.path.join(datadir,
                                                              "mirrors")
-            C.LOG_FILE = os.path.join(datadir, "gitsync.log")
             env = dict(os.environ, PYTHONPATH=os.path.dirname(
                 os.path.dirname(os.path.abspath(M.__file__))),
                 GITSYNC_CONFIG_DIR=cfgdir, GITSYNC_DATA_DIR=datadir)
@@ -1538,8 +1572,8 @@ class TestCompareMatrix(unittest.TestCase):
                                    capture_output=True, text=True, env=env,
                                    timeout=120)
             finally:
-                (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR,
-                 C.LOG_FILE) = old
+                (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR,
+                 C.MIRROR_DIR) = old
             self.assertEqual(r.returncode, 0, r.stderr[-300:])
             lines = [l for l in r.stdout.splitlines() if l.strip()]
             data = json.loads(lines[-1])          # must not raise
@@ -1743,10 +1777,10 @@ class TestStartupCaches(unittest.TestCase):
         self.assertEqual(tui.load_probe_cache(), ([], None))
 
     def test_log_tail_is_cached_until_the_file_changes(self):
+        # DATA_DIR is already this test's temp dir, and the log path is
+        # resolved from it at call time
         log = os.path.join(self.td, "gitsync.log")
-        old_log = C.LOG_FILE
-        C.LOG_FILE = log
-        try:
+        if True:
             with open(log, "w") as f:
                 f.write("one\ntwo\n")
             tui.read_log_tail(10)
@@ -1761,8 +1795,6 @@ class TestStartupCaches(unittest.TestCase):
             tui.read_log_tail(10)
             key = tui._log_cache["key"]
             self.assertIsNotNone(key)
-        finally:
-            C.LOG_FILE = old_log
 
 
 class TestTui(unittest.TestCase):
@@ -2385,13 +2417,11 @@ class TestWebHttp(unittest.TestCase):
                 "routes": [{"name": "main", "source": "src",
                             "targets": ["dst"]}],
                 "settings": {}}, f)
-        self._old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR,
-                     C.LOG_FILE)
+        self._old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
         C.CONFIG_DIR = cfgdir
         C.CONFIG_FILE = os.path.join(cfgdir, "config.json")
         C.DATA_DIR = datadir
         C.MIRROR_DIR = os.path.join(datadir, "mirrors")
-        C.LOG_FILE = os.path.join(datadir, "gitsync.log")
         self.token = "test-token-abcdef123456"
         self.srv = W._Server(("127.0.0.1", 0), W.make_handler(), self.token,
                              "127.0.0.1", set())
@@ -2404,8 +2434,7 @@ class TestWebHttp(unittest.TestCase):
         import shutil
         self.srv.shutdown()
         self.srv.server_close()
-        C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR, C.LOG_FILE = \
-            self._old
+        C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = self._old
         shutil.rmtree(self.td, ignore_errors=True)
 
     def _req(self, method, path, body=None, headers=None, host=None):

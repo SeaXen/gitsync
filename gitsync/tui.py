@@ -272,12 +272,12 @@ def read_log_tail(n=150):
     (up to the 2 MB rotation cap) each time.
     """
     try:
-        st = os.stat(C.LOG_FILE)
+        st = os.stat(C.log_file())
         key = (st.st_mtime_ns, st.st_size, n)
         if _log_cache["key"] == key:
             state["log_tail"] = _log_cache["lines"]
             return
-        with open(C.LOG_FILE) as f:
+        with open(C.log_file()) as f:
             lines = f.read().splitlines()[-n:]
         _log_cache["key"] = key
         _log_cache["lines"] = lines
@@ -288,10 +288,10 @@ def read_log_tail(n=150):
 
 def read_full_log():
     try:
-        st = os.stat(C.LOG_FILE)
+        st = os.stat(C.log_file())
         key = (st.st_mtime_ns, st.st_size)
         if _log_cache.get("full_key") != key:
-            with open(C.LOG_FILE) as f:
+            with open(C.log_file()) as f:
                 state["full_log"] = f.read().splitlines()
             _log_cache["full_key"] = key
     except OSError:
@@ -2978,7 +2978,7 @@ def draw_settings(stdscr, h, w, dim):
         ("Scheduler          : %s" % cached_status(), 0),
         ("Config file        : %s" % C.CONFIG_FILE, dim),
         ("Mirror hub         : %s" % C.MIRROR_DIR, dim),
-        ("Log file           : %s" % C.LOG_FILE, dim),
+        ("Log file           : %s" % C.log_file(), dim),
         ("", 0),
         ("change with: O (options)  C (schedule)  A (accounts)  "
          "W (wizard)", dim),
@@ -3322,12 +3322,12 @@ def _log_tui_crash(e):
     tb = traceback.format_exc()
     try:
         C.ensure_dirs()
-        with open(C.LOG_FILE, "a", encoding="utf-8") as f:
+        with open(C.log_file(), "a", encoding="utf-8") as f:
             f.write("\n--- TUI crash at %s ---\n%s\n"
                     % (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tb))
     except Exception:
         pass
-    print("TUI error: %s (details written to %s)" % (e, C.LOG_FILE))
+    print("TUI error: %s (details written to %s)" % (e, C.log_file()))
     snapshot()
 
 
