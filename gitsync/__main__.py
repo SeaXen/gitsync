@@ -875,15 +875,18 @@ def cmd_compare(args):
         print("no routes configured")
         return 2
     if getattr(args, "json", False):
-        # machine-readable matrix for the web UI's Repos page
-        out = []
+        # machine-readable matrix for the web UI's Repos page: one JSON
+        # object per route, one per line (NDJSON). It used to print an
+        # object for a single route and an ARRAY for several, so with two
+        # routes configured the page parsed an array as a matrix and
+        # rendered "no data" — the shape must not depend on the count.
         for route in routes:
             try:
-                out.append(compare_matrix(cfg, route, log=print))
+                matrix = compare_matrix(cfg, route, log=print)
             except RuntimeError as e:
                 print(str(e))
                 return 2
-        print(json.dumps(out if len(out) > 1 else out[0]))
+            print(json.dumps(matrix))
         return 0
     problems = 0
     for route in routes:

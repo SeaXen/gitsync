@@ -57,6 +57,7 @@
     });
   }
   function apiError(e) {
+    if (typeof e === "string") return e;      // errorBox("...") is a message
     return (e && (e.error || e.message)) || "request failed";
   }
 

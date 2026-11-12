@@ -2033,16 +2033,47 @@ class TestWeb(unittest.TestCase):
         W._remember_job_result(FakeJob("compare", 0, [
             "route r: 1 repos x 1 sites",
             '{"route": "r", "repos": [{"name": "a"}], "problems": 0}']))
-        self.assertIsNotNone(W._CMP_CACHE["data"])
-        self.assertEqual(W._CMP_CACHE["data"]["route"], "r")
+        self.assertEqual(list(W._CMP_CACHE["data"]), ["r"])
+        self.assertEqual(W._CMP_CACHE["data"]["r"]["route"], "r")
+        # a second route is added, not replaced
+        W._remember_job_result(FakeJob("compare", 0, [
+            '{"route": "s", "repos": [{"name": "b"}], "problems": 0}']))
+        self.assertEqual(sorted(W._CMP_CACHE["data"]), ["r", "s"])
         # a failed compare must not be cached
         W._CMP_CACHE.update(at=0.0, data=None)
         W._remember_job_result(FakeJob("compare", 1, ["boom"]))
         self.assertIsNone(W._CMP_CACHE["data"])
         # ... and a finished sync invalidates whatever was cached
-        W._CMP_CACHE.update(at=0.0, data={"route": "r", "repos": []})
+        W._CMP_CACHE.update(at=0.0, data={"r": {"route": "r", "repos": []}})
         W._remember_job_result(FakeJob("sync", 0, []))
         self.assertIsNone(W._CMP_CACHE["data"])
+
+    def test_compare_json_is_one_object_per_line(self):
+        # With two routes configured, compare --json used to print a JSON
+        # ARRAY. The Repos page parsed the last line as one matrix, saw no
+        # "repos" key at the top level, and showed "no data" — the shape
+        # must not depend on how many routes exist.
+        import contextlib
+        import io
+        import types
+
+        cfg = {"routes": [{"name": "a"}, {"name": "b"}]}
+        orig_load, orig_cmp = M.C.load_config, M.compare_matrix
+        try:
+            M.C.load_config = lambda: cfg
+            M.compare_matrix = lambda cfg, route, log=None: {
+                "route": route["name"], "source": "s", "targets": ["t"],
+                "repos": [{"name": "x"}], "problems": 0}
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                rc = M.cmd_compare(types.SimpleNamespace(route=None, json=True))
+        finally:
+            M.C.load_config, M.compare_matrix = orig_load, orig_cmp
+        self.assertEqual(rc, 0)
+        objs = [json.loads(l) for l in buf.getvalue().splitlines()
+                if l.startswith("{")]
+        self.assertEqual([o["route"] for o in objs], ["a", "b"])
+        self.assertTrue(all(o["repos"] for o in objs))
 
     def test_a_none_result_is_cached_too(self):
         # "no timer / no next run" is a real answer; caching only truthy

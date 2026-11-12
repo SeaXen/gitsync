@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-11-12
+
+### Web UI audit fixes (36 page × viewport combinations, real browser)
+- **`compare --json` printed an array with 2+ routes**, so the Repos page parsed the last line as one matrix, found no `repos` key and showed “compare produced no data”. It now prints **one JSON object per route, one per line (NDJSON)** — the shape no longer depends on how many routes exist. The page collects the matrices from the stream and the server caches them **per route**, so a single-route compare no longer discards the other routes and the picker can switch between them without a re-run.
+- **Repos page gained a Route picker** when the config has more than one route (one-way + mesh); switching re-renders that route's matrix.
+- **A browser mistyping a URL got `{"error": "not found"}`.** Static 404s now return a styled page (status 404, “Back to the dashboard”) when the client asks for `text/html`; API clients still get the JSON error. A `%` in the stylesheet had made the first version answer 500 — the template now substitutes the path with `str.replace`.
+- **`errorBox("message")` rendered “request failed”** because the helper only understood error objects; it now passes strings through.
+- **Touch targets**: `.min` (card minimise), `.linkbtn` (dashboard “repos ▾”) and `.check` rows are now at least 32 px tall/wide on phones, so every button, link button and checkbox row clears the 32 px tap minimum at 390 px width.
+- **Dashboard said “not mirrored” for every repo on a local-folder platform** — a local path has no hub mirror by design, so it now says “local folder”. `/api/repos` returns the platform `type` for it.
+- **`HEAD` requests returned 501** (the server only implemented GET/POST/PUT/DELETE), which reads as “broken” to uptime checks and proxies; `HEAD` now answers with GET's headers and no body. Static responses also sent `Cache-Control` twice (`no-store` from `_send`, `no-cache` from the caller) — one header now, the caller's value wins.
+
 ### Opt-in repository deletion (option C)
 - **Per-target opt-in**: a route gains `"prune_repos": ["gitlab"]` — set on the Routes page (“Delete extra repos”, one checkbox per target) or in `config.json`. Only names that are actually targets of that route are accepted; a string is accepted as well as a list.
 - **Four locks, all of which must be open**: the route names the target, the caller asks for it (`gitsync sync --prune-repos`, `gitsync prune --yes`, or the WebUI action), the route is in **full** mode, and the run is **not** scheduled — repo deletion is never something the timer decides.

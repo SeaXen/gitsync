@@ -37,6 +37,7 @@ Security model (the config holds platform tokens, so this is the priority):
 
 import hashlib
 import hmac
+import html
 import ipaddress
 import json
 import mimetypes
@@ -73,6 +74,37 @@ DEFAULT_PORT = 7765
 DEFAULT_BIND = "127.0.0.1"
 LAN_BIND = "0.0.0.0"
 WEBUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
+
+# A browser that mistypes a URL should get a page, not {"error": "not found"}.
+# Self-contained on purpose: it must render even if the asset path is what was
+# wrong. Uses the same palette as the app.
+_NOT_FOUND_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>404 — gitsync</title><style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
+ background:#0d1117;color:#e6edf3;
+ font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
+.card{max-width:420px;width:100%;background:#161b22;border:1px solid #263040;
+ border-radius:12px;padding:26px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
+.code{font:600 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+ letter-spacing:.12em;text-transform:uppercase;color:#8b949e}
+h1{font-size:19px;margin:8px 0 6px}
+p{color:#c9d1d9;margin:0 0 18px}
+a{display:inline-flex;align-items:center;min-height:36px;padding:7px 14px;
+ border-radius:9px;background:#388bfd;color:#040c18;font-weight:600;
+ text-decoration:none}
+a:hover{text-decoration:underline}
+code{color:#8b949e}
+</style></head><body><div class="card">
+<div class="code">404 · no such page</div>
+<h1>That page does not exist</h1>
+<p><code>__PATH__</code> is not part of the gitsync web UI. Check the address, or
+start from the dashboard.</p>
+<a href="/">Back to the dashboard</a>
+</div></body></html>
+"""
 MAX_BODY = 1 << 20                      # 1 MB request cap
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9._/*?-]{1,128}$")
@@ -490,24 +522,36 @@ _CMP_TTL = 300.0
 
 
 def _remember_job_result(job):
-    """keep the last compare matrix (and drop it when a sync ran).
+    """keep the last compare matrix per route (and drop it when a sync ran).
 
     A compare is 40 repos x 4 sites of git ls-remote (~15s); caching it
     makes the Repos page instant on every revisit, and a finished sync
     invalidates it because the answer just changed.
+
+    Keyed by route name: compare --json prints one matrix per route, and a
+    single-route compare must not throw the other routes away.
     """
     if job.kind == "compare" and job.exit == 0:
         with job.cond:
             lines = list(job.lines)
-        for line in reversed(lines):
+        found = {}
+        for line in lines:
             try:
                 data = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(data, dict) and "repos" in data:
-                _CMP_CACHE["at"] = time.time()
-                _CMP_CACHE["data"] = data
-                return
+            if (isinstance(data, dict) and "repos" in data
+                    and data.get("route")):
+                found[data["route"]] = data
+        if not found:
+            return
+        fresh = (time.time() - _CMP_CACHE["at"]) <= _CMP_TTL
+        prev = _CMP_CACHE["data"] if fresh and isinstance(
+            _CMP_CACHE["data"], dict) else {}
+        prev = dict(prev)
+        prev.update(found)
+        _CMP_CACHE["at"] = time.time()
+        _CMP_CACHE["data"] = prev
     elif job.kind in ("sync", "fix", "restore", "mirror"):
         _CMP_CACHE["at"] = 0.0
         _CMP_CACHE["data"] = None
@@ -884,16 +928,26 @@ def make_handler():
 
         def _send(self, code, body_bytes, ctype, extra=None):
             try:
+                extra = extra or {}
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body_bytes)))
-                self.send_header("Cache-Control", "no-store")
+                # one Cache-Control only: a caller-supplied value wins
+                # (static assets say no-cache, JSON says no-store)
+                self.send_header("Cache-Control",
+                                 extra.get("Cache-Control", "no-store"))
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
-                for k, v in (extra or {}).items():
+                for k, v in extra.items():
+                    if k.lower() == "cache-control":
+                        continue
                     self.send_header(k, v)
                 self.end_headers()
-                self.wfile.write(body_bytes)
+                # HEAD must advertise the same Content-Length but send no
+                # body: proxies and uptime checks probe with HEAD, and a
+                # 501 there reads as "the service is broken"
+                if not getattr(self, "_head_only", False):
+                    self.wfile.write(body_bytes)
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 pass
 
@@ -1031,6 +1085,14 @@ def make_handler():
         def do_GET(self):
             self._route("GET")
 
+        def do_HEAD(self):
+            # same headers as GET, no body — see _send()
+            self._head_only = True
+            try:
+                self._route("GET")
+            finally:
+                self._head_only = False
+
         def do_POST(self):
             self._route("POST")
 
@@ -1050,6 +1112,15 @@ def make_handler():
             if full != root and not full.startswith(root + os.sep):
                 return self._err(403, "forbidden")
             if not os.path.isfile(full):
+                # a browser navigation gets a page; fetch()/curl still gets
+                # the JSON error (they do not ask for text/html)
+                accept = self.headers.get("Accept") or ""
+                if "text/html" in accept:
+                    return self._send(
+                        404,
+                        _NOT_FOUND_HTML.replace("__PATH__",
+                                                html.escape(path)).encode(),
+                        "text/html; charset=utf-8")
                 return self._err(404, "not found")
             ctype = mimetypes.guess_type(full)[0] or "application/octet-stream"
             if ctype.startswith("text/"):
@@ -1564,7 +1635,10 @@ def h_repos(handler):
                     "private": bool(r.get("private")),
                     "fork": bool(r.get("fork")), "mirrored": mirrored})
     out.sort(key=lambda r: r["name"].lower())
-    handler._json({"platform": name, "repos": out})
+    # the platform type travels with the list: the dashboard prints "local
+    # folder" instead of "not mirrored" for a local path, which has no hub
+    # mirror by design
+    handler._json({"platform": name, "type": ptype, "repos": out})
 
 
 def h_selection_file(handler):
@@ -2167,14 +2241,17 @@ def h_sync_stream(handler):
 
 
 def h_compare_cached(handler):
-    """the last compare matrix, so the Repos page renders without a click."""
+    """the last compare matrices, so the Repos page renders without a click.
+
+    One matrix per route: a config can have several (one-way and mesh), and
+    the page needs the one it is showing, not whichever ran last.
+    """
     data = _CMP_CACHE["data"]
-    if data is None or (time.time() - _CMP_CACHE["at"]) > _CMP_TTL:
-        return handler._json({"cached": False})
-    out = {"cached": True,
-           "age_sec": int(time.time() - _CMP_CACHE["at"])}
-    out.update(data)
-    handler._json(out)
+    if not data or (time.time() - _CMP_CACHE["at"]) > _CMP_TTL:
+        return handler._json({"cached": False, "routes": []})
+    handler._json({"cached": True,
+                   "age_sec": int(time.time() - _CMP_CACHE["at"]),
+                   "routes": [data[k] for k in sorted(data)]})
 
 
 def h_job_start(handler):

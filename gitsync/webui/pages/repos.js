@@ -3,7 +3,7 @@
 (function () {
   var G = window.Gitsync;
   var state = { platform: "", platforms: [], repos: [], sel: {}, q: "", to: "",
-                cmp: null, cmpQ: "" };
+                cmp: null, cmpQ: "", cmpRoute: "", cmpMap: {}, cmpRoutes: [] };
 
   function render(main) {
     main.innerHTML =
@@ -37,6 +37,8 @@
       '<section class="card" id="r-cmp" style="display:none">' +
         '<div class="bar"><span class="route-title">Repo × site matrix</span>' +
         '<div class="actions">' +
+          '<div id="r-cmp-route-wrap" style="min-width:150px;display:none">' +
+            G.field("Route", '<select id="r-cmp-route" name="route"></select>') + "</div>" +
           '<div class="grow" style="min-width:180px">' +
             G.field("Find repo", '<input type="text" id="r-cmp-q" name="cmp_filter" autocomplete="off" placeholder="type to filter…">') + "</div>" +
           '<button class="btn" id="r-cmp-again">Re-run</button>' +
@@ -117,30 +119,39 @@
     var lines = document.getElementById("r-cmp-lines");
     if (lines) lines.textContent = had ? "re-checking…" : "starting…";
     if (!had) card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    var req = { kind: "compare" };
+    if (state.cmpRoute) req.route = state.cmpRoute;
     G.busy(btn, function () {
-      return G.api("POST", "/api/jobs", { kind: "compare" })
+      return G.api("POST", "/api/jobs", req)
         .then(function (r) {
-          var last = "";
+          var parsed = [];
           G.watchJob("/api/jobs/" + encodeURIComponent(r.job_id) + "/stream", {
             onLine: function (line) {
-              last = line;
+              // compare --json prints one matrix per route, one per line;
+              // the human progress lines are mixed in
+              try {
+                var d = JSON.parse(line);
+                if (d && d.repos && d.route) parsed.push(d);
+              } catch (e) {}
               if (!lines) return;
               var div = document.createElement("div");
               div.className = G.stateClass(line);
-              div.textContent = line;
+              div.textContent = line.length > 400 ? line.slice(0, 400) + "…" : line;
               lines.appendChild(div);
               lines.scrollTop = lines.scrollHeight;
             },
             onDone: function (d) {
-              var data = null;
-              try { data = JSON.parse(last); } catch (e) {}
-              if (!data || !data.repos) {
+              var data = parsed.filter(function (m) {
+                return m.route === state.cmpRoute;
+              })[0] || parsed[0];
+              if (!data) {
                 if (!state.cmp) {
                   body.innerHTML = G.errorBox("compare produced no data (exit " +
                     (d.exit === undefined ? "?" : d.exit) + ")");
                 }
                 return;
               }
+              state.cmpMap[data.route] = data;
               state.cmp = data;
               renderMatrix();
             }
@@ -155,14 +166,44 @@
   }
 
   // the matrix is the point of the page, so it loads on its own: the cached
-  // answer renders instantly and a stale one refreshes in the background
+  // answer renders instantly and a stale one refreshes in the background.
+  // One matrix per route — a config with a one-way and a mesh route must not
+  // show whichever happened to be compared last.
   function autoCompare() {
+    G.api("GET", "/api/routes").then(function (rd) {
+      state.cmpRoutes = rd.routes || [];
+      var sel = document.getElementById("r-cmp-route");
+      var wrap = document.getElementById("r-cmp-route-wrap");
+      if (!sel) return;
+      sel.innerHTML = state.cmpRoutes.map(function (r) {
+        return '<option value="' + G.esc(r.name) + '">' + G.esc(r.name) +
+          " (" + G.esc(r.source) + ")</option>";
+      }).join("");
+      if (!state.cmpRoute) {
+        state.cmpRoute = (state.cmpRoutes[0] || {}).name || "";
+      }
+      sel.value = state.cmpRoute;
+      if (wrap) wrap.style.display = state.cmpRoutes.length > 1 ? "" : "none";
+      sel.addEventListener("change", function () {
+        state.cmpRoute = sel.value;
+        state.cmp = state.cmpMap[state.cmpRoute] || null;
+        if (state.cmp) renderMatrix();
+        else runCompare(null);
+      });
+    }).catch(function () {});
+
     G.api("GET", "/api/compare").then(function (d) {
-      if (d.cached && d.repos) {
-        state.cmp = d;
+      (d.routes || []).forEach(function (m) { state.cmpMap[m.route] = m; });
+      var mine = state.cmpMap[state.cmpRoute] ||
+        (d.routes || [])[0] || null;
+      if (d.cached && mine) {
+        if (!state.cmpRoute) state.cmpRoute = mine.route;
+        state.cmp = mine;
         renderMatrix();
       }
-      if (!d.cached || d.age_sec > 120) runCompare(null);
+      if (!d.cached || d.age_sec > 120 || !state.cmpMap[state.cmpRoute]) {
+        runCompare(null);
+      }
     }).catch(function () { runCompare(null); });
   }
 

@@ -167,10 +167,13 @@
               list.innerHTML = '<div class="muted">no repositories</div>';
               return;
             }
-            list.innerHTML = repos.map(function (r) {
-              return '<div class="r"><span>' + G.esc(r.name) + '</span><span class="' +
-                (r.mirrored ? "ok" : "muted") + '">' +
-                (r.mirrored ? "mirrored" : "not mirrored") + "</span></div>";
+            list.innerHTML = repos.map(function (x) {
+              // a local-folder platform has no hub mirror by design, so
+              // "not mirrored" read like a warning on every single repo
+              var state = x.mirrored ? "mirrored"
+                : (d.type === "local" ? "local folder" : "not mirrored");
+              return '<div class="r"><span>' + G.esc(x.name) + '</span><span class="' +
+                (x.mirrored ? "ok" : "muted") + '">' + state + "</span></div>";
             }).join("");
           })
           .catch(function (e) {
