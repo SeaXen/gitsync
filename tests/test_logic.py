@@ -1554,6 +1554,15 @@ class TestPruneRepos(unittest.TestCase):
     human-run (never scheduled), and a dry run that deletes nothing.
     """
 
+    def setUp(self):
+        # the runner is python:3.8-slim with no git; the whole class needs it
+        import subprocess
+        try:
+            subprocess.run(["git", "--version"], capture_output=True,
+                           check=True)
+        except (OSError, subprocess.CalledProcessError):
+            self.skipTest("git not available")
+
     def _seed(self, td, which, names):
         import subprocess
         root = os.path.join(td, which)
@@ -1596,11 +1605,6 @@ class TestPruneRepos(unittest.TestCase):
                 "routes": [route]}, src, dst
 
     def test_not_opted_in_means_nothing_is_listed(self):
-        import subprocess
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest("git not available")
         with tempfile.TemporaryDirectory() as td:
             cfg, _s, _d = self._cfg(td)          # no prune_repos at all
             self.assertEqual(SY.prune_repos(cfg, cfg["routes"][0]), {})
@@ -1616,11 +1620,6 @@ class TestPruneRepos(unittest.TestCase):
             self.assertEqual(C.prune_targets(cfg, cfg["routes"][0]), ["dst"])
 
     def test_dry_run_plans_and_deletes_nothing(self):
-        import subprocess
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest("git not available")
         with tempfile.TemporaryDirectory() as td:
             cfg, _s, dst = self._cfg(td, prune_repos=["dst"])
             totals = {}
@@ -1629,11 +1628,6 @@ class TestPruneRepos(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
 
     def test_yes_deletes_only_the_extra_repo(self):
-        import subprocess
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest("git not available")
         with tempfile.TemporaryDirectory() as td:
             cfg, _s, dst = self._cfg(td, prune_repos=["dst"])
             totals = {}
@@ -1645,11 +1639,6 @@ class TestPruneRepos(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(dst, "a.git")))
 
     def test_safe_mode_refuses_to_delete(self):
-        import subprocess
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest("git not available")
         with tempfile.TemporaryDirectory() as td:
             cfg, _s, dst = self._cfg(td, mode="safe", prune_repos=["dst"])
             totals = {}
@@ -1660,11 +1649,6 @@ class TestPruneRepos(unittest.TestCase):
     def test_an_empty_source_list_refuses_to_delete(self):
         # the listing failed or the account is empty: either way, deleting
         # everything would be catastrophic
-        import subprocess
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest("git not available")
         with tempfile.TemporaryDirectory() as td:
             cfg, src, dst = self._cfg(td, prune_repos=["dst"])
             for n in os.listdir(src):
@@ -1673,11 +1657,6 @@ class TestPruneRepos(unittest.TestCase):
             self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
 
     def test_local_delete_repo_removes_the_folder(self):
-        import subprocess
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True)
-        except (OSError, subprocess.CalledProcessError):
-            self.skipTest("git not available")
         with tempfile.TemporaryDirectory() as td:
             _cfg, _s, dst = self._cfg(td)
             plat = P.LocalPlatform("dst", {"path": dst})
