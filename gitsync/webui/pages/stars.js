@@ -62,7 +62,15 @@
   }
 
   function loadStars() {
-    document.getElementById("s-list").innerHTML = G.loading("reading stars…");
+    var host0 = document.getElementById("s-list");
+    if (!state.source) {
+      state.stars = [];
+      host0.innerHTML = G.emptyState("Pick a platform",
+        "choose an account above to read its stars", "stars");
+      renderStars();
+      return;
+    }
+    host0.innerHTML = G.loading("reading stars…");
     G.api("GET", "/api/stars?platform=" + encodeURIComponent(state.source))
       .then(function (d) {
         state.stars = d.stars || []; state.loaded = true; renderStars();

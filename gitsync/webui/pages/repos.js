@@ -374,7 +374,16 @@
   }
 
   function loadRepos() {
-    document.getElementById("r-list").innerHTML = G.loading("listing repos…");
+    var host0 = document.getElementById("r-list");
+    // nothing chosen yet: asking is better than an error box on first paint
+    if (!state.platform) {
+      state.repos = [];
+      host0.innerHTML = G.emptyState("Pick a platform",
+        "choose an account above to list its repos", "repos");
+      renderList(); updateActions();
+      return;
+    }
+    host0.innerHTML = G.loading("listing repos…");
     var q = "?platform=" + encodeURIComponent(state.platform) +
       (document.getElementById("r-forks").checked ? "&forks=1" : "");
     G.api("GET", "/api/repos" + q).then(function (d) {
