@@ -13,15 +13,15 @@
         '<button class="btn" id="r-cmp-btn">Compare all sites</button>') +
       '<section class="card">' +
         '<div class="inline mb">' +
-          '<div style="min-width:200px">' +
+          '<div class="u-min200">' +
             G.field("Platform", '<select id="r-plat" name="platform"></select>') + "</div>" +
           '<div class="grow">' +
             G.field("Filter", '<input type="text" id="r-q" name="filter" autocomplete="off" placeholder="type to filter…">') + "</div>" +
-          '<label class="check" style="align-self:flex-end;margin-bottom:14px"><input type="checkbox" id="r-forks" name="include_forks"> include forks</label>' +
+          '<label class="check u-end"><input type="checkbox" id="r-forks" name="include_forks"> include forks</label>' +
         "</div>" +
         '<div id="r-list">' + G.loading("listing repos…") + "</div>" +
       "</section>" +
-      '<section class="card" id="r-actions" style="display:none">' +
+      '<section class="card hide" id="r-actions">' +
         '<div class="bar"><span class="route-title">Sync <span id="r-count">0</span> selected</span>' +
         '<div class="actions">' +
           '<div>' +
@@ -34,12 +34,12 @@
         "or every target on the route if you leave it on “all targets”.</div>" +
       "</section>" +
       '<div id="r-live"></div>' +
-      '<section class="card" id="r-cmp" style="display:none">' +
+      '<section class="card hide" id="r-cmp">' +
         '<div class="bar"><span class="route-title">Repo × site matrix</span>' +
         '<div class="actions">' +
-          '<div id="r-cmp-route-wrap" style="min-width:150px;display:none">' +
+          '<div id="r-cmp-route-wrap" class="u-min150 hide">' +
             G.field("Route", '<select id="r-cmp-route" name="route"></select>') + "</div>" +
-          '<div class="grow" style="min-width:180px">' +
+          '<div class="grow u-min180">' +
             G.field("Find repo", '<input type="text" id="r-cmp-q" name="cmp_filter" autocomplete="off" placeholder="type to filter…">') + "</div>" +
           '<button class="btn" id="r-cmp-again">Re-run</button>' +
         "</div></div>" +
@@ -110,7 +110,7 @@
   function runCompare(btn) {
     var card = document.getElementById("r-cmp");
     var body = document.getElementById("r-cmp-body");
-    card.style.display = "";
+    card.classList.remove("hide");
     var had = !!state.cmp;
     if (!had) {
       body.innerHTML = G.loading("comparing HEADs across every site…") +
@@ -183,7 +183,7 @@
         state.cmpRoute = (state.cmpRoutes[0] || {}).name || "";
       }
       sel.value = state.cmpRoute;
-      if (wrap) wrap.style.display = state.cmpRoutes.length > 1 ? "" : "none";
+      if (wrap) wrap.classList.toggle("hide", state.cmpRoutes.length <= 1);
       sel.addEventListener("change", function () {
         state.cmpRoute = sel.value;
         state.cmp = state.cmpMap[state.cmpRoute] || null;
@@ -224,7 +224,7 @@
   function renderMatrix() {
     var body = document.getElementById("r-cmp-body");
     var card = document.getElementById("r-cmp");
-    if (card) card.style.display = "";      // auto-load renders with no click
+    if (card) card.classList.remove("hide");  // auto-load renders with no click
     var d = state.cmp;
     var q = state.cmpQ;
     var rows = d.repos.filter(function (r) {
@@ -251,7 +251,7 @@
         " could not be checked</span>" : "") +
       extraBits +
       "</div>" +
-      '<p class="muted" style="font-size:12.5px;margin:0 0 12px">' +
+      '<p class="muted u-fs125 u-mb12">' +
       "✓ same commit · ⇄ different commit · ✗ not on that site · " +
       "⚠ the site could not be reached, so nothing is known about that repo. " +
       "<b>full</b> mode prunes refs inside a repo; it never deletes a whole " +
@@ -262,7 +262,7 @@
       return;
     }
     var table =
-      '<div style="overflow-x:auto"><table aria-label="Repository commit per site">' +
+      '<div class="u-scrollx"><table aria-label="Repository commit per site">' +
       "<thead><tr><th>Repo</th><th>" + G.esc(d.source) + " (source)</th>" +
       tgts.map(function (t) { return "<th>" + G.esc(t) + "</th>"; }).join("") +
       "</tr></thead><tbody>" +
@@ -280,7 +280,7 @@
     var extra = Object.keys(d.extra || {}).map(function (t) {
       return '<div class="mt"><strong>' + G.esc(t) + "</strong> has " +
         d.extra[t].length + " repo(s) the source does not:" +
-        '<div class="mono muted" style="font-size:12px;margin-top:4px">' +
+        '<div class="mono muted u-fs12 u-mt4">' +
         G.esc(d.extra[t].join(", ")) + "</div></div>";
     }).join("");
     body.innerHTML = head + table + (extra || "") + pruneBox(d);
@@ -298,15 +298,15 @@
     if (!n) return "";
     var allowed = (d.prune_repos || []);
     if (!allowed.length) {
-      return '<p class="muted" style="font-size:12.5px;margin-top:14px">' +
+      return '<p class="muted u-fs125 u-mt14">' +
         "To delete these, tick the target under “Delete extra repos” on the " +
         '<a href="routes.html">Routes</a> page (full mode only).</p>';
     }
-    return '<div class="mt" style="border-top:1px solid var(--line);padding-top:12px">' +
+    return '<div class="mt u-topline u-pt12">' +
       '<div class="row"><span><strong>' + n + " repo(s)</strong> can be " +
       "permanently deleted from " + G.esc(allowed.join(", ")) + "</span>" +
       '<button class="btn danger" id="r-prune">Delete them…</button></div>' +
-      '<p class="muted" style="font-size:12.5px;margin-top:6px">' +
+      '<p class="muted u-fs125 u-mt6">' +
       "Deleting removes the repository and everything in it — issues, merge " +
       "requests, wiki, stars. It cannot be undone.</p></div>";
   }
@@ -401,12 +401,12 @@
     }
     host.innerHTML = rows.map(function (r) {
       var on = !!state.sel[r.name];
-      var mirrorBadge = r.mirrored ? ' <span class="badge ok" style="font-size:11px">mirrored</span>' : '';
-      return '<label class="check" style="justify-content:flex-start">' +
+      var mirrorBadge = r.mirrored ? ' <span class="badge ok u-fs11">mirrored</span>' : '';
+      return '<label class="check u-left">' +
         '<input type="checkbox" name="selected_repo" data-repo="' + G.esc(r.name) + '"' +
         (on ? " checked" : "") + "> " +
         '<span class="mono">' + G.esc(r.name) + "</span> " +
-        '<span class="muted" style="font-size:12px">' + (r.private ? "priv" : "pub") +
+        '<span class="muted u-fs12">' + (r.private ? "priv" : "pub") +
         (r.fork ? " fork" : "") + "</span>" + mirrorBadge + "</label>";
     }).join("");
     host.querySelectorAll("input[data-repo]").forEach(function (c) {
@@ -423,7 +423,7 @@
   function updateActions() {
     var n = selectedNames().length;
     document.getElementById("r-count").textContent = n;
-    document.getElementById("r-actions").style.display = n ? "" : "none";
+    document.getElementById("r-actions").classList.toggle("hide", !n);
   }
 
   function doSync(to) {
@@ -452,7 +452,7 @@
     host.innerHTML =
       '<section class="card"><div class="bar"><span class="route-title">Syncing ' +
       G.esc(label) + '</span><span class="muted mono" id="rl-pct"></span></div>' +
-      '<div class="progress mt"><span id="rl-fill" style="width:0%"></span></div>' +
+      '<div class="progress mt"><span id="rl-fill" class="u-w0"></span></div>' +
       '<div class="viewer mt" id="rl-lines" role="log" aria-live="polite"></div></section>';
     var lines = document.getElementById("rl-lines");
     lines.textContent = "running…";

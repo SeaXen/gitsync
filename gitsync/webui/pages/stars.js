@@ -9,20 +9,20 @@
       G.bar("Stars", "Copy an account's starred repos to your other accounts.") +
       '<section class="card">' +
         '<div class="inline mb">' +
-          '<div style="min-width:220px">' +
+          '<div class="u-min220">' +
             G.field("Read stars from", '<select id="s-src" name="star_source"></select>') + "</div>" +
-          '<button class="btn" id="s-reload" style="align-self:flex-end;margin-bottom:14px">Re-read</button>' +
+          '<button class="btn u-end" id="s-reload">Re-read</button>' +
         "</div>" +
         '<div id="s-list">' + G.loading("reading stars…") + "</div>" +
       "</section>" +
-      '<section class="card" id="s-copycard" style="display:none">' +
+      '<section class="card hide" id="s-copycard">' +
         '<div class="bar"><span class="route-title">Copy to</span>' +
         '<div class="actions">' +
           '<label class="check"><input type="checkbox" id="s-dry" name="dry_run"> Dry Run</label>' +
           '<button class="btn primary" id="s-copy">Copy Stars</button>' +
         "</div></div>" +
         '<div id="s-targets" class="mt"></div>' +
-        '<div class="viewer mt" id="s-out" style="display:none" role="log" aria-live="polite"></div>' +
+        '<div class="viewer mt hide" id="s-out" role="log" aria-live="polite"></div>' +
       "</section>";
 
     G.api("GET", "/api/platforms?probe=0").then(function (d) {
@@ -73,8 +73,8 @@
 
   function renderStars() {
     var host = document.getElementById("s-list");
-    document.getElementById("s-copycard").style.display =
-      state.stars.length ? "" : "none";
+    document.getElementById("s-copycard").classList.toggle("hide",
+      !state.stars.length);
     if (!state.stars.length) {
       host.innerHTML = G.emptyState("No stars",
         "or this site does not expose them", "stars");
@@ -82,7 +82,7 @@
     }
     host.innerHTML = '<p class="label">' + state.stars.length + " starred</p>" +
       state.stars.map(function (s) {
-        return '<div class="mono" style="padding:2px 0">' + G.esc(s.name) + "</div>";
+        return '<div class="mono u-py2">' + G.esc(s.name) + "</div>";
       }).join("");
   }
 
@@ -93,7 +93,7 @@
       });
     if (!targets.length) return G.toast("pick at least one target", "warn");
     var out = document.getElementById("s-out");
-    out.style.display = ""; out.textContent = "copying…";
+    out.classList.remove("hide"); out.textContent = "copying…";
     return G.api("POST", "/api/stars/copy", {
       source: state.source, targets: targets,
       dry_run: document.getElementById("s-dry").checked

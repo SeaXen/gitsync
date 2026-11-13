@@ -3622,6 +3622,43 @@ class TestReleaseSums(unittest.TestCase):
 
 # ------------------------------------------------------- round 3: watch
 
+class TestStrictCsp(unittest.TestCase):
+    """style-src is 'self'. That only holds while the assets keep their side
+    of the bargain: the 404 page links a stylesheet instead of a <style>
+    block, and no page template or script builds markup with a style
+    attribute. One `style="…"` added later silently breaks the look of that
+    page in every browser, so assert it here rather than in a headless run."""
+
+    def _webui(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(M.__file__)))
+        return os.path.join(os.path.dirname(M.__file__), "webui")
+
+    def test_csp_forbids_inline_style(self):
+        from gitsync.web import CSP
+        self.assertIn("style-src 'self'", CSP)
+        self.assertNotIn("unsafe-inline", CSP)
+        self.assertNotIn("unsafe-eval", CSP)
+
+    def test_no_markup_carries_a_style_attribute(self):
+        ui = self._webui()
+        for base, _dirs, files in os.walk(ui):
+            for name in files:
+                if not name.endswith((".js", ".html")):
+                    continue
+                path = os.path.join(base, name)
+                with open(path, encoding="utf-8") as f:
+                    text = f.read()
+                self.assertNotIn('style="', text, path)
+                self.assertNotIn("style='", text, path)
+
+    def test_the_404_page_does_not_inline_a_style_block(self):
+        from gitsync import web
+        self.assertNotIn("<style", web._NOT_FOUND_HTML)
+        self.assertIn("/notfound.css", web._NOT_FOUND_HTML)
+        self.assertTrue(os.path.isfile(
+            os.path.join(self._webui(), "notfound.css")))
+
+
 class TestWatchLoop(unittest.TestCase):
     def test_reloads_the_config_and_survives_a_failed_cycle(self):
         loads = []

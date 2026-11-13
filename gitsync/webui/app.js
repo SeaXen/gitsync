@@ -186,12 +186,12 @@
         "</div>" +
         '<div class="modal-body" id="gs-modal-desc">' + esc(message) + "</div>" +
         (prompt
-          ? '<div class="modal-body" style="padding-top:0">' +
+          ? '<div class="modal-body u-pt0">' +
             field("Type " + prompt,
                   '<input type="text" id="gs-modal-prompt" autocomplete="off" ' +
                   'spellcheck="false" placeholder="' + esc(prompt) + '">') +
-            '<p class="muted" id="gs-modal-prompt-err" role="alert" ' +
-            'style="min-height:16px;font-size:12.5px;margin:0"></p></div>'
+            '<p class="muted u-hint u-hint-flush" id="gs-modal-prompt-err"' +
+            ' role="alert"></p></div>'
           : "") +
         '<div class="modal-foot">' +
           '<button class="btn" id="gs-modal-cancel" type="button">' + esc(cancelLabel) + "</button>" +
@@ -324,7 +324,7 @@
         '<div class="modal-head"><h2 class="modal-title" id="gs-keys-title">' +
           "Keyboard shortcuts</h2></div>" +
         '<div class="modal-body"><div class="shortcuts">' + rows +
-        "</div><p class=\"muted\" style=\"margin:14px 0 0;font-size:12px\">" +
+        "</div><p class=\"muted u-shotnote\">" +
           "Shortcuts are ignored while you are typing in a field.</p></div>" +
         '<div class="modal-foot"><button class="btn primary" id="gs-keys-ok" ' +
           'type="button">Got it</button></div>' +
@@ -510,7 +510,7 @@
     return '<div class="skel-card" role="status" aria-busy="true">' +
       '<div class="skel title"></div><div class="skel skel-row w80"></div>' +
       '<div class="skel skel-row w60"></div><div class="skel skel-row w40"></div>' +
-      (msg ? '<div class="muted" style="margin-top:8px;font-size:12.5px">' +
+      (msg ? '<div class="muted u-mt8 u-fs125">' +
         esc(msg) + "</div>" : "") + "</div>";
   }
   function emptyState(title, msg, icon) {
@@ -573,20 +573,20 @@
         esc((info.username || "admin") + "…") + '">') +
         field("Password", '<input type="password" id="lp" name="password" ' +
         'autocomplete="current-password" spellcheck="false" placeholder="password…">') +
-        '<button class="btn primary" id="loginbtn" type="submit" ' +
-        'style="width:100%">Sign in</button>' +
-        '<p class="muted mt" style="font-size:12.5px;text-align:center">' +
+        '<button class="btn primary u-w100" id="loginbtn" type="submit">' +
+        "Sign in</button>" +
+        '<p class="muted mt u-fs125 u-center">' +
         '<button class="btn ghost sm" id="use-token" type="button">Use access token instead</button></p>';
     } else {
       html = field("Access token", '<input type="password" id="tok" name="token" ' +
         'autocomplete="current-password" spellcheck="false" placeholder="paste the token…">') +
-        '<button class="btn primary" id="loginbtn" type="submit" ' +
-        'style="width:100%">Sign in</button>' +
-        '<p class="muted mt" style="font-size:12.5px;text-align:center">' +
+        '<button class="btn primary u-w100" id="loginbtn" type="submit">' +
+        "Sign in</button>" +
+        '<p class="muted mt u-fs125 u-center">' +
         "Tip: after signing in, set a username &amp; password in Settings.</p>";
     }
-    html += '<p class="muted mt" id="loginerr" role="alert" ' +
-      'style="min-height:16px;font-size:12.5px;text-align:center"></p>';
+    html += '<p class="muted mt u-hint u-center" id="loginerr" ' +
+      'role="alert"></p>';
     host.innerHTML = html;
 
     function submit() {
@@ -625,7 +625,7 @@
         n.href + '"' + (n.id === page ? ' aria-current="page"' : "") + ">" +
         I[n.icon] + "<span>" + esc(n.label) + "</span></a>";
     }).join("") +
-    '<button class="nav mobile-logout" id="side-logout" type="button" title="Sign out" aria-label="Sign out" style="background:transparent;border:0;cursor:pointer;white-space:nowrap;font:inherit">' +
+    '<button class="nav mobile-logout u-linkbtn" id="side-logout" type="button" title="Sign out" aria-label="Sign out">' +
       I.logout + "<span>Sign out</span></button>";
     var app = document.getElementById("app");
     app.innerHTML =
@@ -635,7 +635,7 @@
         '<div class="logo">' + I.logo + "<span>gitsync</span></div>" + navHtml +
         '<div class="foot">' +
           '<div class="meta" id="side-version">gitsync</div>' +
-          '<button class="nav" id="logout" type="button" style="background:transparent;border:0;cursor:pointer;width:100%;text-align:left;font:inherit">' +
+          '<button class="nav u-linkbtn u-linkbtn-block" id="logout" type="button">' +
             I.logout + "<span>Sign out</span></button>" +
         "</div>" +
       "</nav>" +
@@ -645,8 +645,8 @@
           '<span class="status" id="top-status"><span class="pip"></span>' +
             '<span id="top-status-text" role="status">connecting…</span></span>' +
           '<div class="spacer"></div>' +
-          '<button class="btn ghost" id="top-stop" title="Stop the running sync" ' +
-            'aria-label="Stop the running sync" style="display:none">' + I.stop +
+          '<button class="btn ghost hide" id="top-stop" title="Stop the running sync" ' +
+            'aria-label="Stop the running sync">' + I.stop +
             "<span>Stop</span></button>" +
           '<button class="btn ghost" id="top-pause" title="Pause / resume background sync" aria-label="Pause / resume background sync">' +
             '<span id="top-pause-icon" aria-hidden="true">' + I.pause + "</span>" +
@@ -746,7 +746,7 @@
 
     onSync(function (jobId) {
       setStatus("syncing…", "live");
-      if (stop) stop.style.display = "";        // show it the moment it starts
+      if (stop) stop.classList.remove("hide");  // show it the moment it starts
       if (bar) { bar.style.width = "4%"; bar.setAttribute("aria-valuenow", "4"); }
       watchJob("/api/sync/stream?job_id=" + encodeURIComponent(jobId), {
         onProgress: function (p) {
@@ -758,7 +758,7 @@
         },
         onDone: function (d) {
           if (bar) bar.style.width = "100%";
-          if (stop) stop.style.display = "none";
+          if (stop) stop.classList.add("hide");
           setTimeout(function () { if (bar) bar.style.width = "0%"; }, 800);
           setStatus(d.exit === 0 ? "sync complete" :
                     "sync finished (exit " + d.exit + ")", d.exit === 0 ? "ok" : "");
@@ -791,7 +791,7 @@
       if (v) v.textContent = "gitsync " + s.version;
       pausedNow = !!s.paused;
       var stop = document.getElementById("top-stop");
-      if (stop) stop.style.display = s.syncing ? "" : "none";
+      if (stop) stop.classList.toggle("hide", !s.syncing);
       var pBtn = document.getElementById("top-pause");
       var pTxt = document.getElementById("top-pause-text");
       var pIcon = document.getElementById("top-pause-icon");

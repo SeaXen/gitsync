@@ -48,7 +48,7 @@
     if (!state.list.length) {
       host.innerHTML = G.emptyState("No platforms yet",
         "add one to start syncing", "platforms") +
-        '<div style="text-align:center"><button class="btn primary" id="add-btn2">Add one</button></div>';
+        '<div class="u-center"><button class="btn primary" id="add-btn2">Add one</button></div>';
       document.getElementById("add-btn2").addEventListener("click", function () {
         document.getElementById("add-btn").click();
       });
@@ -58,7 +58,7 @@
       var extra = r.path || r.url || "";
       var rateHtml = "";
       if (r.rate_limit) {
-        rateHtml = "<div class='muted' style='font-size:12px;margin-top:2px'>" +
+        rateHtml = "<div class='muted u-fs12 u-mt2'>" +
           "Rate: " + r.rate_limit.remaining + "/" + r.rate_limit.limit +
           " (" + r.rate_limit.resets_in_mins + "m)</div>";
       }
@@ -80,7 +80,7 @@
         "</td></tr>";
     }).join("");
     host.innerHTML =
-      '<div style="overflow-x:auto"><table aria-label="Configured platforms"><thead><tr><th>Name</th><th>Type</th>' +
+      '<div class="u-scrollx"><table aria-label="Configured platforms"><thead><tr><th>Name</th><th>Type</th>' +
       "<th>Status</th><th>Token</th><th>Repos</th><th>URL / path</th><th></th>" +
       "</tr></thead><tbody>" + rows + "</tbody></table></div>";
     host.querySelectorAll("button[data-act]").forEach(function (b) {
@@ -272,20 +272,20 @@
       var uri = d.verification_uri;
       host.innerHTML =
         '<div class="modal-backdrop" id="gh-backdrop" role="presentation">' +
-          '<div class="modal" role="dialog" aria-modal="true" aria-labelledby="gh-modal-title" style="max-width:480px">' +
+          '<div class="modal u-max480" role="dialog" aria-modal="true" aria-labelledby="gh-modal-title">' +
             '<div class="modal-head"><h2 class="modal-title" id="gh-modal-title">GitHub Browser Login</h2></div>' +
             '<div class="modal-body">' +
               '<p>Authorize <strong>gitsync</strong> using GitHub Device Flow:</p>' +
-              '<div style="text-align:center;margin:16px 0">' +
-                '<div class="muted" style="font-size:12px;margin-bottom:6px">Your one-time code:</div>' +
-                '<div style="font-family:var(--mono);font-size:24px;font-weight:bold;letter-spacing:3px;background:var(--panel2);padding:12px 18px;border:1px solid var(--line2);border-radius:var(--radius-md);display:inline-block;color:var(--accent)">' +
+              '<div class="u-center u-my16">' +
+                '<div class="muted u-fs12 u-mb6">Your one-time code:</div>' +
+                '<div class="u-codeblock">' +
                   G.esc(userCode) +
                 '</div>' +
               '</div>' +
-              '<div style="text-align:center;margin-bottom:16px">' +
+              '<div class="u-center u-mb16">' +
                 '<a class="btn primary" href="' + G.esc(uri) + '" target="_blank" rel="noopener noreferrer">Open GitHub Authorization &rarr;</a>' +
               '</div>' +
-              '<div id="gh-poll-status" class="muted" style="text-align:center;font-size:13px">' +
+              '<div id="gh-poll-status" class="muted u-center u-fs13">' +
                 '<span class="pip live"></span> Waiting for approval in your browser…' +
               '</div>' +
             '</div>' +

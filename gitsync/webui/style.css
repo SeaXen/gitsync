@@ -327,3 +327,67 @@ kbd{display:inline-block;min-width:22px;padding:1px 6px;border:1px solid var(--l
 .shortcuts>div{display:flex;align-items:baseline;gap:14px}
 .shortcuts>div>span:first-child{flex:none;min-width:70px}
 .shortcuts>div>span:last-child{color:var(--muted);font-size:12.5px}
+
+/* ---- utilities -------------------------------------------------------
+   The Content-Security-Policy is `style-src 'self'`: no markup may carry a
+   style attribute. One-off spacing/size tweaks that used to be inline live
+   here instead. Dynamic values (a progress bar's width, show/hide after a
+   fetch) are set from JS through element.style / classList, which CSP does
+   not police — only parsed style attributes are blocked. */
+.hide{display:none}
+.u-end{align-self:flex-end;margin-bottom:14px}
+.u-linkbtn{background:transparent;border:0;cursor:pointer;white-space:nowrap;font:inherit}
+.u-linkbtn-block{width:100%;text-align:left}
+.u-topline{border-top:1px solid var(--line)}
+.u-pt12{padding-top:12px}
+.u-row6{display:flex;align-items:center;gap:6px}
+.u-col6{display:flex;flex-direction:column;gap:6px}
+.u-anchor{display:inline-block;position:relative}
+.u-codeblock{display:inline-block;font-family:var(--mono);font-size:24px;
+  font-weight:bold;letter-spacing:3px;background:var(--panel2);padding:12px 18px;
+  border:1px solid var(--line2);border-radius:var(--radius-md);color:var(--accent)}
+.u-fs11{font-size:11px}
+.u-fs12{font-size:12px}
+.u-fs125{font-size:12.5px}
+.u-fs13{font-size:13px}
+.u-mt4{margin-top:4px}
+.u-mt6{margin-top:6px}
+.u-mt8{margin-top:8px}
+.u-mt10{margin-top:10px}
+.u-mt12{margin-top:12px}
+.u-mt14{margin-top:14px}
+.u-mb6{margin-bottom:6px}
+.u-mb8{margin-bottom:8px}
+.u-mb12{margin-bottom:12px}
+.u-mb16{margin-bottom:16px}
+.u-my16{margin:16px 0}
+.u-py1{padding:1px 0}
+.u-py2{padding:2px 0}
+.u-py4{padding:4px 0}
+.u-py8{padding:8px 0}
+.u-pt0{padding-top:0}
+.u-pl14{padding-left:14px}
+.u-left{justify-content:flex-start}
+.u-textleft{text-align:left}
+.u-center{text-align:center}
+.u-lh19{line-height:1.9}
+.u-plainitem{list-style:none;cursor:pointer}
+.u-max480{max-width:480px}
+.u-min140{min-width:140px}
+.u-min150{min-width:150px}
+.u-min180{min-width:180px}
+.u-min200{min-width:200px}
+.u-min220{min-width:220px}
+.u-scrollx{overflow-x:auto}
+.u-w0{width:0%}
+.u-w100{width:100%}
+.u-hint{min-height:16px;font-size:12.5px}
+.u-hint-flush{margin:0}
+.u-notransform{text-transform:none;letter-spacing:0}
+/* the account menu: absolutely placed, so it needs its own positioning box */
+.u-menu{position:absolute;right:0;top:100%;z-index:20;background:var(--panel2);
+  border:1px solid var(--line2);border-radius:var(--radius-md);padding:6px;
+  display:flex;flex-direction:column;gap:4px;min-width:110px;
+  box-shadow:var(--shadow)}
+.u-mt2{margin-top:2px}
+.u-shotnote{margin:14px 0 0;font-size:12px}

@@ -7,7 +7,7 @@
 
   function render(main) {
     main.innerHTML = G.bar("Settings", "Global defaults — a route can override most of these.") +
-      '<section class="card"><div class="bar"><span class="route-title">Options <span class="chip warn" id="settings-dirty" style="display:none;font-size:11px">● Unsaved changes</span></span>' +
+      '<section class="card"><div class="bar"><span class="route-title">Options <span class="chip warn hide u-fs11" id="settings-dirty">● Unsaved changes</span></span>' +
         '<div class="actions"><button class="btn primary" id="save-settings">Save</button></div></div>' +
         '<div class="form-grid mt" id="settings-form">' + G.loading() + "</div></section>" +
 
@@ -35,7 +35,7 @@
         '<div class="muted mt">Stored as a PBKDF2 hash (mode 0600) — never sent back to the browser. The access token still works for API / curl sign-in.</div>' +
         '<p class="label mt">Active sessions</p>' +
         '<div id="sessions-body" class="stack">' + G.loading() + "</div>" +
-        '<div class="muted mt" style="font-size:12.5px">A session signs itself out after 12 hours of inactivity or 30 days. Changing the password signs out every other browser.</div>' +
+        '<div class="muted mt u-fs125">A session signs itself out after 12 hours of inactivity or 30 days. Changing the password signs out every other browser.</div>' +
         '<div class="mt"><button class="btn danger" id="sessions-revoke-all">Sign out everywhere</button> ' +
         '<button class="btn ghost" id="sessions-refresh">Refresh</button></div>' +
         "</section>" +
@@ -43,7 +43,7 @@
       '<section class="card" id="scheduler"><div class="bar"><span class="route-title">Scheduler</span>' +
         '<div class="actions"><button class="btn primary" id="install-sched">Install / Update</button></div></div>' +
         '<div class="muted" id="sched-status">—</div>' +
-        '<div class="muted mt" style="font-size:12.5px">Uses the Schedule chosen in Options above. Runs <span class="mono">gitsync sync --scheduled</span> on a systemd timer (or cron).</div>' +
+        '<div class="muted mt u-fs125">Uses the Schedule chosen in Options above. Runs <span class="mono">gitsync sync --scheduled</span> on a systemd timer (or cron).</div>' +
         "</section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Notifications</span>' +
@@ -137,9 +137,9 @@
       host.innerHTML = rows.map(function (s) {
         var age = s.last_seen ? Math.max(0, Math.floor(Date.now() / 1000 - Number(s.last_seen))) : null;
         return '<div class="row"><span>' + G.esc(uaLabel(s.ua)) +
-          '<span class="mono muted" style="font-size:12px"> · ' +
+          '<span class="mono muted u-fs12"> · ' +
           G.esc(s.ip || "unknown ip") + "</span></span>" +
-          '<span class="muted" style="font-size:12px" title="signed in ' +
+          '<span class="muted u-fs12" title="signed in ' +
           G.esc(when(s.created)) + '">' +
           (age === null ? "—" : G.esc(G.ago(age)) + " ago") + "</span></div>";
       }).join("");
@@ -210,7 +210,7 @@
 
       var dirtyPill = document.getElementById("settings-dirty");
       var setDirty = function () {
-        if (dirtyPill) dirtyPill.style.display = "inline-block";
+        if (dirtyPill) dirtyPill.classList.remove("hide");
       };
       var formEl = document.getElementById("settings-form");
       if (formEl && !formEl.dataset.wired) {
@@ -263,7 +263,7 @@
     return G.api("PUT", "/api/settings", body).then(function () {
       G.toast("settings saved", "ok");
       var dirtyPill = document.getElementById("settings-dirty");
-      if (dirtyPill) dirtyPill.style.display = "none";
+      if (dirtyPill) dirtyPill.classList.add("hide");
       document.getElementById("n-discord").value = "";
       document.getElementById("n-tgtoken").value = "";
       G.refreshStatus();
@@ -360,7 +360,7 @@
         return '<div class="mb"><strong>' + G.esc(g.title) + "</strong> " +
           '<span class="badge muted">min: ' + G.esc(g.minimum) + "</span>" +
           (g.env ? ' <span class="badge muted">env ' + G.esc(g.env) + "</span>" : "") +
-          (g.token_url ? '<div class="muted" style="font-size:12px">create at ' + G.esc(g.token_url) + "</div>" : "") +
+          (g.token_url ? '<div class="muted u-fs12">create at ' + G.esc(g.token_url) + "</div>" : "") +
           scopes + "</div>";
       }).join("");
     }).catch(function (e) {

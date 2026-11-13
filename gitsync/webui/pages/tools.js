@@ -44,7 +44,7 @@
         f("From", '<input type="text" id="mirror-from" name="mirror_from" placeholder="route source…">') +
         f("To", '<input type="text" id="mirror-to" name="mirror_to" placeholder="all targets…">')) +
       "</div>" +
-      '<section class="card" id="tool-out-card" style="display:none">' +
+      '<section class="card hide" id="tool-out-card">' +
         '<div class="bar"><span class="route-title" id="tool-out-title">Output</span>' +
         '<span class="muted mono" id="tool-out-status"></span></div>' +
         '<div class="viewer mt" id="tool-out" role="log" aria-live="polite"></div>' +
@@ -120,7 +120,7 @@
   }
 
   function showOut(label, jobId) {
-    document.getElementById("tool-out-card").style.display = "";
+    document.getElementById("tool-out-card").classList.remove("hide");
     document.getElementById("tool-out-title").textContent = label;
     var lines = document.getElementById("tool-out");
     var status = document.getElementById("tool-out-status");

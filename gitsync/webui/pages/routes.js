@@ -33,7 +33,7 @@
       return '<span class="chip' + (paused ? " paused" : "") + '">' + G.esc(t) +
         (paused ? " (paused)" : "") + "</span>";
     }).join("");
-    return '<div class="mono" style="margin:14px 0 6px">' + G.esc(r.source) +
+    return '<div class="mono u-mt14 u-mb6">' + G.esc(r.source) +
       ' <span class="muted">→</span></div>' + tchips;
   }
 
@@ -43,20 +43,20 @@
       (r.include_file ? " file " + r.include_file : "");
     return '<section class="card" data-route="' + G.esc(r.name) + '">' +
       '<div class="bar"><div><span class="route-title">' + G.esc(r.name) + "</span> " +
-        chips(r) + '</div><div class="actions" style="display:flex;align-items:center;gap:6px">' +
+        chips(r) + '</div><div class="actions u-row6">' +
         '<button class="btn sm" data-a="run" data-n="' + G.esc(r.name) + '" aria-label="Run route ' + G.esc(r.name) + '">Run</button>' +
         '<button class="btn sm" data-a="dry" data-n="' + G.esc(r.name) + '" aria-label="Dry run route ' + G.esc(r.name) + '">Dry run</button>' +
-        '<details class="more-menu" style="display:inline-block;position:relative">' +
-          '<summary class="btn sm ghost" style="list-style:none;cursor:pointer" aria-label="More actions">⋯</summary>' +
-          '<div class="menu-pop" style="position:absolute;right:0;top:100%;z-index:20;background:var(--panel2);border:1px solid var(--line2);border-radius:var(--radius-md);padding:6px;display:flex;flex-direction:column;gap:4px;min-width:110px;box-shadow:var(--shadow)">' +
-            '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="pause" data-n="' + G.esc(r.name) + '">' + (r.enabled ? "Pause" : "Resume") + '</button>' +
-            '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="manage" data-n="' + G.esc(r.name) + '">Targets</button>' +
-            '<button class="btn ghost sm" style="text-align:left;justify-content:flex-start" data-a="edit" data-n="' + G.esc(r.name) + '">Edit</button>' +
-            '<button class="btn ghost sm danger" style="text-align:left;justify-content:flex-start" data-a="del" data-n="' + G.esc(r.name) + '">Delete</button>' +
+        '<details class="more-menu u-anchor">' +
+          '<summary class="btn sm ghost u-plainitem" aria-label="More actions">⋯</summary>' +
+          '<div class="menu-pop u-menu">' +
+            '<button class="btn ghost sm u-left u-textleft" data-a="pause" data-n="' + G.esc(r.name) + '">' + (r.enabled ? "Pause" : "Resume") + '</button>' +
+            '<button class="btn ghost sm u-left u-textleft" data-a="manage" data-n="' + G.esc(r.name) + '">Targets</button>' +
+            '<button class="btn ghost sm u-left u-textleft" data-a="edit" data-n="' + G.esc(r.name) + '">Edit</button>' +
+            '<button class="btn ghost sm danger u-left u-textleft" data-a="del" data-n="' + G.esc(r.name) + '">Delete</button>' +
           '</div>' +
         '</details>' +
       "</div></div>" + flow(r) +
-      '<div class="muted" style="margin-top:8px">next: ' + G.esc(r.next) +
+      '<div class="muted u-mt8">next: ' + G.esc(r.next) +
         (filters ? ' · <span class="mono">' + G.esc(filters) + "</span>" : "") + "</div>" +
       '<div class="panel-host" data-panel="' + G.esc(r.name) + '"></div>' +
       "</section>";
@@ -96,7 +96,7 @@
     var host = document.getElementById("routes-host");
     if (!state.routes.length) {
       host.innerHTML = G.emptyState("No routes yet", "add one to start syncing", "routes") +
-        '<div style="text-align:center"><button class="btn primary" id="add-btn2">Add one</button></div>';
+        '<div class="u-center"><button class="btn primary" id="add-btn2">Add one</button></div>';
       document.getElementById("add-btn2").addEventListener("click", function () {
         document.getElementById("add-btn").click();
       });
@@ -156,16 +156,16 @@
   }
 
   function renderManage(panel, r) {
-    var rows = ['<div class="row" style="padding:8px 0"><span><strong>' +
+    var rows = ['<div class="row u-py8"><span><strong>' +
       G.esc(r.name) + '</strong> <span class="muted">whole route</span></span>' +
       '<button class="btn sm" data-t="">' + (r.enabled ? "Pause" : "Resume") + "</button></div>"];
     r.targets.forEach(function (t) {
       var paused = r.paused_targets.indexOf(t) >= 0;
-      rows.push('<div class="row" style="padding:8px 0"><span class="mono">' +
+      rows.push('<div class="row u-py8"><span class="mono">' +
         G.esc(t) + '</span><button class="btn sm' + (paused ? "" : " danger") +
         '" data-t="' + G.esc(t) + '">' + (paused ? "Resume" : "Pause") + "</button></div>");
     });
-    panel.innerHTML = '<div class="mt" style="border-top:1px solid var(--line)">' +
+    panel.innerHTML = '<div class="mt u-topline">' +
       '<p class="label mt">Pause / resume</p>' + rows.join("") + "</div>";
     panel.querySelectorAll("button[data-t]").forEach(function (b) {
       b.addEventListener("click", function () {
@@ -199,7 +199,7 @@
         : "") +
       G.field("Schedule", G.select("e-schedule", r.schedule || "inherit", SCHED)) +
       '<div class="field"><label>Delete extra repos</label>' +
-        '<div style="display:flex;flex-direction:column;gap:6px">' +
+        '<div class="u-col6">' +
         r.targets.map(function (t) {
           var on = (r.prune_repos || []).indexOf(t) >= 0;
           return '<label class="check"><input type="checkbox" name="prune_repos" ' +
@@ -212,7 +212,7 @@
         "timer, and only in full mode — see the Repos page to preview " +
         "first.</div></div>";
     panel.innerHTML =
-      '<div class="mt" style="border-top:1px solid var(--line)">' +
+      '<div class="mt u-topline">' +
       '<p class="label mt">Filters &amp; options</p>' +
       '<div class="form-grid">' + f + "</div>" +
       '<div class="actions"><button class="btn primary" id="e-save">Save Route</button> ' +
@@ -327,7 +327,7 @@
       '<section class="card"><div class="bar"><span class="route-title">' +
       (dry ? "Dry run" : "Running") + ": " + G.esc(name) + "</span>" +
       '<span class="muted mono" id="live-pct"></span></div>' +
-      '<div class="progress mt"><span id="live-fill" style="width:0%"></span></div>' +
+      '<div class="progress mt"><span id="live-fill" class="u-w0"></span></div>' +
       '<div class="viewer mt" id="live-lines" role="log" aria-live="polite">running…</div></section>';
     var lines = document.getElementById("live-lines");
     lines.textContent = "running…";

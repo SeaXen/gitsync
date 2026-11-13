@@ -81,24 +81,8 @@ WEBUI_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "webui")
 # wrong. Uses the same palette as the app.
 _NOT_FOUND_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>404 — gitsync</title><style>
-:root{color-scheme:dark}
-*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;
- background:#0d1117;color:#e6edf3;
- font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif}
-.card{max-width:420px;width:100%;background:#161b22;border:1px solid #263040;
- border-radius:12px;padding:26px;box-shadow:0 8px 24px rgba(0,0,0,.35)}
-.code{font:600 12px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
- letter-spacing:.12em;text-transform:uppercase;color:#8b949e}
-h1{font-size:19px;margin:8px 0 6px}
-p{color:#c9d1d9;margin:0 0 18px}
-a{display:inline-flex;align-items:center;min-height:36px;padding:7px 14px;
- border-radius:9px;background:#388bfd;color:#040c18;font-weight:600;
- text-decoration:none}
-a:hover{text-decoration:underline}
-code{color:#8b949e}
-</style></head><body><div class="card">
+<title>404 — gitsync</title>
+<link rel="stylesheet" href="/notfound.css"></head><body><div class="card">
 <div class="code">404 · no such page</div>
 <h1>That page does not exist</h1>
 <p><code>__PATH__</code> is not part of the gitsync web UI. Check the address, or
@@ -108,11 +92,12 @@ start from the dashboard.</p>
 """
 # Every response carries this. script-src 'self' is the part that matters:
 # there is no inline <script> and no eval, so an injected string cannot
-# become code. style-src needs 'unsafe-inline' because the pages build their
-# markup with style="" attributes; CSS injection is a far smaller risk than
-# script injection, and removing every inline style would be a rewrite.
-CSP = ("default-src 'self'; script-src 'self'; "
-       "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+# become code. style-src is 'self' too — no markup carries a style=""
+# attribute (one-off tweaks are utility classes in style.css) and the 404
+# page links its own stylesheet. The only CSS applied at runtime comes from
+# JS property writes (a progress bar's width), which CSP does not police.
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; "
+       "img-src 'self' data:; "
        "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
        "base-uri 'none'; form-action 'self'")
 PERMISSIONS_POLICY = ("geolocation=(), camera=(), microphone=(), "

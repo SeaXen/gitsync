@@ -14,13 +14,13 @@
       }
       var sparkHtml = (d.spark && d.spark.length)
         ? '<div class="mono spark">' + G.esc(G.spark(d.spark)) + '</div>' +
-          '<div class="muted" style="font-size:12px">duration trend, last ' +
+          '<div class="muted u-fs12">duration trend, last ' +
           d.spark.length + " runs</div>"
         : "";
       var rows = recs.map(function (r, i) {
         var bad = (r.failed || 0) + (r.partial || 0);
         var fails = (r.failures || []).map(function (f) {
-          return '<div class="mono l-bad" style="padding-left:14px">! ' +
+          return '<div class="mono l-bad u-pl14">! ' +
             G.esc(f.route) + "/" + G.esc(f.repo) + ": " + G.esc(f.error) + "</div>";
         }).join("");
         var okCell;
@@ -43,10 +43,10 @@
           "<td class='mono muted'>" + (r.repos || 0) + "</td>" +
           "<td class='mono muted'>" + (r.elapsed_sec === null || r.elapsed_sec === undefined ? "?" : r.elapsed_sec) + "s</td>" +
           "<td><button class='btn sm ghost btn-run-report' data-idx='" + i + "'>Report</button></td></tr>" +
-          (fails ? "<tr><td colspan='7' style='padding-top:0'>" + fails + "</td></tr>" : "");
+          (fails ? "<tr><td colspan='7' class='u-pt0'>" + fails + "</td></tr>" : "");
       }).join("");
       host.innerHTML = sparkHtml +
-        '<div style="overflow-x:auto"><table class="mt" aria-label="Recent sync history"><thead><tr><th>Finished</th>' +
+        '<div class="u-scrollx"><table class="mt" aria-label="Recent sync history"><thead><tr><th>Finished</th>' +
         "<th>OK</th><th>Partial</th><th>Failed</th><th>Repos</th><th>Time</th><th></th>" +
         "</tr></thead><tbody>" + rows + "</tbody></table></div>";
 

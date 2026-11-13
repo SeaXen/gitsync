@@ -14,7 +14,7 @@
     var pctEl = document.getElementById("sync-pct");
     var fill = document.getElementById("sync-fill");
     var logTail = document.getElementById("logtail");
-    if (card) card.style.display = "";
+    if (card) card.classList.remove("hide");
     G.watchJob("/api/sync/stream?job_id=" + encodeURIComponent(jobId), {
       onProgress: function (p) {
         if (p.total && label) {
@@ -32,7 +32,7 @@
         logTail.appendChild(div);
       },
       onDone: function () {
-        if (card) card.style.display = "none";
+        if (card) card.classList.add("hide");
         refresh();
       }
     });
@@ -168,8 +168,8 @@
         G.esc(r.name) + '</span><span class="mono muted">' + right + "</span>" +
         // "which repos?" — expandable list, fetched once per platform
         (r.ok && r.enabled
-          ? ' <button class="linkbtn muted" data-repos="' + G.esc(r.name) +
-            '" title="Show the repositories on this site" style="font-size:12px">repos ▾</button>'
+          ? ' <button class="linkbtn muted u-fs12" data-repos="' + G.esc(r.name) +
+            '" title="Show the repositories on this site">repos ▾</button>'
           : "") + "</span></div>" +
         '<div class="repo-list" data-repolist="' + G.esc(r.name) + '" hidden></div>';
     }).join("");
@@ -268,7 +268,7 @@
           "</span>") +
       row("Version", G.esc(st.version || s.version || "—")) +
       "</dl>" +
-      '<p class="muted" style="font-size:12.5px;margin:12px 0 0">' +
+      '<p class="muted u-fs125 u-mt12">' +
       "Change these on the <a href=\"settings.html\">Settings</a> page, " +
       "or from the terminal: <code>gitsync options</code>.</p>";
   }
@@ -284,12 +284,12 @@
     var last = recs[recs.length - 1];
     if (!last) {
       host.innerHTML = '<div class="big muted">—</div>' +
-        '<div class="muted" style="margin-top:6px">no runs yet</div>';
+        '<div class="muted u-mt6">no runs yet</div>';
       return;
     }
     var bad = (last.failed || 0) + (last.partial || 0);
     var retryBtn = (last.failed && last.failed > 0)
-      ? '<button class="btn sm warn" id="btn-retry-failed" style="margin-top:8px">Retry ' + last.failed + ' failed repo(s)</button>'
+      ? '<button class="btn sm warn u-mt8" id="btn-retry-failed">Retry ' + last.failed + ' failed repo(s)</button>'
       : "";
     var head, subline;
     if (!last.dry_run && last.skipped && !last.repos && !bad) {
@@ -311,10 +311,10 @@
     }
     host.innerHTML =
       head +
-      '<div class="muted" style="margin-top:6px">' + subline + "</div>" +
+      '<div class="muted u-mt6">' + subline + "</div>" +
       retryBtn +
       '<div class="mono spark">' + G.esc(G.spark(d.spark || [])) + "</div>" +
-      '<div class="muted" style="font-size:12px">last ' + (d.spark || []).length + " runs</div>";
+      '<div class="muted u-fs12">last ' + (d.spark || []).length + " runs</div>";
     var btn = document.getElementById("btn-retry-failed");
     if (btn) {
       btn.addEventListener("click", function () {
@@ -343,17 +343,17 @@
       var detail = t.days_left === null || t.days_left === undefined
         ? "" : (t.days_left < 0 ? "expired " + (-t.days_left) + "d ago"
                                 : t.days_left + "d left");
-      return '<div class="row" style="padding:1px 0"><span class="mono">' +
-        G.esc(t.platform) + '</span><span class="' + cls + '" style="font-size:12px">' +
+      return '<div class="row u-py1"><span class="mono">' +
+        G.esc(t.platform) + '</span><span class="' + cls + ' u-fs12">' +
         G.esc(detail || t.note || t.level) + "</span></div>";
     }).join("");
     host.innerHTML =
-      '<div class="mono" style="line-height:1.9">hub size <span class="muted">' +
+      '<div class="mono u-lh19">hub size <span class="muted">' +
       G.esc(d.disk_human.size) + '</span> · mirrors <span class="muted">' +
       (disk.mirrors || 0) + '</span> · disk <span class="' + diskClass + '"' + diskAria + '>' +
       G.esc(diskPct === null ? "—" : diskPct + "% full") + "</span><br>" +
       'tokens <span class="' + tokClass + '">' + G.esc(d.token_summary) + "</span></div>" +
-      (rows ? '<div class="mt" style="font-size:12.5px">' + rows + "</div>" : "");
+      (rows ? '<div class="mt u-fs125">' + rows + "</div>" : "");
   }
   function fillHealthErr(e) {
     document.getElementById("health-body").innerHTML = G.errorBox(e);
@@ -374,10 +374,10 @@
           : "safe: never deletes or force-pushes on destinations") +
         '">mode: ' + G.esc(r.mode || "safe") + "</span>";
       var state = !r.enabled ? '<span class="chip paused">paused</span>' : '<span class="chip">active</span>';
-      return '<div class="row" style="padding:4px 0"><span><strong>' + G.esc(r.name) + '</strong> (' +
+      return '<div class="row u-py4"><span><strong>' + G.esc(r.name) + '</strong> (' +
         G.esc(r.source) + ' → ' + G.esc(r.targets.join(", ")) + ')</span><span>' + badge + ' ' + state + '</span></div>';
     }).join("");
-    host.innerHTML += '<p class="muted" style="font-size:12.5px;margin:10px 0 0">' +
+    host.innerHTML += '<p class="muted u-fs125 u-mt10">' +
       "<strong>safe</strong> never deletes or force-pushes — destinations keep " +
       "branches and tags the source no longer has. <strong>full</strong> is an " +
       "exact mirror and prunes what the source dropped (destructive).</p>";
@@ -402,12 +402,12 @@
       // filled by fillStatus(); a silent install (Docker with no scheduler,
       // a timer that was never installed) otherwise looks perfectly healthy
       '<div id="stale-banner" hidden></div>' +
-      '<section class="card" id="sync-card" style="display:none">' +
+      '<section class="card hide" id="sync-card">' +
         '<p class="label">Syncing Now</p>' +
-        '<div class="row" style="margin-bottom:8px">' +
+        '<div class="row u-mb8">' +
           '<span class="mono" id="sync-label">starting…</span>' +
           '<span class="muted" id="sync-pct">0%</span></div>' +
-        '<div class="progress"><span id="sync-fill" style="width:0%"></span></div>' +
+        '<div class="progress"><span id="sync-fill" class="u-w0"></span></div>' +
       "</section>" +
       '<div class="grid">' +
         '<section class="card"><p class="label" id="plats-label">Platforms</p>' +
@@ -418,23 +418,23 @@
           '<div id="health-body">' + G.loading() + "</div></section>" +
       "</div>" +
       '<section class="card" id="settings-card"><p class="label">Current Settings ' +
-        '<a href="settings.html" style="text-transform:none;letter-spacing:0">Change →</a></p>' +
+        '<a href="settings.html" class="u-notransform">Change →</a></p>' +
         '<div id="settings-body">' + G.loading() + "</div></section>" +
       '<section class="card" id="routes-card"><p class="label">Routes Status ' +
-        '<a href="routes.html" style="text-transform:none;letter-spacing:0">Manage routes →</a></p>' +
+        '<a href="routes.html" class="u-notransform">Manage routes →</a></p>' +
         '<div class="stack" id="routes-body">' + G.loading() + "</div></section>" +
       '<section class="card" id="log-card"><p class="label">Log ' +
-        '<a href="log.html" style="text-transform:none;letter-spacing:0">View full log →</a></p>' +
+        '<a href="log.html" class="u-notransform">View full log →</a></p>' +
         '<div class="mono log" id="logtail">' + G.loading() + "</div></section>" +
       '<section class="card" id="ref-card"><p class="label">Quick reference</p>' +
-        '<div class="mono" style="line-height:1.9">' +
+        '<div class="mono u-lh19">' +
         '<div class="qr"><span class="c">gitsync sync</span><span class="d">— sync every enabled route now</span></div>' +
         '<div class="qr"><span class="c">gitsync sync --dry-run</span><span class="d">— show what would change, change nothing</span></div>' +
         '<div class="qr"><span class="c">gitsync fix --dry-run</span><span class="d">— find drift without pushing</span></div>' +
         '<div class="qr"><span class="c">gitsync doctor</span><span class="d">— check tokens, mirrors and routes</span></div>' +
         '<div class="qr"><span class="c">gitsync tui</span><span class="d">— the terminal dashboard</span></div>' +
         "</div>" +
-        '<p class="muted" style="font-size:12.5px;margin:12px 0 0">' +
+        '<p class="muted u-fs125 u-mt12">' +
         "On this page: <b>Sync now</b> and <b>Dry run</b> are in the top bar, " +
         "<b>Pause</b> suspends every run, and each panel has a minimise button.</p>" +
       "</section>";
