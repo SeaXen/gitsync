@@ -11,6 +11,10 @@ syntax-and-tests:
   stage: check
   image: python:3.8-slim
   before_script:
+    # gitsync is a git tool: `gitsync ci` runs a real (offline) sync and needs
+    # git on PATH. The slim image does not ship it.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+    - git --version
     - python3 --version
   script:
     # 1. python syntax
