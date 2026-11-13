@@ -43,3 +43,18 @@ webui-tests:
     - when: manual
   script:
     - PYTHONPATH=$CI_PROJECT_DIR python3 -m unittest tests.test_webapp_playwright
+
+real-platform-smoke:
+  stage: check
+  image: python:3.8-slim
+  rules:
+    - if: '$TEST_PLATFORM_CONFIG != null'
+      when: manual
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git
+  script:
+    - mkdir -p /tmp/gitsync-test/config /tmp/gitsync-test/data
+    - echo "$TEST_PLATFORM_CONFIG" > /tmp/gitsync-test/config/config.json
+    - export GITSYNC_CONFIG_DIR=/tmp/gitsync-test/config GITSYNC_DATA_DIR=/tmp/gitsync-test/data
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync sync --dry-run
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync sync

@@ -1838,9 +1838,10 @@ def cmd_update(args):
         print("cannot verify the %s installer: %s"
               % (want or "latest", e))
         print("Nothing was executed. Update by hand instead:")
-        print("  git pull && bash install.sh          (source checkout)")
-        print("  curl -fsSL https://github.com/%s/releases/latest -o /dev/null"
-              % UPDATE_REPO)
+        print("  git pull --ff-only && bash install.sh  (source checkout)")
+        target_tag = want or "latest"
+        print("  curl -fsSLO https://github.com/%s/archive/refs/tags/%s.tar.gz && sha256sum -c SHA256SUMS  (release archive)"
+              % (UPDATE_REPO, target_tag))
         return 1
 
     fd, script = tempfile.mkstemp(prefix="gitsync-qi-", suffix=".sh")
@@ -1921,7 +1922,8 @@ def shipped_files(root):
         dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
         for fn in sorted(filenames):
             if fn.endswith((".py", ".js", ".css", ".html")):
-                out.append(os.path.relpath(os.path.join(dirpath, fn), root))
+                rel = os.path.relpath(os.path.join(dirpath, fn), root)
+                out.append(rel.replace(os.sep, "/"))
     return sorted(out)
 
 

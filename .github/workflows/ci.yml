@@ -88,3 +88,28 @@ jobs:
         run: |
           export PYTHONPATH=$PWD
           python3 -m unittest tests.test_webapp_playwright
+
+  real-platform-smoke:
+    name: real-platform-smoke
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Real platform smoke
+        env:
+          TEST_PLATFORM_CONFIG: ${{ secrets.TEST_PLATFORM_CONFIG }}
+        run: |
+          if [ -z "$TEST_PLATFORM_CONFIG" ]; then echo "No TEST_PLATFORM_CONFIG provided; skipping."; exit 0; fi
+          mkdir -p /tmp/gitsync-test/config /tmp/gitsync-test/data
+          echo "$TEST_PLATFORM_CONFIG" > /tmp/gitsync-test/config/config.json
+          export GITSYNC_CONFIG_DIR=/tmp/gitsync-test/config GITSYNC_DATA_DIR=/tmp/gitsync-test/data
+          export PYTHONPATH=$PWD
+          python3 -m gitsync sync --dry-run
+          python3 -m gitsync sync

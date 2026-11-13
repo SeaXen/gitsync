@@ -589,11 +589,19 @@ def _remember_job_result(job):
     elif job.kind in ("sync", "fix", "restore", "mirror"):
         _CMP_CACHE["at"] = 0.0
         _CMP_CACHE["data"] = None
+        _drop_health_cache()
+
+
+def _drop_health_cache():
+    _invalidate("health")
+
+
 def _drop_compare_cache():
     """a route edit changes the answer (prune_repos, filters), so the cached
     matrix is no longer the current configuration."""
     _CMP_CACHE["at"] = 0.0
     _CMP_CACHE["data"] = None
+    _drop_health_cache()
 
 def _app_dir():
     return C.APP_DIR
