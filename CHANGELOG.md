@@ -6,6 +6,127 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.4] - 2026-11-13
+
+### Web sign-in is a real session, not the token in a cookie
+- The browser used to store the **machine access token** in a cookie. Now the
+  cookie carries a random opaque id (`secrets.token_urlsafe(32)`) and the
+  server persists only its SHA-256, in `sessions.json` (mode 0600). Sessions
+  expire after **12 idle hours** or **30 days** absolute; **Settings →
+  Sessions** lists them (browser, address, last seen) and can sign one out or
+  all out. Setting or clearing the password revokes every session and then
+  mints a fresh one for the browser doing it, so you are not logged out of the
+  tab you are typing in. `Authorization: Bearer <web.token>` is unchanged and
+  is still the way to script the API.
+
+### `gitsync update` installs a verified release
+- It used to run whatever script the branch pointed at. It now installs a
+  **pinned tag**, verifies the downloaded files against that tag's
+  `SHA256SUMS`, writes the installer to a `mkstemp` file (0600, directory
+  0700) and deletes it in a `finally`. A git checkout takes the gentler path
+  (`git pull --ff-only` + `bash install.sh`). The target version is printed
+  and confirmed unless `--yes`. `quickinstall.sh` gained `--tag` and
+  `--sha256`, and refuses a tag with no published checksums.
+
+### Two repos can no longer be merged into one mirror
+- Sanitising turned `a b.git` and `a_b.git` into the same folder, and a
+  non-ASCII name into an empty one. `_fs_safe()` is now Unicode-aware
+  (`[^\w.\-]` → `_`) and `_fs_unique()` appends `sha1(name)[:6]` **only when
+  sanitising changed the name**, so existing ASCII names keep their current
+  hub and target paths (nothing to migrate). The same rule is used for the hub
+  path, `LocalPlatform.repo_url`, `ensure_repo` and `delete_repo`, and a
+  route-level guard skips a colliding pair, names both repos, and says how to
+  exclude one instead of mixing two histories.
+
+### Reverse proxies
+- New `settings.trusted_proxies` (list of CIDRs, default empty). Only when the
+  peer is inside that list is the right-most untrusted `X-Forwarded-For` hop
+  used for the login throttle and the audit log, and `X-Forwarded-Proto`
+  honoured for cookie security. With the list empty both headers are ignored,
+  so a client cannot claim an address. Editable in **Settings → Network**;
+  a bad CIDR is rejected with 400 instead of silently saved.
+
+### Backup integrity you can check
+- **`gitsync verify`** compares every branch and tag on the hub against every
+  target (`git ls-remote`), read-only: it creates nothing and pushes nothing.
+  `--route` narrows it, `--json` is for scripts, and the exit code is 1 when
+  anything drifted. A target that quietly stopped accepting pushes was
+  invisible before: the run records only say what was attempted.
+
+### Moving a config between machines
+- **`gitsync config export`** prints the configuration with every credential
+  blanked (`token`, `password`, `api_key`, `*_token`, `*_secret`,
+  `*_password`, `*_webhook`, `web_token`, `password_hash`), suitable for an
+  issue or a dotfiles repo; `--out` writes it 0600. **`gitsync config import`**
+  reads one back, keeps the credentials already on this machine, backs up the
+  current file, lists platforms that still need a token, and refuses anything
+  that is not a config before writing a byte.
+
+### Prometheus `/metrics`
+- A new endpoint in the format monitoring stacks already scrape: version,
+  paused, syncing, stale, platforms, routes, live sessions, hub mirror count
+  and bytes, and last-run/ok/failed/duration plus last-success timestamp.
+  Auth is the same as every other endpoint (Bearer token or a session), and
+  every value is cached or a small file read, so a 15-second scrape never
+  shells out to git.
+
+### Web UI
+- **Light theme.** Auto / Dark / Light in the top bar and **Settings →
+  Appearance**, persisted per browser in `localStorage` and applied before
+  first paint by `theme.js`, so there is no flash. Every pair keeps 4.5:1
+  contrast; only the palette and a few `--var`s differ, no layout.
+- **Stale-sync banner** on the dashboard, with the reason and a **Sync now**
+  button, and the top-bar chip reads `idle · sync overdue` instead of a
+  reassuring `idle`.
+- **Keyboard shortcuts** (`?`, plus `s` sync, `d` dry run, `p` pause, `t`
+  theme, `/` filter, `Esc`), ignored while typing, with a help sheet.
+- **A POST whose body the route ignores no longer corrupts the connection.**
+  The body was left in the socket, so on keep-alive the browser's *next*
+  request arrived as `{}GET /index.html` and got a 501 error page — clicking
+  **Sign out everywhere** and then landing on the dashboard showed
+  "Unsupported method" instead of the sign-in form. The body is now read
+  exactly once per request, before dispatch, whatever the handler does. Found
+  by driving the real UI in a browser; covered by a regression test that
+  reuses one `HTTPConnection` for both requests.
+- `prefers-reduced-motion` now covers every animation and transition, not
+  three of them.
+- Content-Security-Policy is `script-src 'self'`: there is no inline
+  JavaScript in any page.
+
+### Cleanups
+- `subprocess.run(["rm","-rf", …])` replaced with `shutil.rmtree(onerror=…)`,
+  which is portable and cannot be fooled by an option-looking path.
+- The tests are warning-clean under `python3 -W error::ResourceWarning`, and
+  **`gitsync ci` and all three CI workflows now run with that flag**: a leaked
+  socket or file fails the build instead of scrolling past. Fixed: a leaked
+  client socket on a refused connection, an unclosed job pipe in the web
+  server, an unclosed test HTTP server, and a socket leaked by the hermetic
+  network guard raising `RuntimeError` where `socket.create_connection` only
+  catches `OSError`.
+- A `SHA256SUMS` manifest of every shipped file is committed and checked by
+  `gitsync ci`; `gitsync ci --update-sums` regenerates it. A missing file only
+  fails inside a git checkout.
+- Docs split out of a 1320-line README into `docs/` (CLI, routes and modes,
+  web UI, TUI, Docker, configuration, platforms, notifications, security
+  model, how it works, scheduling, troubleshooting, developing). Finished
+  round plans moved to `docs/archive/`, the empty review stub deleted, and the
+  README states plainly which platforms are supported (Linux and macOS yes,
+  Windows no — WSL2 is Linux).
+- Error copy now says what to do: a rejected Host header names
+  `GITSYNC_ALLOWED_HOSTS`, and a folder collision names
+  `gitsync routes edit NAME --exclude …`.
+- CI runs the suite on Python **3.8, 3.10, 3.12 and 3.13** (GitHub), 3.8
+  (GitLab) and 3.8 (Forgejo), so the "3.8+" promise is enforced rather than
+  claimed.
+
+### Still open
+- The big modules are not split into packages (`tui.py`, `__main__.py`,
+  `web.py`); it is a pure refactor with no user-visible behaviour and was left
+  for a dedicated change.
+- Email/SMTP notifications, Git LFS/submodule awareness, and an axe-core pass
+  in CI are not implemented.
+
+
 ## [2.1.3] - 2026-11-12
 
 ### The TUI quit instead of hanging on `Q`
