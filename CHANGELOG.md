@@ -6,6 +6,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.6] - 2026-11-14
+
+### Mesh routes propagate fast-forwards and report divergence cleanly
+- Fast-forward commits on any peer in a mesh route propagate smoothly across all peers even when `settings.mesh_conflict` is left at the default `skip`. Previously, `skip` refused any differing SHAs even when one was an ancestor of another; `git merge-base --is-ancestor` is now checked inside the hub mirror to fast-forward ahead branches without manual intervention.
+- When branches truly diverge under `skip` policy, gitsync leaves both peers untouched and logs the exact divergence: `diverged SKIPPED: branch (sha1 vs sha2)`. The run finishes with status `partial` instead of failing silently.
+- Default mesh conflict policy is now `skip` everywhere (`C.DEFAULT_MESH_CONFLICT = "skip"`).
+
+### Calmer onboarding and empty-state handling
+- Fresh installations start with an empty route list (`DEFAULT_CONFIG["routes"] = []`).
+- The first-run setup wizard remains visible until at least one runnable route is configured (both source and target platforms are configured with valid credentials or directories).
+- The overdue banner is suppressed when there are no runnable routes configured, avoiding false alarms on first launch before platforms are connected.
+- Topbar "Sync now" and "Dry run" buttons are gracefully disabled with an explanatory tooltip ("No runnable routes configured") when no routes are runnable.
+
+### Accessibility and Web UI polish (WCAG 2.1 AA)
+- Integrated axe-core 4.10.2 automated accessibility testing into Playwright test suite (`tests/test_webapp_playwright.py`) verifying 0 violations across all 9 pages in both dark and light modes.
+- Color contrast calibrated for WCAG AA compliance (contrast ratio >= 4.5:1 for text, >= 3:1 for graphical elements and chips) across both light and dark themes, including `--side-meta`, log status chips (`.l-ok`, `.l-warn`, `.l-bad`), and banner links with explicit underlines.
+- Scrollable log regions (`#logtail`, `#l-lines`, `#rl-lines`) are keyboard-accessible with `tabindex="0"`, `role="region"`, and descriptive `aria-label` attributes.
+- Synchronized `root.style.colorScheme` with theme changes for consistent OS scrollbar and native widget rendering.
+
+### Reliability and Platform compatibility
+- Safe directory removal across Windows, Linux, and macOS: bare repo deletion and mirror cleaning handle read-only file permissions (`stat.S_IWRITE`) to prevent `Access is denied` errors on Windows.
+- Disk free-space checking uses `shutil.disk_usage` for cross-platform support without POSIX-only `statvfs`.
+- Web UI cache invalidation: health status cache is invalidated alongside comparison matrix after sync, fix, restore, or mirror operations.
+- `gitsync update`: enhanced error reporting when auto-updating from source or binary, printing exact manual fallback instructions (`git pull --ff-only && bash install.sh` or tag archive with checksum verification).
+- CI test suite: added opt-in secrets-gated `real-platform-smoke` test job across GitHub Actions, GitLab CI, and Forgejo workflows.
+
 ## [2.1.5] - 2026-11-13
 
 ### Notifications reach more than Discord and Telegram

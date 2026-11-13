@@ -44,7 +44,7 @@ curl -fsSL .../quickinstall.sh | bash -s -- --user
 # unattended, daily, cron instead of systemd
 curl -fsSL .../quickinstall.sh | bash -s -- --yes --schedule daily --cron
 # a pinned, checksum-verified release
-curl -fsSL .../quickinstall.sh | bash -s -- --tag v2.1.4
+curl -fsSL .../quickinstall.sh | bash -s -- --tag v2.1.6
 ```
 
 | Flag | Effect |
