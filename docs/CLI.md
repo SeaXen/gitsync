@@ -17,6 +17,7 @@ scripts and `docker exec`.
 | `gitsync sync --to gitlab` | push to **one target only** |
 | `gitsync sync --repos "tradex,SeaVault"` | sync **only these repos** |
 | `gitsync sync --dry-run` | **preview** what would change, change nothing |
+| `gitsync sync --retry-failed` | re-run only what failed last run, **each on its own route** |
 | `gitsync repos` | **browse the logged account's repo list** |
 | `gitsync disk` | hub disk usage, orphaned mirrors, reclaim space |
 | `gitsync tokens` | check every credential for expiry / revocation |
@@ -49,9 +50,13 @@ scripts and `docker exec`.
 | `gitsync scopes` | required token scopes per platform |
 | `gitsync log -n 50` | last 50 log lines |
 | `gitsync records` | run history with failure details |
-| `gitsync notify --test` | send a test message (Discord **and** Telegram) |
+| `gitsync notify` | show every channel (Discord, Telegram, ntfy, webhook, email) |
+| `gitsync notify --test` | send a test message, **reporting each channel** |
 | `gitsync notify --set-url https://discord.com/api/webhooks/...` | **save** a Discord webhook (validated, not just printed) |
 | `gitsync notify --set-telegram BOTTOKEN --chat-id 12345` | **save** Telegram credentials |
+| `gitsync notify --set-ntfy https://ntfy.sh/my-topic [--ntfy-token T]` | **save** an ntfy topic (phone push) |
+| `gitsync notify --set-webhook https://example.com/hook` | **save** a generic JSON webhook |
+| `gitsync notify --set-smtp HOST --smtp-to me@x.com [--smtp-user --smtp-password --smtp-from --smtp-port --no-tls]` | **save** email alerts |
 | `gitsync fix` | detect drift across platforms and repair it |
 | `gitsync fix --route main` | repair only that route |
 | `gitsync install` | install the scheduler for the **finest** route schedule |
@@ -87,6 +92,7 @@ scripts and `docker exec`.
 | `--to NAME` | `sync`, `mirror` | push to one target only. **Ignored on a mesh route** (a mesh always syncs every peer) |
 | `--from NAME` | `mirror` | pull from a specific platform instead of the route's source |
 | `--repos "a,b"` | `sync`, `stars copy` | only these repos (exact, case-insensitive names) |
+| `--retry-failed` | `sync` | re-run the last run's failures, scoped per route so a healthy route is not re-pushed |
 | `--route NAME` | most commands | only this route |
 | `--orphans --prune-orphans` | `disk` | list mirrors no route owns, then delete them (two separate steps, on purpose) |
 | `--system` | `install` | install a root system unit instead of a user unit |

@@ -50,11 +50,19 @@ missing falls back to the default shown.
 | `pace` | 0, 1, 2, 5, 10 (seconds) | `0` | pause between repos — slows a run to spare laptop heat / disk throttling | `O` |
 | `relax_protection` | `true`, `false` | `false` | allow gitsync to turn on force-push over **branch protection** on a destination. Off means a rejected push is reported, never worked around | hand-edit only |
 | `token_warn_days` | 7, 14, 30, 60, 90 | `30` | how early a credential warns before it expires | `O` |
+| `min_free_gb` | 0, 0.25, 0.5, 1, 2, 5, 10 | `0.5` | free-space floor on the mirror disk. Below it a sync **refuses to start** (recorded, notified, exit 1). `0` disables it | `O` |
+| `hooks.pre` / `hooks.post` | command strings | *(empty)* | run before / after a real sync. `shlex.split`, never a shell. A failing `pre` blocks the run; a failing `post` only logs. The post hook sees `GITSYNC_OK`, `GITSYNC_PARTIAL`, `GITSYNC_FAILED`, `GITSYNC_REPOS`, `GITSYNC_ELAPSED`, `GITSYNC_FINISHED` | `O` |
 | `theme` | `default`, `mono`, `ocean`, `forest`, `sunset` | `default` | TUI colours. `mono` is all-white | `O` |
 | `trusted_proxies` | list of CIDRs, e.g. `["127.0.0.1/32","192.168.0.0/24"]` | `[]` | which peers may set `X-Forwarded-For` / `X-Forwarded-Proto`. Empty = ignore both headers (a client cannot fake its address) | web **Settings → Network** |
-| `notify.on` | `failure`, `success`, `always`, `never` | `failure` | when to send Discord/Telegram alerts | `O` or `N`→`M` |
+| `notify.on` | `failure`, `success`, `always`, `never` | `failure` | when to send alerts | `O` or `N`→`M` |
 | `notify.discord_webhook` | URL | *(empty)* | Discord webhook | `N`→`D` or `notify --set-url` |
-| `notify.telegram_token` / `notify.telegram_chat_id` | string | *(empty)* | Telegram bot + chat | `N`→`T` or `notify --set-telegram … --chat-id …` |
+| `notify.telegram_token` / `notify.telegram_chat_id` | string | *(empty)* | Telegram bot + chat (both, or the channel counts as unset) | `N`→`T` or `notify --set-telegram … --chat-id …` |
+| `notify.ntfy_url` / `notify.ntfy_token` | URL / token | *(empty)* | ntfy topic (phone push); the token is only for a protected topic | `N` or `notify --set-ntfy` |
+| `notify.webhook_url` | URL | *(empty)* | generic JSON webhook (Slack-style, Home Assistant, n8n…) | `N` or `notify --set-webhook` |
+| `notify.smtp_host` / `smtp_port` / `smtp_user` / `smtp_password` / `smtp_from` / `smtp_to` / `smtp_tls` | string / int / bool | `587`, TLS on | email alerts. Host **and** recipient are required; the password is write-only | `N` or `notify --set-smtp` |
+
+See [NOTIFICATIONS.md](NOTIFICATIONS.md) for every key, the per-route
+override and the environment variables.
 
 ### `platforms` — one entry per site
 
@@ -88,6 +96,11 @@ missing falls back to the default shown.
 | `schedule` | per-route frequency; the timer fires at the finest one |
 | `include` / `exclude` | glob lists, e.g. `["Sea*"]` / `["tradex"]` |
 | `include_file` | path to a file of exact repo names (one per line, `#` comments) — replaces `include`. A missing file means "no filtering" |
+| `notify_on` | `failure`, `success`, `always`, `never` — override the global notification mode for this route alone (`never` beats a global `always`) |
+| `include_forks` | per-route override: mirror forks on this route (blank = inherit the global setting) |
+| `skip_archived` | `true` (default) / `false` — an archived repo is read-only on every host, so syncing one can only produce push failures |
+| `skip_empty` | `false` (default) / `true` — skip empty repos (only detectable on a local folder) |
+| `prune_repos` | list of targets on which a `full`-mode run may **delete** repositories the source no longer has. Opt-in per target, never scheduled |
 
 You can enable **several platforms of the same type** — two Forgejo servers,
 GitHub plus a self-hosted Gitea, each with its own token and route.
@@ -120,7 +133,8 @@ A gitsync config is the whole install: platforms, routes, schedules, filters
 and notification settings. `export` writes a perfect copy **except that every
 credential field is emptied** — `token`, `password`, `api_key`,
 `webhook_secret`, anything ending in `_token` / `_secret` / `_password` /
-`_webhook`, plus `settings.web_token` and `settings.password_hash`. That makes
+`_webhook` (a webhook URL usually carries its own token), plus
+`settings.web_token` and `settings.password_hash`. That makes
 the file safe to paste into an issue, commit to a dotfiles repo, or hand to a
 teammate.
 

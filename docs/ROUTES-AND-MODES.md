@@ -20,6 +20,18 @@ pausing, mesh, and the exact conditions under which anything is deleted.
 
 Full-account sync is the default, but you don't have to take all of it.
 
+**What the route will sync** — three switches decide what even gets
+considered, before any clone:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `include_forks` | inherit the global `include_forks` (off) | mirror forks on this route |
+| `skip_archived` | **on** | an archived repo is read-only on every supported host, so a push can only fail |
+| `skip_empty` | off | an empty repo is only visible on a local folder and is almost always a placeholder |
+
+The run logs what it dropped (`skipped: 1 archived, 2 fork`), so a smaller
+repo count is never a mystery.
+
 **From the TUI** — press `E`:
 
 ```
@@ -131,6 +143,10 @@ gitsync restore --to gitlab,forgejo --repos "app,docs"
 - nothing is deleted on a target unless `mode: full` **and** `--prune`
 - missing repos are created private unless `--public`
 - exit code is non-zero if anything failed
+
+In the web UI, **Restore previews first and then asks you to type `restore`**
+before pushing. The dry run is not a checkbox you have to remember — it is
+the first half of the tool.
 
 ---
 

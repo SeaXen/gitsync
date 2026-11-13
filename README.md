@@ -87,10 +87,12 @@ folder — is in **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.
 | **Two-way (mesh)** | every peer is source and target: edit on GitLab, it lands everywhere else |
 | **Safe by default** | `mode: safe` never deletes and never force-pushes; mesh reports a disagreement instead of overwriting |
 | **Everything in a UI** | accounts, routes, repos, stars, disk, doctor, compare, mirror — TUI, web UI, or CLI |
-| **Restore from the hub** | `gitsync restore --to gitlab` pushes every local mirror back out |
+| **Restore from the hub** | `gitsync restore --to gitlab` pushes every local mirror back out (the web UI previews it first) |
+| **Alerts you actually get** | Discord, Telegram, ntfy, any JSON webhook, or email — globally or per route |
 | **Drift detection** | `gitsync compare` (HEADs) and `gitsync verify` (every branch and tag, hub vs targets) |
 | **Self-healing** | a network drop leaves a partial mirror that is detected, removed and re-cloned |
 | **Zero dependencies** | Python 3.8+ standard library only. No pip. No npm. |
+| **Guards** | refuses to start on a full disk, runs your own pre/post-sync commands, and retries only what failed |
 
 The full feature list is in **[docs/CLI.md](docs/CLI.md)** and the pages below.
 
@@ -128,7 +130,7 @@ you can run `full` once to re-align. Details:
 | [DOCKER](docs/DOCKER.md) | container setup, volumes, the scheduler profile |
 | [CONFIGURATION](docs/CONFIGURATION.md) | `config.json` field by field, export/import |
 | [PLATFORMS](docs/PLATFORMS.md) | tokens and scopes per provider |
-| [NOTIFICATIONS](docs/NOTIFICATIONS.md) | Discord and Telegram alerts |
+| [NOTIFICATIONS](docs/NOTIFICATIONS.md) | Discord, Telegram, ntfy, webhook and email alerts |
 | [SECURITY-MODEL](docs/SECURITY-MODEL.md) | what is stored, auth, CSP, reverse proxies |
 | [HOW-IT-WORKS](docs/HOW-IT-WORKS.md) | the engine and the workflows |
 | [SCHEDULING](docs/SCHEDULING.md) | timers, cron, updating, uninstalling |

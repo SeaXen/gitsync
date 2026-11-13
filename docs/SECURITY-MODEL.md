@@ -50,7 +50,7 @@ Host allow-list first (DNS-rebinding guard). Failures read
 | CSRF | state-changing requests need an `Origin`/`Sec-Fetch-Site` that matches, or a Bearer token (which is not ambient) |
 | Login throttle | repeated failures lock that source address out for a while |
 | Body limit | oversized bodies are rejected with 413, not buffered |
-| CSP | `script-src 'self'` — there is no inline JavaScript anywhere in the UI. `style-src 'self' 'unsafe-inline'` is required only for `style=""` attributes |
+| CSP | `script-src 'self'` — no inline JavaScript, no eval. `style-src 'self'` too: no markup carries a `style=""` attribute (one-off tweaks are utility classes in `style.css`, the 404 page links its own stylesheet). The only CSS applied at runtime is a progress bar's width through the CSSOM, which CSP does not police |
 | Redaction | tokens, webhook URLs and passwords are scrubbed from logs, job output and API responses |
 
 Logs live at `~/.local/share/gitsync/gitsync.log` (0600). Audit lines (sign-in,

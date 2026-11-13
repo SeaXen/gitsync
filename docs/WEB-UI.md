@@ -43,6 +43,17 @@ restore, mirror). **Sync now / Dry run** stream the real
 with a live `[done/total]` progress bar — nothing is reimplemented, so it can
 never drift from the CLI.
 
+**First run:** with no route configured the dashboard shows a four-step wizard
+— add two sites, connect them with a route, pick (or take all) repos, preview
+with a dry run, then sync. It disappears as soon as a route exists and can be
+hidden for the rest of the browser session. Nothing is pushed until the last
+step.
+
+**Restore previews first.** Tools → Restore always runs the dry run and streams
+it, then asks you to type `restore` before pushing hub mirrors out. A checkbox
+you forgot to tick used to be the only thing between a click and a push of
+~every mirror.
+
 **Always-on (survives reboot):** run it in the foreground with `gitsync web`
 (Ctrl-C to stop), or install it as a systemd service so it starts on boot:
 

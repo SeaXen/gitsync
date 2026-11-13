@@ -284,7 +284,7 @@ reverted by the next run.
 | Add another route | `gitsync routes add restore local github` |
 | Only mirror some repos | `gitsync routes add sea github backup --include "Sea*"` |
 | Change the schedule | `gitsync install --schedule 6h` (or `C` in the TUI) |
-| Get Discord/Telegram alerts | press `N` in the TUI, or `gitsync notify --test` |
+| Get alerts (Discord, Telegram, ntfy, webhook, email) | press `N` in the TUI, or `gitsync notify --test` |
 | Sync only to one target | `gitsync sync --to gitlab` |
 | Sync one repo | `gitsync mirror tradex` |
 | Repair drift | `gitsync fix` |

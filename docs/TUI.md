@@ -41,7 +41,7 @@ The TUI and every subprocess it starts run the *installed* copy in
 | `P` (Routes tab) | pause/resume a target or a route · `S` run one route · `D` dry-run it · `F` filters · `A` add · `X` remove · `O` per-route options |
 | `E` | **repo browser** — see repos, mirror status, pick some, `+` add to route, `P` switch account, `S` all / `T` one site / `L` local only |
 | `T` | **tools**: disk + orphans, doctor, compare, mirror one repo, fix drift, update, uninstall (run in the background, output streams to the dashboard) |
-| `N` | notifications: Discord `D`, Telegram `T`, mode `M`, test Enter, webhook receiver `W` |
+| `N` | notifications: Discord, Telegram, ntfy, webhook and email — mode `M`, test Enter, webhook receiver `W` |
 | `R` | refresh platform connections |
 | `W` | setup wizard |
 | `1`–`7` | Dashboard · Platforms · Routes · Stars · Log · History · Settings |

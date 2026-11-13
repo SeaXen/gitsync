@@ -77,6 +77,35 @@ How early the dashboard warns that a credential is about to expire. GitLab
 tokens have an expiry date; GitHub fine-grained tokens do; Forgejo tokens
 never do (they report "unknown" rather than guessing).
 
+### `min_free_gb` — 0, 0.25, 0.5, 1, 2, 5, 10 (default 0.5)
+
+The floor of free space on the mirror disk. Below it, a sync **refuses to
+start**: the run is recorded, the notification channel gets the reason, and
+the CLI exits 1 (so the timer's mail fires). A full disk turns a fetch into a
+half-written mirror, and that mirror then fails every later run with a
+confusing git error — stopping with a sentence is cheaper.
+
+`0` disables the guard. An unreadable filesystem (no `statvfs`) never blocks.
+
+### `hooks.pre` / `hooks.post` — commands, blank by default
+
+```
+settings.hooks.pre   run before a real sync (never a dry run)
+settings.hooks.post  run after one
+```
+
+`shlex.split`, never a shell: the config is a file a web session can write,
+so a shell would turn "save settings" into remote code execution. A hook that
+needs a pipeline can call a script of its own.
+
+- a **pre** hook that exits non-zero blocks the sync (`blocked` in the
+  history, exit 1) — use it to wake a NAS or mount a disk
+- a **post** hook that fails only logs: the backup itself succeeded, and a
+  broken notifier must not change the exit code of a good run
+- the post hook gets `GITSYNC_OK`, `GITSYNC_PARTIAL`, `GITSYNC_FAILED`,
+  `GITSYNC_REPOS`, `GITSYNC_ELAPSED` and `GITSYNC_FINISHED` in its
+  environment
+
 ### `theme` — default, mono, ocean, forest, sunset
 
 TUI colours, applied immediately. `mono` is all-white, for terminals where
@@ -109,11 +138,18 @@ Only set this on destinations you control.
 A run is `partial` when a target refused a push, or a mesh skipped a
 conflict — so `failure` catches those too. The exit code follows: `gitsync
 sync` returns 0 only when nothing failed and nothing was partial, which is
-what makes a failing timer visible.
+what makes a failing timer visible. A **blocked** run (disk guard, pre hook)
+returns 1.
 
-Both channels work independently. Discord and Telegram can both be set; the
-test (`Enter` in the TUI, or `gitsync notify --test`) sends to whichever are
-configured.
+Channels are Discord, Telegram, ntfy, a generic JSON webhook and SMTP mail;
+see [NOTIFICATIONS.md](NOTIFICATIONS.md) for every key and the setup
+commands. Each channel is independent, the test (`Enter` in the TUI, or
+`gitsync notify --test`) reports them one by one, and a half-typed channel is
+named as a problem rather than silently dropped.
+
+The rule is decided **per route**: a route's own `notify_on` overrides the
+global mode, so one route can page on every run while the rest stay quiet
+until something breaks.
 
 ---
 
@@ -127,6 +163,17 @@ Every one of these defaults to "inherit" (use the global value):
   stays `safe`.
 - **Mesh conflicts** — one mesh `newest`, another `skip`.
 - **Schedule** — hourly for an active project, weekly for an archive.
+- **Notify on** — override the global notification mode for one route.
+- **Forked repos** — include or skip forks on this route alone (blank =
+  inherit the global `include_forks`).
+- **Skip partners** — archived repos (default: skipped) and empty repos
+  (default: kept).
+
+An archived repository is read-only on every supported host, so syncing one
+only produces push failures; an empty repo is only visible on a local folder
+and is almost always a placeholder. The log line counts what was skipped
+(`skipped: 1 archived, 2 fork`), so a shrinking repo count is never a
+mystery.
 
 A route can also be paused entirely (`"enabled": false`) or have individual
 targets paused (`"paused_targets": [...]`). Paused items are skipped by every
@@ -247,3 +294,29 @@ rather than failing with an auth error. Requires `glab auth login` first.
 empty mirrors with a log line, creates missing repos (private unless
 `--public`), and deletes nothing unless `mode: full` **and** `--prune`. See
 the README section "If the source host disappears".
+
+In the web UI the preview is not optional: **Restore always runs the dry run
+first, streams it, and then asks you to type `restore`** before anything is
+pushed. A checkbox you forgot to tick used to be the only thing standing
+between a click and a push of ~every mirror.
+
+## Retrying only what broke
+
+`gitsync sync --retry-failed` re-runs the failures from the last run. It is
+scoped **per route and repo** — the same repo name that failed on one route
+is healthy on another, and retrying it there was wasted work (and a second
+failure). Routes with no failure are skipped before anything is listed.
+
+```bash
+gitsync sync --retry-failed                 # just the failures, each on its route
+gitsync sync --retry-failed --repos tradex  # those two, everywhere
+```
+
+## Git LFS and submodules
+
+gitsync mirrors **refs**. A repository using Git LFS or submodules gets a log
+line (`uses Git LFS — install git-lfs to mirror the objects`, `has
+submodules`), and when `git-lfs` is installed the run also does
+`git lfs fetch --all` into the hub. Without it, a clone from a target will
+have the refs but not the large files — which is exactly what the log line
+says, instead of a silently incomplete mirror.

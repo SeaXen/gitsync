@@ -47,7 +47,7 @@ gitsync sync   (or the hourly timer)
       |   +--------------------------------------------------+
       |
       +-> write the run record (records.json)
-      +-> notify if it failed (Discord/Telegram, per your mode)
+      +-> notify if it failed (Discord, Telegram, ntfy, webhook, email — per your mode)
 ```
 
 Self-healing: a network drop mid-clone leaves a partial mirror; the next
@@ -68,7 +68,7 @@ gitsync                        <- bare command opens the TUI
       |
       +-> S sync now (live progress)      L full log (scroll+search)
       +-> C schedule menu                O options
-      +-> A accounts/scopes              N notifications (Discord/Telegram)
+      +-> A accounts/scopes              N notifications (5 channels)
       +-> W setup wizard                 Q quit
 ```
 
@@ -109,7 +109,7 @@ systemd timer (hourly, Persistent=true)
       |     +-> run lock (never overlaps a manual sync)
       |     +-> repos -> all targets
       |     +-> run record written
-      |     +-> failure? -> Discord/Telegram message with the reasons
+      |     +-> failure? -> notification with the reasons (your channels)
       |
       +-> logs: gitsync.log   |   journalctl -u gitsync.service
 ```

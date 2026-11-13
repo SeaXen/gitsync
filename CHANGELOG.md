@@ -6,6 +6,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.5] - 2026-11-13
+
+### Notifications reach more than Discord and Telegram
+- Five channels now, all optional and independent: **Discord**, **Telegram**,
+  **ntfy** (push to a phone, no account needed), a **generic JSON webhook**
+  (Slack-style relays, Home Assistant, n8n…) and **SMTP email** with STARTTLS
+  and AUTH. Standard library only — `urllib` and `smtplib`, no new dependency.
+- `notify --test` reports each channel on its own line, so a half-configured
+  setup says `telegram: FAILED` instead of "sent". `send()` only reports
+  success when a channel accepted the message, and Settings shows which
+  channels are active and warns about a half-typed one.
+- A **route** may set `notify_on` (`failure` / `success` / `always` /
+  `never`), overriding the global mode for that route only. The rule is now
+  decided per route instead of once per run: a chatty route can page on every
+  run while the quiet ones stay silent until something breaks, and `never` on
+  a route beats a global `always`.
+- ntfy and generic webhook URLs are treated as credentials on
+  `config export` (they usually embed a token) and carried over on import.
+
+### Fewer failures that are not the user's fault
+- Routes can skip **archived** repositories (default: on — they are read-only
+  on every supported host, so a push can only fail), choose **forks** per
+  route, and skip **empty** local repos. The log line counts what was
+  skipped, so a shrinking repo count is never a mystery.
+- A sync now **refuses to start on a full disk**: `settings.min_free_gb`
+  (default 0.5) is a free-space floor on the mirror disk, and a blocked run is
+  recorded, notified, and exits 1 so the timer's mail fires. A full disk used
+  to turn a fetch into a half-written mirror that then failed every later run
+  with a confusing git error.
+- `settings.hooks.pre` / `hooks.post` run around a real sync — `shlex.split`,
+  never a shell, because the config is web-writable. A failing **pre** hook
+  blocks the run (use it to wake a NAS); a failing **post** hook only logs,
+  because the backup did succeed.
+- `sync --retry-failed` is scoped **per route and repo**: it re-runs only what
+  failed on that route instead of replaying the same names everywhere.
+- Repos using **Git LFS** or **submodules** get a log line, and
+  `git lfs fetch --all` runs into the hub when `git-lfs` is installed — refs
+  are synced either way, so it is a note rather than a red run.
+
+### Web UI
+- **First-run wizard** on the dashboard while no route exists: add two sites,
+  connect them with a route, pick (or take all) repos, preview with a dry run,
+  then sync. Dismissible per browser session, gone as soon as a route exists.
+- **Restore previews first** — it always runs the dry run, streams it, and then
+  asks you to type `restore` before pushing hub mirrors out.
+- Settings gained the full channel list, the free-space floor and the two
+  hooks; Routes gained notify-on, forks and the two skip toggles.
+
+### CI
+- `gitsync ci` has a **packaging check**: `install.sh` and the Dockerfile must
+  still ship `docs/`. A dropped `COPY docs ./docs` line makes every guide
+  vanish from an install while the source tree still looks complete.
+
+### Known limits (unchanged, now written down)
+- Git LFS blobs and submodule working trees are not mirrored; only refs are.
+- The TUI is 280 columns by design; the web UI is the responsive one.
+- Windows: the engine runs, but there is no installer or scheduler.
+
 ## [2.1.4] - 2026-11-13
 
 ### Web sign-in is a real session, not the token in a cookie
