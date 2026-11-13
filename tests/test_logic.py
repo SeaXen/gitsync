@@ -4759,5 +4759,52 @@ class TestMeshSync(unittest.TestCase):
             self.assertEqual(m1_sha, c2_sha)
 
 
+class TestFirstRunWizardAndStaleState(unittest.TestCase):
+    """Round 4 N2: first-run wizard check and stale state suppression."""
+
+    def test_default_config_routes_is_empty(self):
+        self.assertEqual(C.DEFAULT_CONFIG["routes"], [])
+
+    def test_default_mesh_conflict_constant(self):
+        self.assertEqual(C.DEFAULT_MESH_CONFLICT, "skip")
+        self.assertEqual(C.DEFAULT_CONFIG["settings"]["mesh_conflict"], "skip")
+
+    def test_is_platform_ready(self):
+        self.assertFalse(C.is_platform_ready({"type": "github", "token": "", "enabled": True}))
+        self.assertTrue(C.is_platform_ready({"type": "github", "token": "ghp_123", "enabled": True}))
+        self.assertFalse(C.is_platform_ready({"type": "github", "token": "ghp_123", "enabled": False}))
+        self.assertTrue(C.is_platform_ready({"type": "local", "path": "/some/path", "enabled": True}))
+        self.assertFalse(C.is_platform_ready({"type": "local", "path": "", "enabled": True}))
+
+    def test_has_runnable_routes_and_stale_state(self):
+        # Fresh install config has no runnable routes
+        self.assertFalse(C.has_runnable_routes(C.DEFAULT_CONFIG))
+        stale_fresh = W._stale_state(C.DEFAULT_CONFIG, None)
+        self.assertFalse(stale_fresh["stale"])
+
+        # Config with unready routes is not runnable
+        cfg_unready = {
+            "platforms": {
+                "gh": {"type": "github", "token": "", "enabled": True},
+                "gl": {"type": "gitlab", "token": "", "enabled": True},
+            },
+            "routes": [{"name": "r", "source": "gh", "targets": ["gl"], "enabled": True}],
+            "settings": {},
+        }
+        self.assertFalse(C.has_runnable_routes(cfg_unready))
+        self.assertFalse(W._stale_state(cfg_unready, None)["stale"])
+
+        # Config with ready route but no last_ok is overdue
+        cfg_ready = {
+            "platforms": {
+                "loc1": {"type": "local", "path": "/path1", "enabled": True},
+                "loc2": {"type": "local", "path": "/path2", "enabled": True},
+            },
+            "routes": [{"name": "r", "source": "loc1", "targets": ["loc2"], "enabled": True}],
+            "settings": {"schedule": "hourly"},
+        }
+        self.assertTrue(C.has_runnable_routes(cfg_ready))
+        self.assertTrue(W._stale_state(cfg_ready, None)["stale"])
+
 if __name__ == '__main__':
     unittest.main()

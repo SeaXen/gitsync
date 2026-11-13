@@ -664,7 +664,7 @@
             'aria-label="Change colour theme">' + I.theme + '</button>' +
           '<button class="btn icon" id="top-logout" title="Sign out" ' +
             'aria-label="Sign out">' + I.logout + "</button>" +
-          '<div class="topbar-progress" id="top-progress" role="progressbar" ' +
+          '<div class="topbar-progress" id="top-progress" role="progressbar" aria-label="Sync progress" ' +
             'aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>' +
         "</header>" +
         '<main class="main" id="main" tabindex="-1"></main>' +
@@ -804,8 +804,21 @@
         if (s.paused) pBtn.classList.add("warn");
         else pBtn.classList.remove("warn");
       }
+      var dryBtn = document.getElementById("top-dry");
+      var syncBtn = document.getElementById("top-sync");
+      if (s.has_runnable_routes === false) {
+        if (dryBtn) { dryBtn.disabled = true; dryBtn.title = "No runnable routes configured"; }
+        if (syncBtn) { syncBtn.disabled = true; syncBtn.title = "No runnable routes configured"; }
+      } else {
+        if (dryBtn) { dryBtn.disabled = false; dryBtn.title = ""; }
+        if (syncBtn) { syncBtn.disabled = false; syncBtn.title = ""; }
+      }
       if (s.paused) { setStatus("PAUSED · all syncs suspended", "warn"); return; }
       if (s.syncing) { setStatus("syncing…", "live"); return; }
+      if (s.has_runnable_routes === false) {
+        setStatus("idle · no runnable routes");
+        return;
+      }
       var next = s.next_run ? " · next " + s.next_run : "";
       if (s.stale && s.stale.stale) {
         // a configuration that will never sync should not look idle

@@ -58,7 +58,7 @@
     try {
       if (sessionStorage.getItem("gs-wizard-off") === "1") { host.innerHTML = ""; return; }
     } catch (e) { /* private mode */ }
-    if (WIZ.routes.length && !WIZ.started) {
+    if (WIZ.hasRunnableRoutes !== false && WIZ.routes.length && !WIZ.started) {
       host.innerHTML = "";
       return;
     }
@@ -270,7 +270,11 @@
   }
 
   function refresh() {
-    G.api("GET", "/api/status").then(fillStatus).catch(function (e) {
+    G.api("GET", "/api/status").then(function (s) {
+      WIZ.hasRunnableRoutes = s.has_runnable_routes;
+      fillStatus(s);
+      wizardCheck();
+    }).catch(function (e) {
       var s = document.getElementById("dash-sub");
       if (s) s.textContent = G.apiError(e);
     });
@@ -294,27 +298,57 @@
 
   var lastStatus = null;
 
-  function staleBanner(st) {
+  function staleBanner(st, s) {
     var host = document.getElementById("stale-banner");
     if (!host) return;
-    if (!st || !st.stale) { host.hidden = true; host.innerHTML = ""; return; }
-    var every = st.every_hours;
-    var what = st.age_hours === null || st.age_hours === undefined
-      ? "Nothing has synced yet."
-      : "The last successful sync was " + G.ago(Math.round(st.age_hours * 3600)) + ".";
-    var span = every ? ("This is set to run every " + every + "h.") : "";
+    if (!st || !st.stale || (s && s.has_runnable_routes === false)) {
+      host.hidden = true; host.innerHTML = ""; return;
+    }
+    var needsTimer = s && s.schedule !== "off" && (!s.scheduler || s.scheduler.indexOf("not scheduled") !== -1 || s.scheduler.indexOf("none") !== -1);
     host.hidden = false;
-    host.innerHTML =
-      '<div class="banner ' + (st.age_hours === null ? "bad" : "warn") + '">' +
-        '<span class="banner-icon" aria-hidden="true">!</span>' +
-        '<div class="banner-body"><strong>Sync is overdue.</strong> ' +
-          G.esc(what) + " " + G.esc(span) +
-          '<div class="banner-actions">' +
-            '<button class="btn primary" id="stale-sync" type="button">Sync now</button>' +
-            '<a class="btn" href="settings.html#scheduler">Check the scheduler</a>' +
+    if (needsTimer) {
+      host.innerHTML =
+        '<div class="banner warn">' +
+          '<span class="banner-icon" aria-hidden="true">!</span>' +
+          '<div class="banner-body"><strong>Schedule is set to ' + G.esc(s.schedule) + '</strong> but no timer is installed yet.' +
+            '<div class="banner-actions">' +
+              '<button class="btn primary" id="dash-install-timer" type="button">Install timer</button>' +
+              '<button class="btn" id="stale-sync" type="button">Sync now</button>' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      var it = document.getElementById("dash-install-timer");
+      if (it) {
+        it.addEventListener("click", function () {
+          G.busy(it, function () {
+            return G.api("POST", "/api/scheduler/install", s.schedule ? { schedule: s.schedule } : {})
+              .then(function (d) {
+                G.toast(d.status || "Timer installed", d.ok ? "ok" : "warn");
+                G.refreshStatus();
+              }).catch(function (e) {
+                G.toast(G.apiError(e), "bad");
+              });
+          });
+        });
+      }
+    } else {
+      var every = st.every_hours;
+      var what = st.age_hours === null || st.age_hours === undefined
+        ? "Nothing has synced yet."
+        : "The last successful sync was " + G.ago(Math.round(st.age_hours * 3600)) + ".";
+      var span = every ? ("This is set to run every " + every + "h.") : "";
+      host.innerHTML =
+        '<div class="banner ' + (st.age_hours === null ? "bad" : "warn") + '">' +
+          '<span class="banner-icon" aria-hidden="true">!</span>' +
+          '<div class="banner-body"><strong>Sync is overdue.</strong> ' +
+            G.esc(what) + " " + G.esc(span) +
+            '<div class="banner-actions">' +
+              '<button class="btn primary" id="stale-sync" type="button">Sync now</button>' +
+              '<a class="btn" href="settings.html#scheduler">Check the scheduler</a>' +
+            "</div>" +
           "</div>" +
-        "</div>" +
-      "</div>";
+        "</div>";
+    }
     var b = document.getElementById("stale-sync");
     if (b) {
       b.addEventListener("click", function () {
@@ -329,30 +363,11 @@
 
   function fillStatus(s) {
     lastStatus = s;
-    staleBanner(s.stale);
+    staleBanner(s.stale, s);
     var sub = document.getElementById("dash-sub");
     if (sub) {
-      if (s.schedule !== "off" && (!s.scheduler || s.scheduler.indexOf("not scheduled") !== -1 || s.scheduler.indexOf("none") !== -1)) {
-        sub.innerHTML = "Schedule set to " + G.esc(s.schedule) +
-          ' but no timer is installed — <button class="btn-link" id="dash-install-timer" type="button">Install timer</button>';
-        var b = document.getElementById("dash-install-timer");
-        if (b) {
-          b.addEventListener("click", function () {
-            G.busy(this, function () {
-              return G.api("POST", "/api/scheduler/install", s.schedule ? { schedule: s.schedule } : {})
-                .then(function (d) {
-                  G.toast(d.status || "Timer installed", d.ok ? "ok" : "warn");
-                  G.refreshStatus();
-                }).catch(function (e) {
-                  G.toast(G.apiError(e), "bad");
-                });
-            });
-          });
-        }
-      } else {
-        sub.textContent = "Timer: " + s.schedule + ", next run " +
-          (s.next_run || "—") + " · scheduler: " + s.scheduler;
-      }
+      sub.textContent = "Timer: " + s.schedule + ", next run " +
+        (s.next_run || "—") + " · scheduler: " + s.scheduler;
     }
   }
 
@@ -492,7 +507,9 @@
       row("Workers / forks", G.esc(st.workers) + " · forks " +
           (st.include_forks ? "included" : "excluded") +
           " · pace " + (st.pace || 0) + "s") +
-      row("Mesh conflicts", G.esc(st.mesh_conflict || "newest")) +
+      row("Mesh conflicts", (st.mesh_conflict || "skip") === "skip"
+          ? 'skip <span class="muted">(only diverged branches left alone)</span>'
+          : G.esc(st.mesh_conflict || "skip")) +
       row("Notify", channels.length
           ? G.esc(channels.join(" + ")) + " on " + G.esc(notify.on)
           : '<span class="muted">not set</span>') +
@@ -662,7 +679,7 @@
         '<div class="stack" id="routes-body">' + G.loading() + "</div></section>" +
       '<section class="card" id="log-card"><p class="label">Log ' +
         '<a href="log.html" class="u-notransform">View full log →</a></p>' +
-        '<div class="mono log" id="logtail">' + G.loading() + "</div></section>" +
+        '<div class="mono log" id="logtail" tabindex="0" role="region" aria-label="Log output">' + G.loading() + "</div></section>" +
       '<section class="card" id="ref-card"><p class="label">Quick reference</p>' +
         '<div class="mono u-lh19">' +
         '<div class="qr"><span class="c">gitsync sync</span><span class="d">— sync every enabled route now</span></div>' +

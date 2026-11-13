@@ -589,8 +589,6 @@ def _remember_job_result(job):
     elif job.kind in ("sync", "fix", "restore", "mirror"):
         _CMP_CACHE["at"] = 0.0
         _CMP_CACHE["data"] = None
-
-
 def _drop_compare_cache():
     """a route edit changes the answer (prune_repos, filters), so the cached
     matrix is no longer the current configuration."""
@@ -1409,6 +1407,9 @@ def _stale_state(cfg, last_ok):
     the point where the dashboard should say so in red instead of showing a
     calm "—".
     """
+    if not C.has_runnable_routes(cfg):
+        return {"stale": False, "age_hours": None, "every_hours": None,
+                "reason": "no runnable routes"}
     schedule = C.setting(cfg, "schedule", "hourly")
     every = C.SCHEDULE_HOURS.get(schedule)
     if not every:
@@ -1523,6 +1524,7 @@ def _status_payload(handler):
         "last_run": _public_record(last) if last else None,
         "last_ok_run": _public_record(last_ok) if last_ok else None,
         "stale": _stale_state(cfg, last_ok),
+        "has_runnable_routes": C.has_runnable_routes(cfg),
         "counts": {"platforms": len(cfg.get("platforms") or {}),
                    "routes": len(C.routes(cfg))},
     }

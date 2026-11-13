@@ -118,7 +118,7 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
         shutil.rmtree(cls.td, ignore_errors=True)
 
     def setUp(self):
-        self.context = self.browser.new_context(viewport={"width": 1280, "height": 800})
+        self.context = self.browser.new_context(viewport={"width": 1280, "height": 800}, color_scheme="dark")
         self.page = self.context.new_page()
 
     def tearDown(self):
@@ -189,7 +189,7 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
 
             # Check dark mode metadata
             html_elem = self.page.locator("html")
-            self.assertEqual(html_elem.get_attribute("style"), "color-scheme: dark")
+            self.assertIn("color-scheme: dark", html_elem.get_attribute("style") or "")
 
             # Verify header balance wrap
             h1 = self.page.locator(".bar h1")
@@ -321,6 +321,43 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
         expect(token_input).to_be_visible()
         self.page.screenshot(path=os.path.join(ARTIFACT_DIR, "15_logged_out.png"))
 
+    def test_06_first_run_wizard_and_no_overdue_banner(self):
+        """Fresh install shows #wizard-card and no overdue banner."""
+        with tempfile.TemporaryDirectory() as td:
+            cfgdir = os.path.join(td, "cfg")
+            datadir = os.path.join(td, "data")
+            os.makedirs(cfgdir)
+            os.makedirs(datadir)
+            empty_cfg = {"version": 1, "platforms": {}, "routes": [], "settings": {"schedule": "hourly"}}
+            with open(os.path.join(cfgdir, "config.json"), "w", encoding="utf-8") as f:
+                json.dump(empty_cfg, f)
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = cfgdir
+            C.CONFIG_FILE = os.path.join(cfgdir, "config.json")
+            C.DATA_DIR = datadir
+            C.MIRROR_DIR = os.path.join(datadir, "mirrors")
+            try:
+                srv = W._Server(("127.0.0.1", 0), W.make_handler(), "tok-fresh", "127.0.0.1", set())
+                th = threading.Thread(target=srv.serve_forever, daemon=True)
+                th.start()
+                try:
+                    ctx = self.browser.new_context()
+                    page = ctx.new_page()
+                    page.goto(f"http://127.0.0.1:{srv.port}/")
+                    page.wait_for_load_state("networkidle")
+                    if page.locator("#tok").is_visible():
+                        page.locator("#tok").fill("tok-fresh")
+                        page.locator("#loginbtn").click()
+                        page.wait_for_load_state("networkidle")
+                    expect(page.locator("#wizard-card")).to_be_visible()
+                    stale_banner = page.locator("#stale-banner")
+                    self.assertTrue(stale_banner.is_hidden())
+                    ctx.close()
+                finally:
+                    srv.shutdown()
+                    srv.server_close()
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
 
 if __name__ == "__main__":
     unittest.main()

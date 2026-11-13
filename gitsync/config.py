@@ -60,10 +60,7 @@ DEFAULT_CONFIG = {
             "type": "local", "enabled": False, "path": "",
         },
     },
-    "routes": [
-        {"name": "main", "source": "github",
-         "targets": ["gitlab", "local"]},
-    ],
+    "routes": [],
     "settings": {
         "workers": 4,
         # a new setup must not delete anything on a destination until the
@@ -135,6 +132,44 @@ def finest_schedule(cfg):
         if best_h is None or h < best_h:
             best, best_h = key, h
     return best
+
+
+def is_platform_ready(pcfg):
+    """is a platform configured well enough to participate in a route?"""
+    if not pcfg or not pcfg.get("enabled", True):
+        return False
+    ptype = pcfg.get("type")
+    if ptype == "local":
+        return bool(pcfg.get("path"))
+    return bool(pcfg.get("token") or pcfg.get("auth") == "gh")
+
+
+def is_route_runnable(route, platforms):
+    """is a route enabled and connecting live, configured platforms?"""
+    if not route or not route.get("enabled", True):
+        return False
+    src_name = route.get("source")
+    if not src_name or src_name not in platforms:
+        return False
+    if not is_platform_ready(platforms[src_name]):
+        return False
+    targets = [t for t in route.get("targets", []) if t != src_name]
+    paused = set(route.get("paused_targets") or [])
+    active_targets = [t for t in targets if t not in paused]
+    if not active_targets:
+        return False
+    return any(t in platforms and is_platform_ready(platforms[t]) for t in active_targets)
+
+
+def has_runnable_routes(cfg):
+    """True if cfg has at least one route ready to actually sync."""
+    if not cfg:
+        return False
+    r_list = cfg.get("routes") or []
+    if not r_list:
+        return False
+    platforms = cfg.get("platforms") or {}
+    return any(is_route_runnable(r, platforms) for r in r_list)
 
 def ensure_dirs():
     for d in (CONFIG_DIR, DATA_DIR, MIRROR_DIR):
