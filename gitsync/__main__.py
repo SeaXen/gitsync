@@ -1502,11 +1502,22 @@ def cmd_verify(args):
     print()
     print("%d check(s): %s" % (len(rows), ", ".join(
         "%d %s" % (n, k) for k, n in sorted(summary.items()))))
-    if drift:
-        print("\n%d target(s) are not in sync with the hub."
-              % len([r for r in drift if r["state"] in
-                     ("drift", "no-mirror", "unreachable")]))
+    problems = [r for r in rows
+                if r["state"] in ("drift", "no-mirror", "unreachable")]
+    unlisted = [r for r in rows if r["state"] == "list-failed"]
+    if problems:
+        print("\n%d target(s) are not in sync with the hub." % len(problems))
         return 1
+    if unlisted:
+        print("\n%d route(s) could not be listed at all — see above."
+              % len(unlisted))
+        return 1
+    if not any(r["state"] == "in-sync" for r in rows):
+        # paused routes and disabled sources are not a pass: there was
+        # nothing to compare, and saying "every target matches" would lie.
+        print("\nnothing was compared — every route is paused, has a "
+              "disabled source, or has no repos.")
+        return 0
     print("every target matches the hub.")
     return 0
 
