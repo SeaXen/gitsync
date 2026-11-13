@@ -11,6 +11,7 @@ Auth: tokens are embedded in URLs used by the tool (config file is 0600),
 so no ambient git credential helper is required.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -48,7 +49,31 @@ def ssh_url(host, owner, name, port=None):
 
 
 def _fs_safe(name):
-    return re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    """a filesystem-safe folder name. Unicode letters survive.
+
+    The old pattern was [^A-Za-z0-9._-], so every non-ASCII character became
+    "_": "ünï" and "öñï" both became "_n_" and shared one folder (and one
+    target repo). \\w is Unicode-aware, so those names round-trip.
+    """
+    return re.sub(r"[^\w.\-]", "_", str(name), flags=re.UNICODE)
+
+
+def _fs_unique(name):
+    """a folder name that is unique per *original* name.
+
+    Sanitising is lossy — "a b" and "a_b" both map to "a_b" — so two repos
+    shared one hub mirror and one target folder, and the second push failed
+    with "destination path already exists" (or, with parallel workers,
+    overwrote the first). A name that needs no change (every normal ASCII
+    name) keeps its current path, so existing mirrors and targets are never
+    migrated; only the lossy ones gain a short hash of the original.
+    """
+    name = str(name)
+    safe = _fs_safe(name)
+    if safe == name:
+        return safe
+    digest = hashlib.sha1(name.encode("utf-8")).hexdigest()[:6]
+    return "%s-%s" % (safe, digest)
 
 
 GIT_TIMEOUT = 14400        # long operations (clone/push) pass this explicitly
@@ -100,7 +125,10 @@ def _http(method, url, token=None, payload=None, timeout=TIMEOUT,
                 return (r.status, parsed, hdrs) if want_headers \
                     else (r.status, parsed)
         except urllib.error.HTTPError as e:
-            body = e.read().decode()
+            try:
+                body = e.read().decode()
+            finally:
+                e.close()          # HTTPError is a file object: close the socket
             try:
                 body = json.loads(body)
             except ValueError:
@@ -947,18 +975,22 @@ class LocalPlatform:
             return repos
         for entry in sorted(os.listdir(self.path)):
             full = os.path.join(self.path, entry)
-            if entry.endswith(".git") and os.path.isdir(full):
-                rc, out, _ = run(["git", "for-each-ref", "--format=%(refname)"],
-                                 cwd=full, timeout=30)
-                if rc == 0 and out.strip():
-                    repos.append({"name": entry[:-4], "id": entry[:-4],
-                                  "private": True, "fork": False,
-                                  "clone_url": full})
+            if not (entry.endswith(".git") and os.path.isdir(full)):
+                continue
+            # a bare repository is a repo even with no refs yet: an empty
+            # source repo used to be invisible ("src: 2 repos" for 3
+            # folders) while mirror_is_valid() already treated it as valid
+            rc, out, _ = run(["git", "rev-parse", "--is-bare-repository"],
+                             cwd=full, timeout=30)
+            if rc == 0 and out.strip() == "true":
+                repos.append({"name": entry[:-4], "id": entry[:-4],
+                              "private": True, "fork": False,
+                              "clone_url": full})
         return repos
 
     def repo_url(self, repo):
         """expected URL without creating anything (read-only probing)"""
-        return os.path.join(self.path, _fs_safe(repo["name"]) + ".git")
+        return os.path.join(self.path, _fs_unique(repo["name"]) + ".git")
 
     def prepare_push(self, repo, push_url):
         """a bare folder has no branch protection"""
@@ -967,7 +999,7 @@ class LocalPlatform:
     def delete_repo(self, repo):
         """remove the bare folder for a repo. Opt-in only (see
         sync.prune_repos) — this is the most destructive of the four."""
-        path = os.path.join(self.path, _fs_safe(repo["name"]) + ".git")
+        path = os.path.join(self.path, _fs_unique(repo["name"]) + ".git")
         if not os.path.isdir(path):
             return True, ""                     # already gone
         try:
@@ -984,7 +1016,8 @@ class LocalPlatform:
         if not self.path:
             raise RuntimeError("local platform has no path configured")
         os.makedirs(self.path, exist_ok=True)
-        dest = os.path.join(self.path, _fs_safe(repo["name"]) + ".git")
+        # _fs_unique, not _fs_safe: "a b" and "a_b" must not land in one repo
+        dest = os.path.join(self.path, _fs_unique(repo["name"]) + ".git")
         if not os.path.isdir(dest):
             rc, _, err = run(["git", "init", "--bare", dest])
             if rc != 0:

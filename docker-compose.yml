@@ -19,6 +19,27 @@ services:
       # (comma-separated). The DNS-rebinding guard stays on for everything else.
       # GITSYNC_ALLOWED_HOSTS: "git.example.com"
 
+  # Opt-in background sync. The web UI alone never syncs, so a plain
+  # `docker compose up` looks healthy and does nothing; enable this with:
+  #     docker compose --profile sync up -d
+  # It shares the same two volumes, so both containers see one config and
+  # one mirror hub (never run two — the run lock makes the second wait).
+  scheduler:
+    profiles: ["sync"]
+    build: .
+    image: gitsync:latest
+    container_name: gitsync-scheduler
+    restart: unless-stopped
+    depends_on:
+      - gitsync
+    volumes:
+      - gitsync-config:/data/config
+      - gitsync-share:/data/share
+    environment:
+      GITSYNC_CONFIG_DIR: /data/config
+      GITSYNC_DATA_DIR: /data/share
+    command: ["watch", "--interval", "3600"]
+
 volumes:
   gitsync-config:
   gitsync-share:

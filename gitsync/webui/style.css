@@ -1,7 +1,13 @@
-/* gitsync web UI — polished dark theme.
+/* gitsync web UI — dark by default, light on request.
    Keeps the design reference's variable + class names (so page renderers
    keep working) and elevates everything: a real app shell (icon sidebar +
-   sticky top bar), refined cards/tables/forms, skeleton loaders, toasts. */
+   sticky top bar), refined cards/tables/forms, skeleton loaders, toasts.
+
+   Theming: every colour is a custom property on :root. The default block is
+   the dark palette; a light palette replaces the same names. `data-theme` on
+   <html> (set by theme.js before first paint) is "light"/"dark", or absent
+   for "auto", in which case prefers-color-scheme decides. Pages no longer
+   hardcode `color-scheme: dark`, so form controls and scrollbars follow. */
 :root{
   color-scheme:dark;
   --bg:#0d1117; --side:#010409; --panel:#161b22; --panel2:#1b2230; --hover:#1f2632;
@@ -9,6 +15,8 @@
   --text:#e6edf3; --muted:#8b949e; --nav:#c9d1d9;
   --accent:#6ea8fe; --accent-strong:#388bfd; --accent-ink:#040c18;
   --ok:#3fb950; --bad:#f85149; --warn:#d29922;
+  --top-bg:rgba(13,17,23,.82);
+  --overlay:rgba(1,4,9,.75);
   --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
   --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px rgba(0,0,0,.25);
@@ -17,6 +25,32 @@
   --radius:12px;
   --radius-modal:14px;
   --radius-pill:99px;
+}
+/* auto (no data-theme) + a light OS */
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    color-scheme:light;
+    --bg:#f6f8fa; --side:#eaeef2; --panel:#ffffff; --panel2:#f6f8fa; --hover:#eef1f4;
+    --line:#d8dee4; --line2:#c4ccd4;
+    --text:#1f2328; --muted:#656d76; --nav:#32383f;
+    --accent:#0969da; --accent-strong:#0550ae; --accent-ink:#ffffff;
+    --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700;
+    --top-bg:rgba(246,248,250,.86);
+    --overlay:rgba(31,35,40,.45);
+    --shadow:0 1px 2px rgba(31,35,40,.07),0 8px 24px rgba(31,35,40,.08);
+  }
+}
+/* explicit choice wins over the OS */
+:root[data-theme="light"]{
+  color-scheme:light;
+  --bg:#f6f8fa; --side:#eaeef2; --panel:#ffffff; --panel2:#f6f8fa; --hover:#eef1f4;
+  --line:#d8dee4; --line2:#c4ccd4;
+  --text:#1f2328; --muted:#656d76; --nav:#32383f;
+  --accent:#0969da; --accent-strong:#0550ae; --accent-ink:#ffffff;
+  --ok:#1a7f37; --bad:#cf222e; --warn:#9a6700;
+  --top-bg:rgba(246,248,250,.86);
+  --overlay:rgba(31,35,40,.45);
+  --shadow:0 1px 2px rgba(31,35,40,.07),0 8px 24px rgba(31,35,40,.08);
 }
 *{box-sizing:border-box}
 ::selection{background:rgba(110,168,254,.25);color:var(--text)}
@@ -47,7 +81,7 @@ a:hover{text-decoration:underline}
 .side .foot .meta{font:500 11px var(--mono);color:var(--muted);padding:4px 10px 8px}
 
 /* top bar */
-.top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;padding:10px 22px;background:rgba(13,17,23,.82);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+.top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;padding:10px 22px;background:var(--top-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
 .top .brand{font:600 15px var(--mono);display:flex;align-items:center;gap:8px;color:var(--text)}
 .top .brand svg{width:20px;height:20px;color:var(--accent)}
 .top .spacer{flex:1}
@@ -56,6 +90,8 @@ a:hover{text-decoration:underline}
 .status.live .pip{background:var(--accent);box-shadow:0 0 0 0 rgba(110,168,254,.6);animation:pulse 1.4s infinite}
 .status.live{color:var(--text)}
 .status.ok .pip{background:var(--ok)}
+.status.warn .pip{background:var(--warn)}
+.status.warn{color:var(--warn);border-color:rgba(210,153,34,.45)}
 @keyframes pulse{70%{box-shadow:0 0 0 7px rgba(110,168,254,0)}100%{box-shadow:0 0 0 0 rgba(110,168,254,0)}}
 .topbar-progress{position:absolute;left:0;bottom:-1px;height:2px;width:0;background:linear-gradient(90deg,var(--accent),var(--accent-strong));transition:width .25s ease;z-index:31}
 
@@ -245,7 +281,7 @@ input[type="checkbox"]{accent-color:var(--accent);width:16px;height:16px;cursor:
 #main:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 /* modal */
-.modal-backdrop{position:fixed;inset:0;background:rgba(1,4,9,.75);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:18px;z-index:150;animation:fadein .15s ease}
+.modal-backdrop{position:fixed;inset:0;background:var(--overlay);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:18px;z-index:150;animation:fadein .15s ease}
 .modal{background:var(--panel);border:1px solid var(--line2);border-radius:var(--radius-modal);box-shadow:var(--shadow),0 20px 48px rgba(0,0,0,.5);width:100%;max-width:440px;max-height:calc(100vh - 36px);display:flex;flex-direction:column;overflow:hidden;animation:popin .18s cubic-bezier(.16,1,.3,1)}
 .modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:16px 20px;border-bottom:1px solid var(--line);flex:none}
 .modal-title{font-size:15.5px;font-weight:650;margin:0;color:var(--text);text-wrap:balance}
@@ -256,10 +292,38 @@ input[type="checkbox"]{accent-color:var(--accent);width:16px;height:16px;cursor:
 
 /* respect reduced-motion: stop the infinite pip/shimmer animations */
 @media (prefers-reduced-motion: reduce){
-  .status.live .pip{animation:none}
+  .status.live .pip{animation:none;box-shadow:none}
   .skel{animation:none}
   .toast{animation:none}
   .spinner{animation:none}
   .modal-backdrop,.modal{animation:none;transition:none}
-  .btn,.progress>span{transition:none}
+  .btn,.progress>span,.topbar-progress,tr,input,select,textarea{
+    transition:none}
+  *{scroll-behavior:auto}
 }
+
+/* full-width notice strip: an actionable warning above the page content.
+   The stale-sync banner uses it, but it is intentionally generic. */
+.banner{display:flex;align-items:flex-start;gap:11px;padding:12px 15px;margin:0 0 16px;border-radius:var(--radius-md);border:1px solid var(--line2);background:var(--panel2);color:var(--text);font-size:13.5px;line-height:1.5}
+.banner.warn{border-color:rgba(154,103,0,.45);background:rgba(210,153,34,.10)}
+:root[data-theme="light"] .banner.warn{background:rgba(154,103,0,.08)}
+.banner.bad{border-color:rgba(207,34,46,.45);background:rgba(248,81,73,.10)}
+.banner.ok{border-color:rgba(26,127,55,.45);background:rgba(63,185,80,.10)}
+.banner .banner-icon{flex:none;font-weight:700;line-height:1.4}
+.banner.warn .banner-icon{color:var(--warn)}
+.banner.bad .banner-icon{color:var(--bad)}
+.banner.ok .banner-icon{color:var(--ok)}
+.banner .banner-body{flex:1;min-width:0}
+.banner .banner-body strong{font-weight:650}
+.banner .banner-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.banner .banner-actions .btn{min-height:34px;padding:0 12px;font-size:12.5px}
+@media (max-width:640px){.banner{flex-wrap:wrap}}
+
+/* keyboard shortcut sheet (?) */
+kbd{display:inline-block;min-width:22px;padding:1px 6px;border:1px solid var(--line2);
+  border-bottom-width:2px;border-radius:5px;background:var(--panel2);
+  font:600 11.5px var(--mono,monospace);color:var(--text);text-align:center}
+.shortcuts{display:grid;gap:9px}
+.shortcuts>div{display:flex;align-items:baseline;gap:14px}
+.shortcuts>div>span:first-child{flex:none;min-width:70px}
+.shortcuts>div>span:last-child{color:var(--muted);font-size:12.5px}

@@ -73,10 +73,32 @@ def get_secret():
 
 
 def set_secret(value):
+    """write the shared secret atomically, 0600 from the moment it exists.
+
+    ``open(path, "w")`` then ``chmod`` leaves a window where the file has the
+    umask mode — world-readable on a default 022 umask. The mode is set at
+    creation (O_CREAT with 0600) and the name appears by os.replace, so no
+    reader ever sees a partial file either.
+    """
     os.makedirs(C.CONFIG_DIR, exist_ok=True)
-    with open(_secret_path(), "w") as f:
-        f.write(value.strip())
-    os.chmod(_secret_path(), 0o600)
+    path = _secret_path()
+    tmp = path + ".tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    fd = os.open(tmp, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(value.strip())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def rotate_secret():

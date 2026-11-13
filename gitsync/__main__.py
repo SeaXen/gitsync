@@ -13,8 +13,11 @@
 
 import argparse
 import glob
+import hashlib
+import hmac
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -1383,6 +1386,131 @@ def cmd_tokens(args):
     return 1 if bad else 0
 
 
+def _secret_key_names():
+    return C._PLATFORM_SECRETS
+
+
+def cmd_config(args):
+    """export / import the configuration (credentials stripped on export)."""
+    action = getattr(args, "action", None) or "export"
+    if action == "export":
+        out = getattr(args, "out", "") or ""
+        try:
+            text, removed = C.export_config(out or None)
+        except OSError as e:
+            print("cannot write the export: %s" % e)
+            return 1
+        if out:
+            print("wrote %s (mode 0600)" % out)
+            print("every credential was blanked (%d field(s)); "
+                  "re-enter tokens after importing" % len(removed))
+        else:
+            sys.stdout.write(text)
+            if removed:
+                sys.stderr.write(
+                    "\n# %d credential field(s) left empty in this export\n"
+                    % len(removed))
+        return 0
+
+    path = getattr(args, "file", "")
+    if not path:
+        print("usage: gitsync config import FILE")
+        return 2
+    try:
+        incoming = json.load(open(path, encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        print("cannot read %s: %s" % (path, e))
+        return 1
+    n_plat = len(incoming.get("platforms") or {})
+    n_route = len(incoming.get("routes") or [])
+    print("import will set %d platform(s) and %d route(s)." % (n_plat, n_route))
+    print("existing credentials are kept; your current config is backed up "
+          "next to it.")
+    if not getattr(args, "yes", False):
+        try:
+            if not sys.stdin.isatty():
+                print("not a terminal: pass --yes to import unattended")
+                return 1
+            if input("Import it? [y/N] ").strip().lower() not in ("y", "yes"):
+                print("nothing changed.")
+                return 1
+        except (EOFError, KeyboardInterrupt):
+            print("nothing changed.")
+            return 1
+    try:
+        report = C.import_config(path, replace=getattr(args, "replace", False))
+    except C.ConfigImportError as e:
+        print("refusing to import: %s" % e)
+        return 1
+    print("imported %d platform(s), %d route(s)"
+          % (report["platforms"], report["routes"]))
+    if report["kept_secrets"]:
+        print("kept %d existing credential(s) on this machine."
+              % len(report["kept_secrets"]))
+    if report["needs_token"]:
+        print("needs a token before it can sync: %s"
+              % ", ".join(report["needs_token"]))
+        print("  gitsync platforms edit NAME --token ...")
+    print("check it with: gitsync doctor")
+    return 0
+
+
+def cmd_verify(args):
+    """compare the hub against every target: branch by branch, tag by tag.
+
+    `gitsync sync` reports what it *attempted*; this reports what is
+    actually there now, and creates/pushes nothing while doing it.
+    """
+    cfg = C.load_config()
+    try:
+        rows = SYNC.verify(cfg, route_name=getattr(args, "route", None))
+    except Exception as e:
+        print("verify failed: %s" % SYNC._redact(str(e)))
+        return 2
+    summary = SYNC.verify_summary(rows)
+    drift = [r for r in rows if r["state"] not in ("in-sync",)]
+    if getattr(args, "json", False):
+        print(json.dumps({"ok": not drift, "summary": summary,
+                          "checks": rows}, indent=2))
+        return 0 if not drift else 1
+    if not rows:
+        print("nothing to verify (no enabled routes)")
+        return 0
+    for r in drift:
+        where = "%s: %s" % (r.get("route"), r.get("repo"))
+        if r.get("target") not in (None, "-"):
+            where += " -> %s" % r["target"]
+        if r["state"] == "in-sync":
+            continue
+        if r["state"] == "drift":
+            bits = []
+            if r.get("missing"):
+                bits.append("%d ref(s) missing" % len(r["missing"]))
+            if r.get("differ"):
+                bits.append("%d ref(s) at a different commit" % len(r["differ"]))
+            print("  DRIFT      %s: %s" % (where, ", ".join(bits)))
+            for ref in (r.get("missing") or [])[:5]:
+                print("               missing %s" % ref)
+            for ref in (r.get("differ") or [])[:5]:
+                print("               differs %s" % ref)
+        elif r["state"] == "unreachable":
+            print("  UNREACHABLE %s: %s" % (where, r.get("detail", "")))
+        elif r["state"] == "no-mirror":
+            print("  NO MIRROR  %s (run: gitsync sync)" % where)
+        else:
+            print("  %-11s %s" % (r["state"].upper(), where))
+    print()
+    print("%d check(s): %s" % (len(rows), ", ".join(
+        "%d %s" % (n, k) for k, n in sorted(summary.items()))))
+    if drift:
+        print("\n%d target(s) are not in sync with the hub."
+              % len([r for r in drift if r["state"] in
+                     ("drift", "no-mirror", "unreachable")]))
+        return 1
+    print("every target matches the hub.")
+    return 0
+
+
 def cmd_doctor(args):
     """health check: config, platforms, disk, scheduler, hub"""
     cfg = C.load_config()
@@ -1567,37 +1695,155 @@ def _doctor_fix():
     return fixed
 
 
+UPDATE_REPO = "SeaXen/gitsync"
+_RAW = "https://raw.githubusercontent.com/%s" % UPDATE_REPO
+
+
+def _fetch_bytes(url, timeout=60):
+    """one GET, returned as bytes (patched in tests; no network there)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "gitsync-update"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read()
+
+
+def _parse_sums(text):
+    """SHA256SUMS (``hash  name`` per line) -> {name: hash}."""
+    out = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            out[parts[1].lstrip("*").strip()] = parts[0].strip().lower()
+    return out
+
+
+def _verify_asset(blob, name, sums_text):
+    """raise ValueError unless blob's SHA-256 matches the published one."""
+    want = _parse_sums(sums_text).get(name)
+    if not want:
+        raise ValueError("SHA256SUMS has no entry for %r" % name)
+    got = hashlib.sha256(blob).hexdigest()
+    if not hmac.compare_digest(got, want):
+        raise ValueError("checksum mismatch for %s: expected %s, got %s"
+                         % (name, want, got))
+    return got
+
+
+def _latest_release_tag(timeout=30):
+    """the newest published tag, from the releases API (no 'main' guessing)."""
+    url = "https://api.github.com/repos/%s/releases/latest" % UPDATE_REPO
+    data = json.loads(_fetch_bytes(url, timeout=timeout).decode("utf-8"))
+    tag = (data.get("tag_name") or "").strip()
+    if not re.match(r"^v?\d+\.\d+\.\d+$", tag):
+        raise ValueError("unexpected release metadata: %r" % (tag or None))
+    return tag if tag.startswith("v") else "v" + tag
+
+
+def _run(cmd, **kw):
+    """subprocess.run, patched in tests."""
+    return subprocess.run(cmd, **kw)
+
+
+def _confirm(question, assume_yes):
+    if assume_yes:
+        return True
+    try:
+        if not sys.stdin.isatty():
+            print("(not a terminal: pass --yes to update unattended)")
+            return False
+    except Exception:
+        return False
+    try:
+        ans = input("%s [y/N] " % question).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return ans in ("y", "yes")
+
+
+def _git_checkout_update(root, assume_yes):
+    """a source checkout updates with git, not by re-running an installer."""
+    print("this is a git checkout: %s" % root)
+    print("  git pull --ff-only   then   bash install.sh")
+    if not _confirm("Update this checkout now?", assume_yes):
+        print("nothing changed.")
+        return 1
+    r = _run(["git", "-C", root, "pull", "--ff-only"])
+    if r.returncode != 0:
+        print("git pull failed (local changes?) — fix it, or run: "
+              "git pull && bash install.sh")
+        return r.returncode
+    r = _run(["bash", os.path.join(root, "install.sh")])
+    print("updated" if r.returncode == 0 else "install failed (rc=%d)"
+          % r.returncode)
+    return r.returncode
+
+
 def cmd_update(args):
-    """re-run the one-click installer, keeping the existing configuration"""
+    """update from a *pinned, checksum-verified release* — never from main.
+
+    The old path wrote whatever ``main`` served at that instant to the fixed
+    path /tmp/gitsync-quickinstall.sh and ran it, as root when installed
+    system-wide. Two problems: a predictable /tmp name is a symlink/race
+    target, and there was no version pin and no integrity check, so the
+    script that runs as root could change under the user at any time.
+
+    Now: the tag is resolved explicitly (latest release, or --version), the
+    installer for *that tag* is fetched, its SHA-256 is checked against the
+    tag's SHA256SUMS, it lands in a private mkstemp file (0600, then 0700)
+    that is removed in a finally, and the user is told what will run.
+    """
+    import tempfile
     cfg = C.load_config()
     sched = C.setting(cfg, "schedule", "hourly")
-    home = os.environ.get("GITSYNC_HOME", "")
-    candidates = [os.path.join(home, "quickinstall.sh") if home else None,
-                  "/opt/gitsync/quickinstall.sh",
-                  os.path.expanduser("~/.local/share/gitsync/quickinstall.sh")]
-    script = next((c for c in candidates if c and os.path.exists(c)), None)
-    if script is None:
-        # not installed from a bundle - fetch the bootstrap directly
-        import urllib.request
-        url = ("https://raw.githubusercontent.com/SeaXen/gitsync/main/"
-               "quickinstall.sh")
-        try:
-            with urllib.request.urlopen(url, timeout=60) as r:
-                script = "/tmp/gitsync-quickinstall.sh"
-                with open(script, "w") as f:
-                    f.write(r.read().decode())
-        except Exception as e:
-            print("could not fetch the installer: %s" % e)
-            print("update manually: git pull && bash install.sh")
+    want = (getattr(args, "version", None) or "").strip()
+    assume_yes = bool(getattr(args, "yes", False))
+
+    root = repo_root_of(__file__)
+    if not want and os.path.isdir(os.path.join(root, ".git")):
+        return _git_checkout_update(root, assume_yes)
+
+    try:
+        tag = ("v" + want.lstrip("v")) if want else _latest_release_tag()
+        print("target release: %s (currently %s)" % (tag, __version__))
+        script_blob = _fetch_bytes(
+            "%s/%s/quickinstall.sh" % (_RAW, tag))
+        sums_text = _fetch_bytes("%s/%s/SHA256SUMS" % (_RAW, tag)).decode(
+            "utf-8", "replace")
+        digest = _verify_asset(script_blob, "quickinstall.sh", sums_text)
+    except Exception as e:
+        print("cannot verify the %s installer: %s"
+              % (want or "latest", e))
+        print("Nothing was executed. Update by hand instead:")
+        print("  git pull && bash install.sh          (source checkout)")
+        print("  curl -fsSL https://github.com/%s/releases/latest -o /dev/null"
+              % UPDATE_REPO)
+        return 1
+
+    fd, script = tempfile.mkstemp(prefix="gitsync-qi-", suffix=".sh")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(script_blob)
+        os.chmod(script, 0o700)
+        user_mode = os.path.exists(os.path.join(
+            os.path.expanduser("~"), ".local", "share", "gitsync")) and \
+            not os.access("/opt/gitsync/gitsync", os.W_OK)
+        cmd = ["bash", script, "--no-setup", "--no-sync",
+               "--schedule", sched, "--tag", tag]
+        if user_mode:
+            cmd.append("--user")
+        print("installer: %s (sha256 %s…)" % (script, digest[:12]))
+        print("it will install gitsync %s, keeping your configuration "
+              "and schedule (%s)." % (tag, sched))
+        if not _confirm("Run it?", assume_yes):
+            print("nothing changed.")
             return 1
-    user_mode = 1 if script.startswith(os.path.expanduser("~")) else 0
-    cmd = ["bash", script, "--no-setup", "--no-sync",
-           "--schedule", sched]
-    if user_mode:
-        cmd.append("--user")
-    print("updating gitsync (schedule: %s, config kept)..." % sched)
-    rc = subprocess.run(cmd).returncode
-    print("updated" if rc == 0 else "update failed (rc=%d)" % rc)
+        rc = _run(cmd).returncode
+    finally:
+        try:
+            os.remove(script)
+        except OSError:
+            pass
+    print("updated to %s" % tag if rc == 0 else "update failed (rc=%d)" % rc)
     return rc
 
 
@@ -1638,10 +1884,73 @@ def _install_hook(repo_root):
     return None
 
 
+SUMS_FILE = "SHA256SUMS"
+_SUM_EXTRA = ("install.sh", "quickinstall.sh", "Dockerfile",
+              "docker-compose.yml", "bin/gitsync")
+
+
+def shipped_files(root):
+    """the files a release tarball actually installs — what SHA256SUMS covers."""
+    out = [n for n in _SUM_EXTRA if os.path.isfile(os.path.join(root, n))]
+    base = os.path.join(root, "gitsync")
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        for fn in sorted(filenames):
+            if fn.endswith((".py", ".js", ".css", ".html")):
+                out.append(os.path.relpath(os.path.join(dirpath, fn), root))
+    return sorted(out)
+
+
+def compute_sums(root):
+    """SHA256SUMS text (``hash  relative/path``) for the shipped tree."""
+    lines = []
+    for rel in shipped_files(root):
+        with open(os.path.join(root, rel), "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        lines.append("%s  %s" % (digest, rel))
+    return "\n".join(lines) + "\n"
+
+
+def write_sums(root):
+    path = os.path.join(root, SUMS_FILE)
+    text = compute_sums(root)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    os.replace(tmp, path)
+    return path
+
+
+def check_sums(root):
+    """raise unless the committed SHA256SUMS matches the working tree.
+
+    This is what makes `gitsync update` able to verify a download: a tag
+    that ships a stale or missing SHA256SUMS cannot be installed by the
+    updater at all, so the check has to fail before the tag is pushed.
+    """
+    path = os.path.join(root, SUMS_FILE)
+    if not os.path.isfile(path):
+        if not os.path.isdir(os.path.join(root, ".git")):
+            return          # an installed copy has nothing to verify
+        raise RuntimeError("%s is missing — run: gitsync ci --update-sums"
+                           % SUMS_FILE)
+    with open(path, "r", encoding="utf-8") as f:
+        have = f.read()
+    want = compute_sums(root)
+    if have != want:
+        raise RuntimeError("%s is stale — run: gitsync ci --update-sums"
+                           % SUMS_FILE)
+
+
 def cmd_ci(args):
     """run the full check suite locally (same checks as the CI workflows)"""
     import py_compile
     import tempfile
+    root_for_sums = repo_root_of(__file__)
+    if getattr(args, "update_sums", False):
+        path = write_sums(root_for_sums)
+        print("wrote %s (%d files)" % (path, len(shipped_files(root_for_sums))))
+        return 0
     if getattr(args, "install_hook", False):
         err = _install_hook(repo_root_of(__file__))
         if err:
@@ -1680,7 +1989,8 @@ def cmd_ci(args):
         env = dict(os.environ, PYTHONPATH=app_dir)
         for argv in (["--version"], ["--help"], ["scopes"],
                      ["platforms", "--help"], ["routes", "--help"],
-                     ["stars", "--help"], ["doctor", "--help"]):
+                     ["stars", "--help"], ["doctor", "--help"],
+                     ["verify", "--help"], ["config", "export"]):
             p = subprocess.run(["python3", "-m", "gitsync"] + argv,
                                capture_output=True, text=True, env=env,
                                timeout=60)
@@ -1809,16 +2119,29 @@ def cmd_ci(args):
 
     def c_unit():
         import unittest
+        import warnings
         loader = unittest.TestLoader()
         suite = loader.loadTestsFromName("tests.test_logic")
-        runner = unittest.TextTestRunner(stream=open(os.devnull, "w"), verbosity=0)
-        res = runner.run(suite)
+        stream = open(os.devnull, "w")
+        try:
+            # a leaked socket or file must fail the run, not scroll past as
+            # a warning nobody reads (P3-3)
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ResourceWarning)
+                runner = unittest.TextTestRunner(stream=stream, verbosity=0)
+                res = runner.run(suite)
+        finally:
+            stream.close()
         if not res.wasSuccessful():
             raise RuntimeError("%d failed, %d errors across %d tests"
                                % (len(res.failures), len(res.errors), res.testsRun))
 
+    def c_sums():
+        check_sums(root_for_sums)
+
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
+    check("release checksums (SHA256SUMS)", c_sums)
     check("CLI smoke tests", c_cli)
     check("unit checks (tests.test_logic)", c_unit)
 
@@ -1957,23 +2280,55 @@ def cmd_fix(args):
 
 
 def cmd_watch(args):
-    """foreground poller: sync every N seconds (faster than the hourly timer)"""
-    cfg = C.load_config()
+    """foreground poller: sync every N seconds (faster than the hourly timer).
+
+    The config was read once, before the loop, so a route or platform edited
+    in the web UI or the TUI was never picked up until the watcher was
+    restarted; and one exception from run_sync ended the process silently —
+    in Docker that means the container exits and nothing syncs again. Both
+    are fixed here: reload per iteration, log-and-continue on errors, honour
+    the global pause, and show a clear line when a run is skipped.
+    """
     interval = args.interval
     if interval < 30:
         # 0 busy-loops the run lock and a small number is almost always a
         # typo; 30s is the floor that still feels live
         print("interval %ss is too short - using 30s" % interval)
         interval = 30
+    once = bool(getattr(args, "once", False))
     print("gitsync watch: syncing every %ds — Ctrl+C to stop" % interval)
     runs = 0
+    failures = 0
     try:
         while True:
+            try:
+                cfg = C.load_config()          # pick up edits without a restart
+            except Exception as e:
+                print("[%s] cannot read the config (%s) — retrying in %ds"
+                      % (datetime.now().strftime("%H:%M:%S"), e, interval))
+                if once:
+                    return 1
+                time.sleep(interval)
+                continue
             runs += 1
-            t = SYNC.run_sync(cfg)
-            print("[%s] run #%d: %d ok, %d failed — next in %ds"
-                  % (datetime.now().strftime("%H:%M:%S"), runs, t["ok"],
-                     t["failed"], interval))
+            try:
+                if C.setting(cfg, "paused", False):
+                    print("[%s] paused — skipping this run"
+                          % datetime.now().strftime("%H:%M:%S"))
+                else:
+                    t = SYNC.run_sync(cfg)
+                    print("[%s] run #%d: %d ok, %d failed — next in %ds"
+                          % (datetime.now().strftime("%H:%M:%S"), runs,
+                             t.get("ok", 0), t.get("failed", 0), interval))
+            except Exception as e:
+                failures += 1
+                print("[%s] run #%d failed: %s"
+                      % (datetime.now().strftime("%H:%M:%S"), runs,
+                         SYNC._redact(str(e))[:200]))
+                if once:
+                    return 1
+            if once or getattr(args, "max_runs", 0) and runs >= args.max_runs:
+                return 0 if not failures else 1
             time.sleep(interval)
     except KeyboardInterrupt:
         print("\nstopped after %d runs" % runs)
@@ -2253,17 +2608,44 @@ def main(argv=None):
     sp = sub.add_parser("tokens", help="check credentials for expiry")
     sp.set_defaults(func=cmd_tokens)
 
+    sp = sub.add_parser("config",
+                        help="export / import the configuration")
+    csp = sp.add_subparsers(dest="action")
+    ex = csp.add_parser("export", help="print the config with secrets blanked")
+    ex.add_argument("--out", default="", help="write to this file (0600)")
+    ex.set_defaults(func=cmd_config)
+    im = csp.add_parser("import", help="import a config, keeping local secrets")
+    im.add_argument("file", help="config.json to import")
+    im.add_argument("--yes", "-y", action="store_true",
+                    help="do not ask for confirmation")
+    im.add_argument("--replace", action="store_true",
+                    help="do not carry over existing tokens")
+    im.set_defaults(func=cmd_config)
+    sp.set_defaults(func=cmd_config)
+
+    sp = sub.add_parser("verify",
+                        help="check that every target matches the hub")
+    sp.add_argument("--route", default=None, help="only this route")
+    sp.add_argument("--json", action="store_true", help="machine-readable")
+    sp.set_defaults(func=cmd_verify)
+
     sp = sub.add_parser("doctor", help="health check: everything")
     sp.add_argument("--fix", action="store_true",
                     help="auto-repair: remove broken mirror shells")
     sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("update", help="update gitsync (keeps your config)")
+    sp.add_argument("--version", metavar="X.Y.Z", default="",
+                    help="install this release instead of the latest one")
+    sp.add_argument("--yes", "-y", action="store_true",
+                    help="do not ask for confirmation")
     sp.set_defaults(func=cmd_update)
 
     sp = sub.add_parser("ci", help="run all checks locally (no provider needed)")
     sp.add_argument("--install-hook", action="store_true",
                     help="install a pre-push hook in this repo")
+    sp.add_argument("--update-sums", action="store_true",
+                    help="rewrite SHA256SUMS after a release-worthy change")
     sp.set_defaults(func=cmd_ci)
 
     sp = sub.add_parser("notify", help="Discord / Telegram notification settings")
@@ -2284,6 +2666,10 @@ def main(argv=None):
 
     sp = sub.add_parser("watch", help="sync every N seconds in the foreground")
     sp.add_argument("--interval", type=int, default=60)
+    sp.add_argument("--once", action="store_true",
+                    help="run one cycle and exit (container / cron friendly)")
+    sp.add_argument("--max-runs", type=int, default=0,
+                    help="stop after N cycles (0 = forever)")
     sp.set_defaults(func=cmd_watch)
 
     sp = sub.add_parser("uninstall", help="remove scheduler + symlink")

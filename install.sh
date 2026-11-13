@@ -6,6 +6,7 @@
 #   bash install.sh --user         # install to ~/.local/share/gitsync
 #   bash install.sh --schedule hourly|6h|12h|daily|off
 #   bash install.sh --cron         # use cron instead of a systemd timer
+#   bash install.sh --tag v2.1.4   # record which release this install is
 #
 # What it does:
 #   1. copies the app (default: /opt/gitsync, or ~/.local/share/gitsync)
@@ -20,6 +21,7 @@ SCHEDULE="hourly"
 USE_CRON=0
 USER_MODE=0
 SYSTEM_UNIT=0
+RELEASE_TAG=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -29,8 +31,10 @@ while [ $# -gt 0 ]; do
         --system) SYSTEM_UNIT=1; shift ;;
         --user) USER_MODE=1; shift ;;
         --yes|-y) shift ;;                    # accepted; nothing to confirm
-        -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
-        *) echo "unknown option: $1 (allowed: --schedule KEY --cron --system --user --yes)" >&2
+        --tag) RELEASE_TAG="${2:-}"; shift 2 ;;
+        --tag=*) RELEASE_TAG="${1#*=}"; shift ;;
+        -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+        *) echo "unknown option: $1 (allowed: --schedule KEY --cron --system --user --tag REF --yes)" >&2
            echo "schedules: hourly 6h 12h daily weekly off" >&2
            exit 1 ;;
     esac
@@ -69,6 +73,10 @@ $SUDO cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
          "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$SRC_DIR/quickinstall.sh" \
          "$INSTALL_DIR/"
 chmod +x "$INSTALL_DIR/bin/gitsync"
+# which release this tree came from (shown by `gitsync --version` diagnostics)
+if [ -n "$RELEASE_TAG" ]; then
+    printf '%s\n' "$RELEASE_TAG" > "$INSTALL_DIR/.release"
+fi
 [ -f "$INSTALL_DIR/gitsync/askpass.py" ] && chmod +x "$INSTALL_DIR/gitsync/askpass.py" || true
 
 # --- symlink ---

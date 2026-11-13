@@ -64,6 +64,7 @@ from . import diskutil as DK
 from . import scheduler as S
 from . import notify as NT
 from . import permissions as PERM
+from . import sessions as SS
 from . import webhooks as WH
 
 DEFAULT_PORT = 7765
@@ -105,6 +106,18 @@ start from the dashboard.</p>
 <a href="/">Back to the dashboard</a>
 </div></body></html>
 """
+# Every response carries this. script-src 'self' is the part that matters:
+# there is no inline <script> and no eval, so an injected string cannot
+# become code. style-src needs 'unsafe-inline' because the pages build their
+# markup with style="" attributes; CSS injection is a far smaller risk than
+# script injection, and removing every inline style would be a rewrite.
+CSP = ("default-src 'self'; script-src 'self'; "
+       "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+       "font-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+       "base-uri 'none'; form-action 'self'")
+PERMISSIONS_POLICY = ("geolocation=(), camera=(), microphone=(), "
+                      "payment=(), usb=()")
+
 MAX_BODY = 1 << 20                      # 1 MB request cap
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 _REPO_RE = re.compile(r"^[A-Za-z0-9._/*?-]{1,128}$")
@@ -399,6 +412,34 @@ def _safe(fn, default):
         return default
 
 
+def _trusted_proxies():
+    """settings.trusted_proxies as a CIDR list (cached briefly).
+
+    Empty by default: a header cannot be trusted unless the operator says
+    which peer is a proxy.
+    """
+    def read():
+        try:
+            st = (C.load_config().get("settings") or {})
+        except Exception:
+            return []
+        val = st.get("trusted_proxies") or []
+        if isinstance(val, str):
+            val = [x for x in val.replace(";", ",").split(",")]
+        out = []
+        for cidr in val:
+            cidr = str(cidr).strip()
+            if not cidr:
+                continue
+            try:
+                ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                continue          # a typo must not break every request
+            out.append(cidr)
+        return out
+    return _cached("proxies", 15, read, [])
+
+
 # ---------------------------------------------------------------- jobs
 
 class Job:
@@ -448,21 +489,29 @@ def _run_job(job):
                                     stderr=subprocess.STDOUT, text=True,
                                     env=env, cwd=_app_dir(),
                                     start_new_session=True)
-        for line in job.proc.stdout:
-            line = _redactor().redact(line.rstrip("\n"))
-            with job.cond:
-                job.lines.append(line)
-                if len(job.lines) > Job.MAX_LINES:
-                    del job.lines[:len(job.lines) - Job.MAX_LINES]
-                parsed = SYNC.parse_progress_line(line)
-                if parsed:
-                    d, t, st, repo = parsed
-                    if t:
-                        job.progress["total"] = t
-                    job.progress["done"] = max(job.progress["done"], d)
-                    job.progress["status"] = st
-                    job.progress["repo"] = repo
-                job.cond.notify_all()
+        try:
+            for line in job.proc.stdout:
+                line = _redactor().redact(line.rstrip("\n"))
+                with job.cond:
+                    job.lines.append(line)
+                    if len(job.lines) > Job.MAX_LINES:
+                        del job.lines[:len(job.lines) - Job.MAX_LINES]
+                    parsed = SYNC.parse_progress_line(line)
+                    if parsed:
+                        d, t, st, repo = parsed
+                        if t:
+                            job.progress["total"] = t
+                        job.progress["done"] = max(job.progress["done"], d)
+                        job.progress["status"] = st
+                        job.progress["repo"] = repo
+                    job.cond.notify_all()
+        finally:
+            # close the pipe even when the read loop dies early, otherwise the
+            # fd lives until the process exits (ResourceWarning in tests)
+            try:
+                job.proc.stdout.close()
+            except (AttributeError, OSError):
+                pass
         job.proc.wait()
         job.exit = job.proc.returncode
         _remember_job_result(job)
@@ -901,13 +950,25 @@ def make_handler():
         def _token(self):
             return self.server.token
 
-        def _body(self):
+        def _raw_body(self):
+            """read the request body exactly once, whatever the handler does.
+
+            A handler that ignores its body used to leave those bytes in the
+            socket. With keep-alive on, the *next* request on that connection
+            was then parsed starting with "{}", so the browser's follow-up GET
+            arrived as "{}GET /index.html" and got a 501. Draining up front
+            keeps one request == one read.
+            """
+            cached = getattr(self, "_raw_cache", None)
+            if cached is not None:
+                return cached
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 length = 0
             if length <= 0:
-                return {}
+                self._raw_cache = b""
+                return b""
             if length > MAX_BODY:
                 # drain the declared body so the client's send completes and
                 # it reads a clean 413 (rejecting without reading desyncs the
@@ -919,9 +980,17 @@ def make_handler():
                     if not chunk:
                         break
                     remaining -= len(chunk)
+                self._raw_cache = b""
                 raise _BodyTooLarge()
+            self._raw_cache = self.rfile.read(length)
+            return self._raw_cache
+
+        def _body(self):
+            raw = self._raw_body()
+            if not raw:
+                return {}
             try:
-                return json.loads(self.rfile.read(length).decode() or "{}")
+                return json.loads(raw.decode() or "{}")
             except ValueError:
                 raise _BadJson()
 
@@ -942,6 +1011,9 @@ def make_handler():
                                  extra.get("Cache-Control", "no-store"))
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("X-Frame-Options", "DENY")
+                self.send_header("Content-Security-Policy", CSP)
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("Permissions-Policy", PERMISSIONS_POLICY)
                 for k, v in extra.items():
                     if k.lower() == "cache-control":
                         continue
@@ -963,30 +1035,61 @@ def make_handler():
 
         # ---- auth + guards ----
         def _supplied_token(self):
+            """('bearer'|'cookie'|None, value).
+
+            A cookie carries an opaque session id, never the access token —
+            see gitsync/sessions.py for why.
+            """
             auth = self.headers.get("Authorization", "")
             if auth.startswith("Bearer "):
                 return ("bearer", auth[7:].strip())
             for part in self.headers.get("Cookie", "").split(";"):
                 part = part.strip()
-                if part.startswith("gitsync_session="):
+                if part.startswith(SS.COOKIE_NAME + "="):
                     return ("cookie", part.split("=", 1)[1])
             return (None, "")
 
         def _authed(self):
-            _kind, tok = self._supplied_token()
+            kind, tok = self._supplied_token()
             if not tok:
                 return False
+            if kind == "cookie":
+                # server-side session: revocable, idle- and age-limited
+                self._session = SS.validate(tok)
+                return self._session is not None
             try:
                 return hmac.compare_digest(tok.encode("utf-8"),
                                            self._token.encode("utf-8"))
             except (AttributeError, UnicodeError):
                 return False
 
-        def _client_ip(self):
+        def _trusted_proxy(self):
+            """is the peer one of settings.trusted_proxies (CIDRs)?"""
+            peer = self.client_address[0] if self.client_address else ""
+            if not peer:
+                return False
             try:
-                return self.client_address[0]
+                addr = ipaddress.ip_address(peer)
+            except ValueError:
+                return False
+            for cidr in _trusted_proxies():
+                try:
+                    if addr in ipaddress.ip_network(cidr, strict=False):
+                        return True
+                except ValueError:
+                    continue
+            return False
+
+        def _client_ip(self):
+            """the real client, honouring X-Forwarded-For only from a proxy."""
+            try:
+                peer = self.client_address[0]
             except Exception:
                 return "?"
+            if not self._trusted_proxy():
+                return peer
+            return _forwarded_ip(peer, self.headers.get("X-Forwarded-For", ""),
+                                 _trusted_proxies())
 
         def _host_ok(self):
             host = self.headers.get("Host", "")
@@ -1010,7 +1113,8 @@ def make_handler():
         def _guard(self, method):
             """(code, msg) on failure, else None. Host + CSRF + Origin."""
             if not self._host_ok():
-                return 403, "bad Host header (possible DNS rebinding)"
+                return 403, ("bad Host header (possible DNS rebinding); "
+                             "add it to GITSYNC_ALLOWED_HOSTS")
             if method in ("POST", "PUT", "DELETE", "PATCH"):
                 kind, _tok = self._supplied_token()
                 # CSRF only threatens ambient (cookie) credentials; a Bearer
@@ -1042,18 +1146,25 @@ def make_handler():
         def _route(self, method):
             path = self.path.split("?", 1)[0]
             path = re.sub(r"/+$", "", path) or "/"
+            self._raw_cache = None
             try:
+                if method in ("POST", "PUT", "PATCH", "DELETE"):
+                    self._raw_body()      # one read per request, always
                 if path == "/healthz":
                     if method == "GET":
                         return self._send(200, b"ok\n", "text/plain")
                     return self._err(405, "method not allowed")
-                if path.startswith("/api"):
+                # /metrics sits outside /api but needs the same auth: a
+                # scraper sends Authorization: Bearer <web.token>
+                if path.startswith("/api") or path == "/metrics":
                     is_public = ((method == "POST" and path == "/api/session")
                                  or (method == "GET" and path == "/api/auth"))
                     # the DNS-rebinding Host guard applies to EVERY request,
                     # including the public login/auth routes
                     if not self._host_ok():
-                        return self._err(403, "bad Host header")
+                        return self._err(
+                            403, "bad Host header (possible DNS rebinding); "
+                                 "add it to GITSYNC_ALLOWED_HOSTS")
                     if not is_public:
                         if not self._authed():
                             if not (method == "GET" and path == "/api/session"):
@@ -1213,10 +1324,7 @@ def h_auth_info(handler):
 def h_login(handler):
     b = handler._body()
     ip = handler._client_ip()
-    secure = "; Secure" \
-        if handler.headers.get("X-Forwarded-Proto") == "https" else ""
-    cookie = "gitsync_session=%s; Path=/; HttpOnly; SameSite=Strict%s" \
-        % (handler._token, secure)
+    secure = "; Secure" if _is_https(handler) else ""
     if "username" in b or "password" in b:
         if not get_auth():
             return handler._err(400, "password sign-in is not set up; "
@@ -1227,8 +1335,7 @@ def h_login(handler):
             return handler._err(429, "too many attempts — wait a minute")
         if check_password(b.get("username", ""), b.get("password", "")):
             _pw_throttle.reset(key)
-            return handler._send(200, b'{"ok":true}', "application/json",
-                                 {"Set-Cookie": cookie})
+            return _session_reply(handler, ip, secure)
         _pw_throttle.fail(key)
         time.sleep(0.25)                     # slow online guessing
         _audit("401 bad password for '%s' from %s" % (b.get("username"), ip))
@@ -1242,16 +1349,105 @@ def h_login(handler):
     if tok and hmac.compare_digest(tok.encode("utf-8"),
                                    handler._token.encode("utf-8")):
         _tok_throttle.reset(ip)
-        return handler._send(200, b'{"ok":true}', "application/json",
-                             {"Set-Cookie": cookie})
+        return _session_reply(handler, ip, secure)
     _tok_throttle.fail(ip)
     return handler._err(401, "invalid token")
 
 
+def _is_https(handler):
+    """did this request arrive over TLS?
+
+    ``X-Forwarded-Proto`` is client-controlled, so it is believed only from a
+    configured trusted proxy; otherwise a plain-HTTP client could trick the
+    server into sending a ``Secure`` cookie the browser would then never
+    return (harmless, but it makes sign-in look broken).
+    """
+    try:
+        if getattr(handler.server, "ssl_context", None) is not None:
+            return True
+        if handler._trusted_proxy():
+            return handler.headers.get("X-Forwarded-Proto", "").lower() == "https"
+    except Exception:
+        pass
+    return False
+
+
+def _cookie(sid, secure):
+    return ("%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%d%s"
+            % (SS.COOKIE_NAME, sid, SS.ABSOLUTE_SECONDS, secure))
+
+
+def _expire_cookie():
+    return ("%s=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0"
+            % SS.COOKIE_NAME)
+
+
+def _session_reply(handler, ip, secure):
+    """create a server-side session and hand back only its opaque id."""
+    sid = SS.create(ip=ip, ua=handler.headers.get("User-Agent", ""))
+    return handler._send(200, b'{"ok":true}', "application/json",
+                         {"Set-Cookie": _cookie(sid, secure)})
+
+
 def h_logout(handler):
-    handler._send(200, b'{"ok":true}', "application/json",
-                  {"Set-Cookie": "gitsync_session=; Path=/; HttpOnly; "
-                                 "SameSite=Strict; Max-Age=0"})
+    """sign this browser out (the session id stops working immediately)."""
+    kind, sid = handler._supplied_token()
+    if kind == "cookie":
+        SS.revoke(sid)
+    _audit("signed out from %s" % handler._client_ip())
+    return handler._send(200, b'{"ok":true}', "application/json",
+                         {"Set-Cookie": _expire_cookie()})
+
+
+def _stale_state(cfg, last_ok):
+    """is a sync overdue? {"stale": bool, "age_hours": n, "every_hours": n}.
+
+    Docker and a freshly-installed host both look healthy while nothing has
+    ever synced. Two missed cycles (or none ever, when a schedule is set) is
+    the point where the dashboard should say so in red instead of showing a
+    calm "—".
+    """
+    schedule = C.setting(cfg, "schedule", "hourly")
+    every = C.SCHEDULE_HOURS.get(schedule)
+    if not every:
+        return {"stale": False, "age_hours": None, "every_hours": None,
+                "reason": "schedule off"}
+    if not last_ok:
+        return {"stale": True, "age_hours": None, "every_hours": every,
+                "reason": "no successful sync yet"}
+    try:
+        when = datetime.strptime(last_ok.get("finished_at"),
+                                 "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return {"stale": False, "age_hours": None, "every_hours": every,
+                "reason": "unknown last run"}
+    age = (datetime.now() - when).total_seconds() / 3600.0
+    return {"stale": age > 2 * every, "age_hours": round(age, 2),
+            "every_hours": every,
+            "reason": "nothing synced for %s" % _ago(age)}
+
+
+def _ago(hours):
+    if hours < 1:
+        return "%d min ago" % max(1, int(hours * 60))
+    if hours < 48:
+        return "%d h ago" % int(hours)
+    return "%d days ago" % int(hours / 24)
+
+
+def h_sessions_list(handler):
+    handler._json({"sessions": SS.active(), "idle_seconds": SS.IDLE_SECONDS,
+                   "absolute_seconds": SS.ABSOLUTE_SECONDS})
+
+
+def h_sessions_revoke_all(handler):
+    n = SS.revoke_all()
+    _audit("signed out everywhere (%d session(s)) from %s"
+           % (n, handler._client_ip()))
+    return handler._send(200,
+                         json.dumps({"ok": True, "revoked": n}).encode(),
+                         "application/json",
+                         {"Set-Cookie": _expire_cookie()})
 
 
 def h_session(handler):
@@ -1259,27 +1455,60 @@ def h_session(handler):
 
 
 def h_set_password(handler):
+    """set or clear the password, revoking every existing session.
+
+    Changing a credential has to invalidate what was issued under the old
+    one, so all sessions are dropped. The browser that made the change gets
+    a brand-new session straight away (it just proved it is the operator),
+    while every other browser is signed out — which is the point.
+    """
     b = handler._body()
     if b.get("disable"):
         clear_password()
-        _audit("web password disabled")
-        return handler._json({"ok": True, "password_set": False,
-                              "message": "password sign-in disabled"})
+        # a cookie minted under the old password must not survive it
+        n = SS.revoke_all()
+        _audit("web password disabled, %d session(s) revoked" % n)
+        return _password_reply(handler, {
+            "ok": True, "password_set": False, "revoked": n,
+            "message": "password sign-in disabled; signed out everywhere"})
     try:
         set_password(b.get("username", ""), b.get("password", ""))
     except ValueError as e:
         return handler._err(400, str(e))
-    _audit("web password set for '%s'" % (b.get("username") or ""))
-    handler._json({"ok": True, "password_set": True,
-                   "message": "password set — sign in with it next time"})
+    n = SS.revoke_all()
+    _audit("web password set for '%s', %d session(s) revoked"
+           % (b.get("username") or "", n))
+    return _password_reply(handler, {
+        "ok": True, "password_set": True, "revoked": n,
+        "message": "password set — every other browser was signed out"})
 
 
-def h_status(handler):
+def _password_reply(handler, body):
+    """JSON reply that keeps the *calling* browser signed in after a revoke."""
+    kind, _sid = handler._supplied_token()
+    secure = "; Secure" if _is_https(handler) else ""
+    if kind == "cookie":
+        sid = SS.create(ip=handler._client_ip(),
+                        ua=handler.headers.get("User-Agent", ""))
+        return handler._send(200, json.dumps(body).encode(),
+                             "application/json",
+                             {"Set-Cookie": _cookie(sid, secure)})
+    handler._json(body)
+
+
+def _status_payload(handler):
+    """the dict behind /api/status (and /metrics). Cached probes only."""
     cfg = C.load_config()
-    recs = SYNC.last_records(1)
+    recs = SYNC.last_records(60)
     last = recs[-1] if recs else None
+    last_ok = None
+    for rec in reversed(recs):
+        if rec.get("ok") and not (rec.get("failed") or 0) \
+                and not (rec.get("partial") or 0) and not rec.get("dry_run"):
+            last_ok = rec
+            break
     syncing = bool(_current_sync and not _current_sync.done) or _engine_sync_busy()
-    handler._json({
+    return {
         "version": __version__,
         "syncing": syncing,
         "paused": bool(C.setting(cfg, "paused", False)),
@@ -1290,9 +1519,114 @@ def h_status(handler):
         "log_file": C.log_file(), "bind": handler.server.bind_host,
         "port": handler.server.port,
         "last_run": _public_record(last) if last else None,
+        "last_ok_run": _public_record(last_ok) if last_ok else None,
+        "stale": _stale_state(cfg, last_ok),
         "counts": {"platforms": len(cfg.get("platforms") or {}),
                    "routes": len(C.routes(cfg))},
-    })
+    }
+
+
+def h_status(handler):
+    handler._json(_status_payload(handler))
+
+
+def _epoch(stamp):
+    """'2026-11-13 06:10:53' (local time) -> seconds since the epoch."""
+    try:
+        return float((datetime.strptime(str(stamp), "%Y-%m-%d %H:%M:%S")
+                      - datetime(1970, 1, 1)).total_seconds())
+    except (TypeError, ValueError):
+        return None
+
+
+def _num(value):
+    if value is None:
+        return "NaN"
+    try:
+        return repr(float(value)) if value != int(value) else str(int(value))
+    except (TypeError, ValueError):
+        return "NaN"
+
+
+def _metric_label(text):
+    return str(text).replace("\\", "\\\\").replace('"', '\\"').replace(
+        "\n", "\\n")
+
+
+def h_metrics(handler):
+    """Prometheus text format — the format every monitoring stack speaks.
+
+    Auth is the same as every other endpoint (Bearer token or a session
+    cookie); Prometheus sends ``Authorization: Bearer <web.token>``. Every
+    value here is either cached or a small file read, because a scraper polls
+    this every 15s and a scrape must never shell out to git.
+    """
+    s = _status_payload(handler)
+    last = s.get("last_run") or {}
+    ok_run = s.get("last_ok_run") or {}
+    disk = _cached("hub_size", 60, lambda: _safe(_hub_totals,
+                                                {"mirrors": 0, "bytes": 0}),
+                   {"mirrors": 0, "bytes": 0})
+    lines = []
+
+    def m(name, kind, help_text, value, labels=None):
+        if not any(l.startswith("# HELP " + name + " ") for l in lines):
+            lines.append("# HELP %s %s" % (name, help_text))
+            lines.append("# TYPE %s %s" % (name, kind))
+        label = ""
+        if labels:
+            label = "{%s}" % ",".join('%s="%s"' % (k, _metric_label(v))
+                                      for k, v in labels)
+        lines.append("%s%s %s" % (name, label, _num(value)))
+
+    m("gitsync_up", "gauge", "1 while the web UI is answering.", 1)
+    m("gitsync_info", "gauge", "Build information.", 1,
+      [("version", s["version"])])
+    m("gitsync_paused", "gauge", "1 when background syncing is paused.",
+      1 if s["paused"] else 0)
+    m("gitsync_syncing", "gauge", "1 while a sync is running.",
+      1 if s["syncing"] else 0)
+    m("gitsync_stale", "gauge",
+      "1 when no successful sync has run within 2x the schedule.",
+      1 if (s.get("stale") or {}).get("stale") else 0)
+    m("gitsync_platforms", "gauge", "Configured platforms.",
+      s["counts"]["platforms"])
+    m("gitsync_routes", "gauge", "Configured routes.", s["counts"]["routes"])
+    m("gitsync_sessions_active", "gauge", "Live web sessions.",
+      _safe(SS.count, 0))
+    m("gitsync_hub_mirrors", "gauge", "Bare mirrors in the hub.",
+      disk.get("mirrors", 0))
+    m("gitsync_hub_bytes", "gauge", "Size of the mirror hub in bytes.",
+      disk.get("bytes", 0))
+
+    if last:
+        m("gitsync_last_run_timestamp_seconds", "gauge",
+          "When the last run finished (local clock).",
+          _epoch(last.get("finished_at")))
+        m("gitsync_last_run_ok", "gauge",
+          "1 when the last run finished with no failures.",
+          1 if not last.get("failed") else 0)
+        m("gitsync_last_run_repos", "gauge", "Repos seen by the last run.",
+          last.get("repos", 0))
+        m("gitsync_last_run_synced", "gauge", "Repos synced by the last run.",
+          last.get("ok", 0))
+        m("gitsync_last_run_failed", "gauge", "Repos that failed last run.",
+          last.get("failed", 0))
+        m("gitsync_last_run_seconds", "gauge",
+          "Wall-clock duration of the last run.",
+          last.get("elapsed_sec"))
+    if ok_run:
+        m("gitsync_last_success_timestamp_seconds", "gauge",
+          "When a run last finished with zero failures.",
+          _epoch(ok_run.get("finished_at")))
+
+    body = ("\n".join(lines) + "\n").encode("utf-8")
+    handler._send(200, body, "text/plain; version=0.0.4; charset=utf-8")
+
+
+def _hub_totals():
+    rows = DK.mirrors()
+    return {"mirrors": len(rows), "bytes": sum(r[2] for r in rows)}
 
 
 _device_flow_lock = threading.Lock()
@@ -1996,6 +2330,8 @@ def h_settings_put(handler):
         _apply_setting(st, "relax_protection", b, bool)
         _apply_setting(st, "token_warn_days", b, int, [7, 14, 30, 60, 90])
         _apply_setting(st, "theme", b, str, list(C.THEMES))
+        if "trusted_proxies" in b:
+            st["trusted_proxies"] = _clean_cidrs(b["trusted_proxies"])
         notify = st.setdefault("notify", {})
         if "on" in b:
             if b["on"] not in ("failure", "success", "always", "never"):
@@ -2028,8 +2364,66 @@ def h_settings_put(handler):
 
     payload, code = _locked(do)
     _redactor().reload()
-    _invalidate("health", "next", "sched")
+    _invalidate("health", "next", "sched", "proxies")
     handler._json(payload, code)
+
+
+def _in_cidrs(ip, cidrs):
+    for cidr in cidrs or []:
+        try:
+            if ip in ipaddress.ip_network(cidr, strict=False):
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _forwarded_ip(peer, forwarded, trusted):
+    """the client address from an X-Forwarded-For chain.
+
+    Behind nginx/Caddy every request arrives from the proxy, so throttling on
+    the peer address locks out *everyone* after one attacker and the audit log
+    names only the proxy. The header is client-controlled, so it is read only
+    when the peer is trusted: the right-most entry that is not itself a
+    trusted proxy (right-most, because a client can prepend anything).
+    """
+    if not trusted:
+        return peer          # nobody is a proxy here: the header is a claim
+    hops = [h.strip() for h in str(forwarded or "").split(",") if h.strip()]
+    for hop in reversed(hops):
+        try:
+            addr = ipaddress.ip_address(hop)
+        except ValueError:
+            continue
+        if not _in_cidrs(addr, trusted):
+            return hop
+    return peer
+
+
+def _clean_cidrs(value):
+    """validate settings.trusted_proxies: list or comma/space separated text.
+
+    A typo here silently disables the X-Forwarded-For handling it is meant to
+    enable, so bad entries are rejected at save time with the offending value
+    named, instead of being dropped later inside a request.
+    """
+    if isinstance(value, str):
+        value = value.replace(";", ",").replace("\n", ",").split(",")
+    if not isinstance(value, (list, tuple)):
+        raise _Http(400, "trusted_proxies must be a list of CIDRs")
+    out = []
+    for item in value:
+        for cidr in str(item).replace(",", " ").split():
+            cidr = cidr.strip()
+            if not cidr:
+                continue
+            try:
+                net = ipaddress.ip_network(cidr, strict=False)
+            except ValueError:
+                raise _Http(400, "not a CIDR: %r (e.g. 10.0.0.0/8, "
+                                 "192.168.0.0/16, 127.0.0.1/32)" % cidr)
+            out.append(str(net))
+    return out
 
 
 def h_notify_test(handler):
@@ -2311,8 +2705,13 @@ ROUTES = [
     ("POST", re.compile(r"^/api/auth/password$"), lambda h: h_set_password(h)),
     ("POST", re.compile(r"^/api/session$"), lambda h: h_login(h)),
     ("GET", re.compile(r"^/api/session$"), lambda h: h_session(h)),
+    ("DELETE", re.compile(r"^/api/session$"), lambda h: h_logout(h)),
     ("GET", re.compile(r"^/api/logout$"), lambda h: h_logout(h)),
+    ("GET", re.compile(r"^/api/sessions$"), lambda h: h_sessions_list(h)),
+    ("POST", re.compile(r"^/api/sessions/revoke-all$"),
+     lambda h: h_sessions_revoke_all(h)),
     ("GET", re.compile(r"^/api/status$"), lambda h: h_status(h)),
+    ("GET", re.compile(r"^/metrics$"), lambda h: h_metrics(h)),
     ("POST", re.compile(r"^/api/pause$"), lambda h: h_pause(h)),
     ("POST", re.compile(r"^/api/auth/github/device/start$"),
      lambda h: h_github_device_start(h)),

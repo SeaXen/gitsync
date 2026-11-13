@@ -59,8 +59,42 @@
 
   var lastStatus = null;
 
+  function staleBanner(st) {
+    var host = document.getElementById("stale-banner");
+    if (!host) return;
+    if (!st || !st.stale) { host.hidden = true; host.innerHTML = ""; return; }
+    var every = st.every_hours;
+    var what = st.age_hours === null || st.age_hours === undefined
+      ? "Nothing has synced yet."
+      : "The last successful sync was " + G.ago(Math.round(st.age_hours * 3600)) + ".";
+    var span = every ? ("This is set to run every " + every + "h.") : "";
+    host.hidden = false;
+    host.innerHTML =
+      '<div class="banner ' + (st.age_hours === null ? "bad" : "warn") + '">' +
+        '<span class="banner-icon" aria-hidden="true">!</span>' +
+        '<div class="banner-body"><strong>Sync is overdue.</strong> ' +
+          G.esc(what) + " " + G.esc(span) +
+          '<div class="banner-actions">' +
+            '<button class="btn primary" id="stale-sync" type="button">Sync now</button>' +
+            '<a class="btn" href="settings.html#scheduler">Check the scheduler</a>' +
+          "</div>" +
+        "</div>" +
+      "</div>";
+    var b = document.getElementById("stale-sync");
+    if (b) {
+      b.addEventListener("click", function () {
+        G.busy(b, function () { return G.startSync({ dry_run: false, force: false }); })
+          .catch(function (e) {
+            if (e && e.status === 409) G.toast("a sync is already running", "warn");
+            else G.toast(G.apiError(e), "bad");
+          });
+      });
+    }
+  }
+
   function fillStatus(s) {
     lastStatus = s;
+    staleBanner(s.stale);
     var sub = document.getElementById("dash-sub");
     if (sub) {
       if (s.schedule !== "off" && (!s.scheduler || s.scheduler.indexOf("not scheduled") !== -1 || s.scheduler.indexOf("none") !== -1)) {
@@ -365,6 +399,9 @@
   G.mount("dashboard", function (main) {
     main.innerHTML =
       G.bar("Dashboard", "…", "", "dash-sub") +
+      // filled by fillStatus(); a silent install (Docker with no scheduler,
+      // a timer that was never installed) otherwise looks perfectly healthy
+      '<div id="stale-banner" hidden></div>' +
       '<section class="card" id="sync-card" style="display:none">' +
         '<p class="label">Syncing Now</p>' +
         '<div class="row" style="margin-bottom:8px">' +

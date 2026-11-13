@@ -18,14 +18,18 @@ syntax-and-tests:
     # 2. shell syntax (installers)
     - bash -n install.sh
     - bash -n quickinstall.sh
+    - bash -n bin/gitsync
     # 3. CLI smoke tests
     - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync --version
     - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync --help > /dev/null
     - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync scopes | grep -q "GitHub"
     - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync platforms --help > /dev/null
     - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync routes --help > /dev/null
-    # 4. logic tests (no network)
-    - PYTHONPATH=$CI_PROJECT_DIR python3 -m unittest tests.test_logic
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync verify --help > /dev/null
+    # 4. logic tests (no network). A leaked socket or file is a bug: fail on it.
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -W error::ResourceWarning -m unittest tests.test_logic
+    # 5. the same 5 checks `gitsync ci` runs, including the checksum manifest
+    - PYTHONPATH=$CI_PROJECT_DIR python3 -m gitsync ci
 
 webui-tests:
   stage: check

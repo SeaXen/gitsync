@@ -23,7 +23,11 @@ FROM python:3.12
 WORKDIR /opt/gitsync
 COPY bin ./bin
 COPY gitsync ./gitsync
-COPY README.md LICENSE docs quickinstall.sh ./
+# `COPY docs ./docs` (not `COPY ... docs ./`): a directory source copies its
+# CONTENTS, so the old form dropped README-docs/* into /opt/gitsync/ instead
+# of /opt/gitsync/docs/ and every in-app docs link 404'd in the container
+COPY README.md LICENSE quickinstall.sh ./
+COPY docs ./docs
 
 ENV PYTHONPATH=/opt/gitsync \
     GITSYNC_HOME=/opt/gitsync \
@@ -52,7 +56,10 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
 # Override port/bind by appending args, e.g.:
 #   docker run ... gitsync:latest web --bind 0.0.0.0 --port 9000
 #
-# Note: the systemd timer does not run inside a container. Schedule syncs
-# with a host cron (`gitsync sync`), a sidecar, or `gitsync watch`.
+# Note: the systemd timer does not run inside a container. `docker compose up`
+# starts only the web UI, so NOTHING SYNCS until you either enable the
+# `scheduler` service in docker-compose.yml or run `gitsync sync` from a host
+# cron. The dashboard shows "last sync N hours ago" in red when a sync is
+# overdue, which is the signal that this step was skipped.
 ENTRYPOINT ["python3", "-m", "gitsync"]
 CMD ["web", "--bind", "0.0.0.0", "--port", "7765"]

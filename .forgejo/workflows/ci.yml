@@ -30,6 +30,7 @@ jobs:
         run: |
           bash -n install.sh
           bash -n quickinstall.sh
+          bash -n bin/gitsync
 
       - name: CLI smoke tests
         run: |
@@ -39,8 +40,14 @@ jobs:
           python3 -m gitsync scopes | grep -q "GitHub"
           python3 -m gitsync platforms --help > /dev/null
           python3 -m gitsync routes --help > /dev/null
+          python3 -m gitsync verify --help > /dev/null
 
       - name: Unit checks (tests/test_logic.py)
         run: |
           export PYTHONPATH=$PWD
-          python3 -m unittest tests.test_logic
+          python3 -W error::ResourceWarning -m unittest tests.test_logic
+
+      - name: CI self-check (gitsync ci)
+        run: |
+          export PYTHONPATH=$PWD
+          python3 -m gitsync ci

@@ -27,6 +27,7 @@
     alert: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M12 9v4M12 17h.01"/><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg>',
     info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
     box: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 8l-9-5-9 5 9 5 9-5z"/><path d="M3 8v8l9 5 9-5V8"/></svg>',
+    theme: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/></svg>',
     caretd: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M6 9l6 6 6-6"/></svg>',
     caretr: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9 6l6 6-6 6"/></svg>'
   };
@@ -251,6 +252,127 @@
   }
 
   // ---- formatting ----
+  // ---- theme -------------------------------------------------------
+  // theme.js applies the saved palette before first paint; this is the
+  // in-app control. Purely client-side: it is a per-browser preference, so
+  // it never goes through /api/settings (writing it there would make one
+  // operator's choice the default for every browser).
+  var THEME_LABEL = { auto: "Auto", light: "Light", dark: "Dark" };
+
+  function themeMode() {
+    return (window.gitsyncTheme && window.gitsyncTheme.get()) || "auto";
+  }
+
+  function setTheme(mode) {
+    if (window.gitsyncTheme) window.gitsyncTheme.apply(mode, true);
+    var btn = document.getElementById("top-theme");
+    if (btn) {
+      btn.setAttribute("title", "Theme: " + THEME_LABEL[themeMode()] +
+        " (click to change)");
+    }
+    var lbl = document.getElementById("top-theme-text");
+    if (lbl) lbl.textContent = THEME_LABEL[themeMode()];
+    var sel = document.getElementById("s-apptheme");
+    if (sel) sel.value = themeMode();
+    return themeMode();
+  }
+
+  function cycleTheme() {
+    var next = window.gitsyncTheme
+      ? window.gitsyncTheme.next(themeMode()) : "auto";
+    setTheme(next);
+    var eff = (window.GITSYNC_THEME || {}).effective || next;
+    toast("Theme: " + THEME_LABEL[next] +
+      (next === "auto" ? " (follows your system, now " + eff + ")" : ""), "ok");
+    return next;
+  }
+
+  // ---- keyboard shortcuts ------------------------------------------
+  // The TUI has key bindings; the browser had none, so every action meant a
+  // mouse trip to the top bar. These are the same three verbs (sync, dry run,
+  // pause) plus the help sheet.
+  var SHORTCUTS = [
+    ["?", "show this list"],
+    ["/", "jump to the filter box on this page"],
+    ["s", "sync now"],
+    ["d", "dry run (preview, changes nothing)"],
+    ["p", "pause / resume background sync"],
+    ["Esc", "close a dialog"],
+    ["t", "cycle the theme (Auto → Light → Dark)"]
+  ];
+
+  function isTyping(e) {
+    var t = e.target;
+    if (!t) return false;
+    var tag = (t.tagName || "").toUpperCase();
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" ||
+      t.isContentEditable === true;
+  }
+
+  function shortcutsHelp() {
+    var prevFocus = document.activeElement;
+    var backdrop = document.createElement("div");
+    backdrop.className = "modal-backdrop";
+    backdrop.setAttribute("role", "presentation");
+    var rows = SHORTCUTS.map(function (r) {
+      return "<div><span><kbd>" + esc(r[0]) + "</kbd></span><span>" +
+        esc(r[1]) + "</span></div>";
+    }).join("");
+    backdrop.innerHTML =
+      '<div class="modal" role="dialog" aria-modal="true" ' +
+        'aria-labelledby="gs-keys-title">' +
+        '<div class="modal-head"><h2 class="modal-title" id="gs-keys-title">' +
+          "Keyboard shortcuts</h2></div>" +
+        '<div class="modal-body"><div class="shortcuts">' + rows +
+        "</div><p class=\"muted\" style=\"margin:14px 0 0;font-size:12px\">" +
+          "Shortcuts are ignored while you are typing in a field.</p></div>" +
+        '<div class="modal-foot"><button class="btn primary" id="gs-keys-ok" ' +
+          'type="button">Got it</button></div>' +
+      "</div>";
+    document.body.appendChild(backdrop);
+    var esc_ = function (e) {
+      if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); close(); }
+    };
+    function close() {
+      document.removeEventListener("keydown", esc_, true);
+      backdrop.remove();
+      if (prevFocus && prevFocus.focus) prevFocus.focus();
+    }
+    document.addEventListener("keydown", esc_, true);
+    document.getElementById("gs-keys-ok").addEventListener("click", close);
+    backdrop.addEventListener("click", function (e) {
+      if (e.target === backdrop) close();
+    });
+    document.getElementById("gs-keys-ok").focus();
+  }
+
+  function wireShortcuts() {
+    document.addEventListener("keydown", function (e) {
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      if (isTyping(e) || document.querySelector(".modal-backdrop")) return;
+      var k = e.key;
+      if (k === "?") {
+        e.preventDefault();
+        shortcutsHelp();
+      } else if (k === "/") {
+        var box = document.getElementById("r-q") || document.getElementById("l-q");
+        if (box) { e.preventDefault(); box.focus(); }
+      } else if (k === "s") {
+        var b = document.getElementById("top-sync");
+        if (b && b.offsetParent !== null) { e.preventDefault(); b.click(); }
+      } else if (k === "d") {
+        var d = document.getElementById("top-dry");
+        if (d && d.offsetParent !== null) { e.preventDefault(); d.click(); }
+      } else if (k === "p") {
+        var p2 = document.getElementById("top-pause");
+        if (p2 && p2.offsetParent !== null) { e.preventDefault(); p2.click(); }
+      } else if (k === "t") {
+        var t = document.getElementById("top-theme");
+        if (t) { e.preventDefault(); t.click(); }
+      }
+    });
+  }
+
   function bytes(n) {
     if (n === null || n === undefined) return "—";
     var u = ["B", "K", "M", "G", "T", "P"], i = 0; n = Number(n);
@@ -533,6 +655,10 @@
             "<span>Dry run</span></button>" +
           '<button class="btn primary" id="top-sync" title="Sync now" aria-label="Sync now">' + I.sync +
             "<span>Sync now</span></button>" +
+          '<button class="btn icon" id="top-help" title="Keyboard shortcuts (?)" ' +
+            'aria-label="Keyboard shortcuts">?</button>' +
+          '<button class="btn icon" id="top-theme" title="Theme: Auto (click to change)" ' +
+            'aria-label="Change colour theme">' + I.theme + '</button>' +
           '<button class="btn icon" id="top-logout" title="Sign out" ' +
             'aria-label="Sign out">' + I.logout + "</button>" +
           '<div class="topbar-progress" id="top-progress" role="progressbar" ' +
@@ -545,7 +671,15 @@
     var sideLogout = document.getElementById("side-logout");
     if (sideLogout) sideLogout.addEventListener("click", doLogout);
     document.getElementById("top-logout").addEventListener("click", doLogout);
+    var themeBtn = document.getElementById("top-theme");
+    if (themeBtn) {
+      themeBtn.addEventListener("click", cycleTheme);
+    }
+    setTheme(themeMode());       // reflect the saved choice in the tooltip
     wireTopbar();
+    var help = document.getElementById("top-help");
+    if (help) help.addEventListener("click", shortcutsHelp);
+    wireShortcuts();
     return document.getElementById("main");
   }
 
@@ -670,6 +804,11 @@
       if (s.paused) { setStatus("PAUSED · all syncs suspended", "warn"); return; }
       if (s.syncing) { setStatus("syncing…", "live"); return; }
       var next = s.next_run ? " · next " + s.next_run : "";
+      if (s.stale && s.stale.stale) {
+        // a configuration that will never sync should not look idle
+        setStatus("idle · sync overdue" + next, "warn");
+        return;
+      }
       setStatus("idle · " + s.schedule + next);
     }).catch(function () { setStatus("offline"); });
   }
@@ -683,6 +822,9 @@
     el: el, bar: bar, field: field, select: select, loading: loading,
     emptyState: emptyState, errorBox: errorBox, startSync: startSync,
     onSync: onSync, refreshStatus: refreshStatus, collapsible: collapsible,
+    theme: themeMode, setTheme: setTheme, cycleTheme: cycleTheme,
+    themeLabel: function (m) { return THEME_LABEL[m] || m; },
+    shortcutsHelp: shortcutsHelp,
     mount: function (name, fn) { pages[name] = fn; }
   };
 

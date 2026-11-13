@@ -8,6 +8,7 @@ Runtime data (mirror hub, logs, run records) lives at ~/.local/share/gitsync
 import json
 import os
 import threading
+import time
 
 from . import __version__
 
@@ -339,3 +340,138 @@ def prune_targets(cfg, route=None):
     if isinstance(want, str):
         want = [want]
     return [t for t in want if t in ((route or {}).get("targets") or [])]
+
+
+# ------------------------------------------------------- export / import
+
+# every platform key that holds a credential (never exported)
+_PLATFORM_SECRETS = ("token", "password", "api_key", "app_password",
+                     "webhook_secret", "ssh_passphrase")
+
+
+def _looks_secret(key):
+    k = str(key).lower()
+    # discord_webhook is a credential: anyone holding it can post as us
+    return k in _PLATFORM_SECRETS or k.endswith("_token") or \
+        k.endswith("_secret") or k.endswith("_password") or \
+        k.endswith("_webhook")
+
+
+def strip_secrets(cfg):
+    """(config without credentials, [names of what was removed]).
+
+    A config export is meant to be pasted into an issue, committed to a dotfiles
+    repo, or moved between machines. It keeps every platform, route and
+    setting — the shape people actually want to copy — and leaves the secrets
+    empty so they can be re-entered on the other side.
+    """
+    import copy
+    out = copy.deepcopy(cfg)
+    removed = []
+    for name, plat in (out.get("platforms") or {}).items():
+        if not isinstance(plat, dict):
+            continue
+        for key in list(plat):
+            if _looks_secret(key) and plat.get(key):
+                plat[key] = ""
+                removed.append("%s.%s" % (name, key))
+    st = out.get("settings") or {}
+    notify = st.get("notify")
+    if isinstance(notify, dict):
+        for key in list(notify):
+            if _looks_secret(key) and notify.get(key):
+                notify[key] = ""
+                removed.append("settings.notify.%s" % key)
+    for key in ("web_token", "webhook_secret", "password_hash"):
+        if st.get(key):
+            st[key] = ""
+            removed.append("settings.%s" % key)
+    return out, sorted(removed)
+
+
+def export_config(path=None):
+    """write the redacted config (0600); returns (text, removed)."""
+    cfg = load_config()
+    clean, removed = strip_secrets(cfg)
+    text = json.dumps(clean, indent=2, sort_keys=True) + "\n"
+    if path:
+        tmp = path + ".tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+        fd = os.open(tmp, flags, 0o600)      # it can still name internal hosts
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, path)
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+    return text, removed
+
+
+class ConfigImportError(ValueError):
+    pass
+
+
+def import_config(path, cfg=None, replace=False):
+    """import a (redacted) config, keeping the secrets already on this box.
+
+    Importing must never silently wipe credentials: a platform that already
+    exists keeps its token, and a new platform is reported as needing one.
+    The current config is backed up first, so this is reversible.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            incoming = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ConfigImportError("cannot read %s: %s" % (path, e))
+    if not isinstance(incoming, dict):
+        raise ConfigImportError("not a gitsync config (expected an object)")
+    if not isinstance(incoming.get("platforms"), dict):
+        raise ConfigImportError("not a gitsync config (no platforms)")
+    if not isinstance(incoming.get("routes", []), list):
+        raise ConfigImportError("not a gitsync config (routes must be a list)")
+    for route in incoming.get("routes") or []:
+        if not isinstance(route, dict) or not route.get("name"):
+            raise ConfigImportError("a route without a name")
+
+    current = cfg if cfg is not None else load_config()
+    merged = json.loads(json.dumps(incoming))
+    kept, needs_token = [], []
+    old_plats = current.get("platforms") or {}
+    for name, plat in (merged.get("platforms") or {}).items():
+        if not isinstance(plat, dict):
+            raise ConfigImportError("platform %r is not an object" % name)
+        old = old_plats.get(name)
+        if replace:
+            continue
+        if isinstance(old, dict):
+            for key in list(plat):
+                if _looks_secret(key) and not plat.get(key) and old.get(key):
+                    plat[key] = old[key]
+                    kept.append("%s.%s" % (name, key))
+        if plat.get("type") != "local" and not any(
+                plat.get(k) for k in _PLATFORM_SECRETS):
+            needs_token.append(name)
+    notify = (merged.setdefault("settings", {}).setdefault("notify", {}))
+    old_notify = (current.get("settings") or {}).get("notify") or {}
+    for key in ("discord_webhook", "telegram_token", "telegram_chat_id"):
+        if not notify.get(key) and old_notify.get(key) and not replace:
+            notify[key] = old_notify[key]
+            kept.append("settings.notify.%s" % key)
+
+    if os.path.exists(CONFIG_FILE):
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        try:
+            with open(CONFIG_FILE, "rb") as src, \
+                    open(CONFIG_FILE + ".bak-" + stamp, "wb") as dst:
+                dst.write(src.read())
+        except OSError:
+            pass
+    save_config(merged)
+    return {"platforms": len(merged.get("platforms") or {}),
+            "routes": len(merged.get("routes") or []),
+            "kept_secrets": sorted(set(kept)),
+            "needs_token": sorted(needs_token)}

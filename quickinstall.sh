@@ -21,6 +21,7 @@
 #     --no-setup        skip the wizard (configure later with: gitsync setup)
 #     --no-sync         don't offer the first sync
 #     --branch NAME     install a different branch
+#     --tag vX.Y.Z      install a released tag (checksum-verified)
 #     --yes             accept defaults everywhere (unattended)
 #
 #  Examples:
@@ -31,6 +32,8 @@ set -euo pipefail
 
 REPO="SeaXen/gitsync"
 BRANCH="${GITSYNC_BRANCH:-main}"
+TAG="${GITSYNC_TAG:-}"
+SHA256=""
 
 # ---------------------------------------------------------------- ui helpers
 if [ -t 1 ]; then
@@ -68,6 +71,8 @@ while [ $# -gt 0 ]; do
         --no-setup)   DO_SETUP=0; shift ;;
         --no-sync)    DO_SYNC=0; shift ;;
         --branch)     BRANCH="${2:-main}"; shift 2 ;;
+        --tag)        TAG="${2:?--tag needs a value like v2.1.4}"; shift 2 ;;
+        --sha256)     SHA256="${2:?--sha256 needs a hash}"; shift 2 ;;
         --yes|-y)     shift ;;      # accepted; nothing to confirm;
         -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)            die "unknown option: $1  (try --help)" ;;
@@ -92,15 +97,51 @@ fi
 # ---------------------------------------------------------------- download
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-say "downloading $REPO@$BRANCH ..."
+REF="$BRANCH"; [ -n "$TAG" ] && REF="$TAG"
+say "downloading $REPO@$REF ..."
 if command -v git >/dev/null 2>&1; then
-    git clone --depth 1 -b "$BRANCH" "https://github.com/$REPO.git" "$TMP/gitsync" \
-        >/dev/null 2>&1 || die "git clone failed (is the repo reachable?)"
+    # git verifies the tag's objects for us; that is the integrity check
+    git clone --depth 1 -b "$REF" "https://github.com/$REPO.git" "$TMP/gitsync" \
+        >/dev/null 2>&1 || die "git clone failed (is the repo/tag reachable?)"
 else
-    TARBALL="https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH"
     command -v curl >/dev/null 2>&1 || die "need git or curl to download"
-    curl -fsSL "$TARBALL" | tar xz -C "$TMP" || die "download failed"
-    mv "$TMP"/gitsync-* "$TMP/gitsync"
+    if [ -n "$TAG" ]; then
+        TARBALL="https://codeload.github.com/$REPO/tar.gz/refs/tags/$TAG"
+    else
+        TARBALL="https://codeload.github.com/$REPO/tar.gz/refs/heads/$BRANCH"
+    fi
+    curl -fsSL "$TARBALL" -o "$TMP/src.tar.gz" || die "download failed"
+    mkdir -p "$TMP/gitsync"
+    tar xzf "$TMP/src.tar.gz" -C "$TMP/gitsync" --strip-components=1 \
+        || die "extract failed"
+fi
+
+# Integrity: a tagged release ships SHA256SUMS, so the exact files that are
+# about to be installed are checked before anything runs. Without git there
+# is nothing else vouching for the download.
+if command -v sha256sum >/dev/null 2>&1; then
+    SHA_CMD="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then
+    SHA_CMD="shasum -a 256"
+else
+    SHA_CMD=""
+fi
+if [ -n "$SHA256" ]; then
+    [ -n "$SHA_CMD" ] || die "no sha256 tool found (install coreutils)"
+    got="$($SHA_CMD "$TMP/src.tar.gz" 2>/dev/null | awk '{print $1}')"
+    [ "$got" = "$SHA256" ] || die "checksum mismatch: expected $SHA256, got $got"
+    ok "tarball checksum verified"
+elif [ -n "$TAG" ]; then
+    SUMS_URL="https://raw.githubusercontent.com/$REPO/$TAG/SHA256SUMS"
+    if curl -fsSL "$SUMS_URL" -o "$TMP/SHA256SUMS" 2>/dev/null; then
+        [ -n "$SHA_CMD" ] || die "no sha256 tool found (install coreutils)"
+        ( cd "$TMP/gitsync" && $SHA_CMD -c "$TMP/SHA256SUMS" --quiet ) \
+            || die "SHA256SUMS does not match the downloaded $TAG tree — refusing to install"
+        ok "release checksums verified ($TAG)"
+    else
+        say "no SHA256SUMS published for $TAG — refusing an unverified install"
+        die "use git (tag objects are verified) or pass --sha256 <hash>"
+    fi
 fi
 ok "downloaded to $TMP/gitsync"
 
@@ -112,6 +153,7 @@ ARGS=(--schedule off)                     # no scheduler yet
 [ "$USER_MODE" = "1" ] && ARGS+=(--user)
 [ "$USE_CRON"   = "1" ] && ARGS+=(--cron)
 [ "$SYSTEM_UNIT" = "1" ] && ARGS+=(--system)
+ARGS+=(--tag "$REF")
 bash "$TMP/gitsync/install.sh" "${ARGS[@]}"
 
 # ---------------------------------------------------------------- setup

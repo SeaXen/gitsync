@@ -34,6 +34,7 @@ from gitsync import sync as SY
 from gitsync import tokencheck as TK
 from gitsync import tui
 from gitsync import webhooks as WH
+from gitsync import sessions as SS
 from gitsync import web as W
 
 # CI runners inject credential env vars (GITHUB_TOKEN, FORGEJO_TOKEN, ...).
@@ -55,7 +56,11 @@ def _hermetic_connect(self, address):
     host = address[0] if isinstance(address, tuple) and len(address) > 0 else address
     if isinstance(address, str) or host in ("127.0.0.1", "localhost", "::1"):
         return _real_connect(self, address)
-    raise RuntimeError("Real network access blocked in hermetic unit tests: %r" % (address,))
+    # OSError, not RuntimeError: socket.create_connection catches OSError and
+    # closes the socket it just made. A RuntimeError escapes that handler and
+    # leaks the fd, which is what produced "unclosed socket" ResourceWarnings.
+    raise OSError("real network access blocked in hermetic unit tests: %r"
+                  % (address,))
 
 
 def setUpModule():
@@ -624,7 +629,10 @@ class TestHubPaths(unittest.TestCase):
 
     def test_hub_rel_encodes_the_id(self):
         self.assertEqual(SY.hub_rel('SeaXen/gitsync'), 'SeaXen__gitsync')
-        self.assertEqual(SY.hub_rel('a b/c'), 'a_b__c')
+        # a name that survives sanitising keeps its old path (no migration),
+        # and a lossy one gains a stable suffix so it cannot collide
+        self.assertTrue(SY.hub_rel('a b/c').startswith('a_b__c-'))
+        self.assertEqual(SY.hub_rel('a b/c'), SY.hub_rel('a b/c'))
 
     def test_new_repo_gets_the_nested_path(self):
         with tempfile.TemporaryDirectory() as td:
@@ -2511,6 +2519,54 @@ class TestWebHttp(unittest.TestCase):
         code, _, _ = self._req("GET", "/api/status")
         self.assertEqual(code, 401)
 
+    def test_metrics_is_prometheus_text_and_needs_auth(self):
+        code, _, _ = self._req("GET", "/metrics")
+        self.assertEqual(code, 401)
+        code, body, hdrs = self._req("GET", "/metrics", headers=self._auth())
+        self.assertEqual(code, 200)
+        self.assertIn("text/plain", hdrs.get("content-type", ""))
+        self.assertIn("gitsync_up 1", body)
+        self.assertIn('gitsync_info{version="', body)
+        self.assertIn("# TYPE gitsync_stale gauge", body)
+        self.assertIn("gitsync_sessions_active 0", body)
+
+    def test_a_body_the_handler_ignores_does_not_desync_the_connection(self):
+        # a POST whose body the route never reads used to leave the bytes in
+        # the socket; the next request on that keep-alive connection carried
+        # them and was parsed as "{}GET /api/status" (501 in a real browser)
+        import http.client
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        try:
+            conn.request("POST", "/api/sessions/revoke-all",
+                         body=b'{"unused": true}',
+                         headers=dict(self._auth(),
+                                      **{"Content-Type": "application/json"}))
+            r = conn.getresponse()
+            r.read()
+            self.assertEqual(r.status, 200)
+            conn.request("GET", "/api/status", headers=self._auth())
+            r2 = conn.getresponse()
+            body = r2.read().decode()
+            self.assertEqual(r2.status, 200, body[:200])
+            self.assertIn("version", body)
+        finally:
+            conn.close()
+
+    def test_metrics_reflects_the_last_run(self):
+        recs = [{"finished_at": "2026-01-01 00:00:00", "ok": 2, "failed": 0,
+                 "partial": 0, "repos": 2, "dry_run": False,
+                 "elapsed_sec": 1.5, "routes": 1}]
+        with open(C.records_file(), "w") as f:
+            json.dump(recs, f)
+        code, body, _ = self._req("GET", "/metrics", headers=self._auth())
+        self.assertEqual(code, 200)
+        self.assertIn("gitsync_last_run_ok 1", body)
+        self.assertIn("gitsync_last_run_synced 2", body)
+        self.assertIn("gitsync_last_run_seconds 1.5", body)
+        # 2026-01-01 00:00:00 local, as a plain epoch number
+        self.assertIn("gitsync_last_success_timestamp_seconds 1767225600",
+                      body)
+
     def test_token_login_sets_cookie_and_gates(self):
         code, _, hdrs = self._req("POST", "/api/session",
                                   {"token": self.token})
@@ -2665,20 +2721,29 @@ class TestTenOutOfTenFixes(unittest.TestCase):
         self.assertIn("WantedBy={wantedby}", S.WEBHOOK_TEMPLATE)
         self.assertNotIn("Environment=HOME=%h", S.WEBHOOK_TEMPLATE)
 
-    def test_webui_html_dark_mode_metadata(self):
+    def test_webui_html_theme_metadata(self):
+        # the palette moved into style.css so light mode can override it; a
+        # page must not hardcode `color-scheme: dark` any more, and it must
+        # load theme.js *before* the stylesheet so there is no dark flash
         webui = os.path.join(C.APP_DIR, "gitsync", "webui")
         for f in os.listdir(webui):
             if f.endswith(".html"):
                 with open(os.path.join(webui, f), encoding="utf-8") as fp:
                     html = fp.read()
-                self.assertIn('color-scheme: dark', html, f)
+                self.assertIn('content="dark light"', html, f)
+                self.assertNotIn("style=\"color-scheme", html, f)
                 self.assertIn('name="theme-color" content="#0d1117"', html, f)
+                self.assertIn("<script src=\"theme.js\"></script>", html, f)
+                self.assertLess(html.index("theme.js"),
+                                html.index("style.css"), f)
 
     def test_webui_style_guidelines(self):
         css_path = os.path.join(C.APP_DIR, "gitsync", "webui", "style.css")
         with open(css_path, encoding="utf-8") as fp:
             css = fp.read()
         self.assertIn("color-scheme:dark", css)
+        self.assertIn('data-theme="light"', css)
+        self.assertIn("prefers-color-scheme: light", css)
         self.assertIn("touch-action:manipulation", css)
         self.assertIn("modal-backdrop", css)
         self.assertIn("font-variant-numeric:tabular-nums", css)
@@ -3189,6 +3254,7 @@ class TestGitHttpBackendIntegration(unittest.TestCase):
         th = threading.Thread(target=srv.serve_forever, daemon=True)
         th.start()
         port = srv.server_port
+        self.addCleanup(srv.server_close)
         self.addCleanup(srv.shutdown)
 
         hub_mirrors = os.path.join(td, "hub_mirrors")
@@ -3240,6 +3306,693 @@ class TestGitHttpBackendIntegration(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertIn("init commit", out)
 
+
+
+# ------------------------------------------------------- round 3: sessions
+
+class TestSessions(unittest.TestCase):
+    """The web cookie used to *be* the access token. It is now an opaque id
+    whose hash is stored server-side, which is what makes the expiry/revoke
+    claims below possible at all."""
+
+    def setUp(self):
+        self.td = tempfile.mkdtemp()
+        self._old_cfg = C.CONFIG_DIR
+        C.CONFIG_DIR = self.td
+
+    def tearDown(self):
+        import shutil
+        C.CONFIG_DIR = self._old_cfg
+        shutil.rmtree(self.td, ignore_errors=True)
+
+    def _store(self):
+        return os.path.join(self.td, "sessions.json")
+
+    def test_create_returns_a_random_id_and_stores_only_its_hash(self):
+        import hashlib
+        sid = SS.create(ip="10.0.0.5", ua="test agent")
+        self.assertGreaterEqual(len(sid), 32)
+        with open(self._store(), encoding="utf-8") as f:
+            raw = f.read()
+        self.assertNotIn(sid, raw)                      # replay-proof store
+        self.assertIn(hashlib.sha256(sid.encode("utf-8")).hexdigest(), raw)
+        self.assertEqual(os.stat(self._store()).st_mode & 0o777, 0o600)
+
+    def test_validate_accepts_a_live_id_and_returns_its_metadata(self):
+        sid = SS.create(ip="10.0.0.5", ua="Firefox")
+        rec = SS.validate(sid)
+        self.assertIsNotNone(rec)
+        self.assertEqual(rec["ip"], "10.0.0.5")
+        self.assertEqual(rec["ua"], "Firefox")
+        self.assertIsNone(SS.validate("not-a-session"))
+        self.assertIsNone(SS.validate(""))
+
+    def test_revoke_kills_one_session_only(self):
+        a = SS.create()
+        b = SS.create()
+        self.assertTrue(SS.revoke(a))
+        self.assertIsNone(SS.validate(a))
+        self.assertIsNotNone(SS.validate(b))
+        self.assertFalse(SS.revoke(a))                  # already gone
+
+    def test_idle_expiry(self):
+        sid = SS.create()
+        later = SS._now() + SS.IDLE_SECONDS + 1
+        with patch.object(SS, "_now", return_value=later):
+            self.assertIsNone(SS.validate(sid))
+
+    def test_absolute_expiry_even_while_in_use(self):
+        start = SS._now()
+        sid = SS.create()
+        with patch.object(SS, "_now",
+                          return_value=start + SS.IDLE_SECONDS - 1):
+            self.assertIsNotNone(SS.validate(sid))       # still active
+        with patch.object(SS, "_now",
+                          return_value=start + SS.ABSOLUTE_SECONDS + 1):
+            self.assertIsNone(SS.validate(sid))          # but 30 days is 30 days
+
+    def test_active_is_newest_first_and_never_leaks_a_hash(self):
+        SS.create(ip="1.1.1.1")
+        second = SS.create(ip="2.2.2.2")
+        rows = SS.active()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(sorted(r["ip"] for r in rows),
+                         ["1.1.1.1", "2.2.2.2"])
+        self.assertEqual(rows[0]["ip"], "2.2.2.2")       # second is newer
+        for r in rows:
+            self.assertEqual(set(r), {"created", "last_seen", "ip", "ua"})
+            self.assertNotIn(second, json.dumps(r))
+
+    def test_revoke_all_reports_how_many_went(self):
+        SS.create()
+        SS.create()
+        self.assertEqual(SS.count(), 2)
+        self.assertEqual(SS.revoke_all(), 2)
+        self.assertEqual(SS.count(), 0)
+        self.assertEqual(SS.revoke_all(), 0)
+
+    def test_a_corrupt_store_reads_as_empty_instead_of_crashing(self):
+        with open(self._store(), "w", encoding="utf-8") as f:
+            f.write("{not json")
+        self.assertIsNone(SS.validate("whatever"))
+        sid = SS.create()                                # still usable
+        self.assertIsNotNone(SS.validate(sid))
+
+
+class TestWebhookSecretMode(unittest.TestCase):
+    def test_set_secret_is_0600_at_creation_not_after(self):
+        old_cfg = C.CONFIG_DIR
+        td = tempfile.mkdtemp()
+        C.CONFIG_DIR = td
+        old_mask = os.umask(0o022)
+        try:
+            WH.set_secret("s3cr3t-value")
+        finally:
+            os.umask(old_mask)
+            C.CONFIG_DIR = old_cfg
+        try:
+            path = os.path.join(td, "webhook.secret")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertFalse(os.path.exists(path + ".tmp"))
+            with open(path) as f:
+                self.assertEqual(f.read(), "s3cr3t-value")
+        finally:
+            import shutil
+            shutil.rmtree(td, ignore_errors=True)
+
+
+# ------------------------------------------------------- round 3: updater
+
+class TestUpdateSafety(unittest.TestCase):
+    """`gitsync update` used to fetch whatever main served and run it as
+    root. These are the properties that replaced that."""
+
+    def _args(self, **kw):
+        ns = M.argparse.Namespace(version="", yes=True)
+        for k, v in kw.items():
+            setattr(ns, k, v)
+        return ns
+
+    def test_parse_sums(self):
+        got = M._parse_sums("abc  a.sh\ndef  *b.sh\n\njunk line here\n")
+        self.assertEqual(got, {"a.sh": "abc", "b.sh": "def"})
+
+    def test_verify_asset_accepts_the_published_hash(self):
+        import hashlib
+        blob = b"#!/bin/bash\necho hi\n"
+        good = hashlib.sha256(blob).hexdigest()
+        self.assertEqual(
+            M._verify_asset(blob, "quickinstall.sh",
+                            "%s  quickinstall.sh\n" % good), good)
+
+    def test_verify_asset_rejects_a_mismatch_and_a_missing_entry(self):
+        with self.assertRaises(ValueError):
+            M._verify_asset(b"evil", "quickinstall.sh", "%s  quickinstall.sh\n"
+                            % ("0" * 64))
+        with self.assertRaises(ValueError):
+            M._verify_asset(b"evil", "quickinstall.sh", "")
+
+    def test_latest_release_tag_normalises_a_bare_version(self):
+        body = json.dumps({"tag_name": "2.1.4"}).encode()
+        with patch.object(M, "_fetch_bytes", return_value=body):
+            self.assertEqual(M._latest_release_tag(), "v2.1.4")
+        body = json.dumps({"tag_name": "latest"}).encode()
+        with patch.object(M, "_fetch_bytes", return_value=body):
+            with self.assertRaises(ValueError):
+                M._latest_release_tag()
+
+    def test_a_wrong_checksum_aborts_before_anything_runs(self):
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(M, "repo_root_of", return_value=td), \
+                patch.object(M, "_fetch_bytes",
+                             side_effect=[b"#!/bin/bash\necho pwn\n",
+                                          ("0" * 64 +
+                                           "  quickinstall.sh\n").encode()]):
+            calls = []
+            with patch.object(M, "_run",
+                              side_effect=lambda *a, **k: calls.append(a)):
+                rc = M.cmd_update(self._args())
+        self.assertEqual(rc, 1)
+        self.assertEqual(calls, [])          # nothing was executed
+
+    def test_installer_is_private_pinned_and_removed(self):
+        import hashlib
+        blob = b"#!/bin/bash\nexit 0\n"
+        digest = hashlib.sha256(blob).hexdigest()
+        seen = {}
+
+        class _R:
+            returncode = 0
+
+        def fake_run(cmd, **kw):
+            seen["cmd"] = list(cmd)
+            path = cmd[1]
+            seen["path"] = path
+            seen["mode"] = os.stat(path).st_mode & 0o777
+            seen["existed_at_run"] = os.path.exists(path)
+            return _R()
+
+        sums = ("%s  quickinstall.sh\n" % digest).encode()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(M, "repo_root_of", return_value=td), \
+                patch.object(M, "_fetch_bytes",
+                             side_effect=[blob, sums]), \
+                patch.object(M, "_run", side_effect=fake_run):
+            rc = M.cmd_update(self._args(version="2.1.4"))
+
+        self.assertEqual(rc, 0)
+        self.assertTrue(seen["existed_at_run"])
+        self.assertEqual(seen["mode"], 0o700)            # 0600, then 0700
+        self.assertFalse(os.path.exists(seen["path"]))   # removed in finally
+        cmd = seen["cmd"]
+        self.assertEqual(cmd[0], "bash")
+        self.assertIn("--no-setup", cmd)
+        self.assertIn("--no-sync", cmd)
+        self.assertIn("--tag", cmd)
+        self.assertEqual(cmd[cmd.index("--tag") + 1], "v2.1.4")
+
+    def test_the_installer_is_removed_even_when_it_fails(self):
+        seen = {}
+
+        def boom(cmd, **kw):
+            seen["path"] = cmd[1]
+            raise RuntimeError("interrupted")
+
+        sums = ("%s  quickinstall.sh\n" %
+                __import__("hashlib").sha256(b"x").hexdigest()).encode()
+        with tempfile.TemporaryDirectory() as td, \
+                patch.object(M, "repo_root_of", return_value=td), \
+                patch.object(M, "_fetch_bytes",
+                             side_effect=[b"x", sums]), \
+                patch.object(M, "_run", side_effect=boom):
+            with self.assertRaises(RuntimeError):
+                M.cmd_update(self._args(version="2.1.4"))
+        self.assertFalse(os.path.exists(seen["path"]))
+
+    def test_confirm_refuses_when_stdin_is_not_a_terminal(self):
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            self.assertFalse(M._confirm("Run it?", False))
+        self.assertTrue(M._confirm("Run it?", True))
+
+    def test_a_git_checkout_updates_with_git_not_an_installer(self):
+        with tempfile.TemporaryDirectory() as td:
+            calls = []
+
+            class _R:
+                returncode = 0
+
+            with patch.object(M, "_run",
+                              side_effect=lambda cmd, **k:
+                              calls.append(list(cmd)) or _R()):
+                rc = M._git_checkout_update(td, True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls[0][:3], ["git", "-C", td])
+        self.assertIn("pull", calls[0])
+        self.assertEqual(calls[1][0], "bash")
+        self.assertTrue(calls[1][1].endswith("install.sh"))
+
+
+class TestReleaseSums(unittest.TestCase):
+    """A tag that ships a stale SHA256SUMS cannot be installed by the
+    updater, so the check has to fail *before* the tag is pushed."""
+
+    def _tree(self, td):
+        os.makedirs(os.path.join(td, "gitsync", "webui"))
+        with open(os.path.join(td, "gitsync", "a.py"), "w") as f:
+            f.write("x = 1\n")
+        with open(os.path.join(td, "gitsync", "webui", "a.js"), "w") as f:
+            f.write("var a = 1;\n")
+        with open(os.path.join(td, "install.sh"), "w") as f:
+            f.write("#!/bin/sh\n")
+        return td
+
+    def test_round_trip_and_stale_detection(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._tree(td)
+            M.write_sums(td)
+            M.check_sums(td)                       # no raise
+            with open(os.path.join(td, "SHA256SUMS")) as f:
+                text = f.read()
+            self.assertIn("gitsync/a.py", text)
+            self.assertIn("install.sh", text)
+            self.assertNotIn("__pycache__", text)
+            with open(os.path.join(td, "gitsync", "a.py"), "a") as f:
+                f.write("# edited\n")
+            with self.assertRaises(RuntimeError):
+                M.check_sums(td)
+
+    def test_a_missing_sums_file_only_fails_in_a_checkout(self):
+        with tempfile.TemporaryDirectory() as td:
+            self._tree(td)
+            M.check_sums(td)                       # installed copy: tolerated
+            os.makedirs(os.path.join(td, ".git"))
+            with self.assertRaises(RuntimeError):
+                M.check_sums(td)
+
+    def test_this_repository_ships_a_current_sums_file(self):
+        root = M.repo_root_of(M.__file__)
+        if not os.path.isdir(os.path.join(root, ".git")):
+            self.skipTest("not a git checkout")
+        M.check_sums(root)
+
+
+# ------------------------------------------------------- round 3: watch
+
+class TestWatchLoop(unittest.TestCase):
+    def test_reloads_the_config_and_survives_a_failed_cycle(self):
+        loads = []
+        runs = []
+
+        def fake_load():
+            loads.append(1)
+            return {"settings": {}}
+
+        def fake_run(cfg):
+            runs.append(1)
+            if len(runs) == 1:
+                raise RuntimeError("network died")
+            return {"ok": 2, "failed": 0}
+
+        args = M.argparse.Namespace(interval=30, once=False, max_runs=2)
+        with patch.object(C, "load_config", side_effect=fake_load), \
+                patch.object(M.SYNC, "run_sync", side_effect=fake_run), \
+                patch.object(M.time, "sleep", lambda s: None):
+            rc = M.cmd_watch(args)
+        self.assertEqual(len(loads), 2)        # not read once before the loop
+        self.assertEqual(len(runs), 2)
+        self.assertEqual(rc, 1)                # a failure is reported
+
+    def test_paused_skips_the_run_without_dying(self):
+        args = M.argparse.Namespace(interval=30, once=True, max_runs=0)
+        calls = []
+        with patch.object(C, "load_config",
+                          return_value={"settings": {"paused": True}}), \
+                patch.object(M.SYNC, "run_sync",
+                             side_effect=lambda cfg: calls.append(1)):
+            rc = M.cmd_watch(args)
+        self.assertEqual(rc, 0)
+        self.assertEqual(calls, [])            # paused means paused
+
+    def test_once_returns_after_a_single_cycle(self):
+        args = M.argparse.Namespace(interval=30, once=True, max_runs=0)
+        runs = []
+        with patch.object(C, "load_config", return_value={"settings": {}}), \
+                patch.object(M.SYNC, "run_sync",
+                             side_effect=lambda cfg:
+                             runs.append(1) or {"ok": 1, "failed": 0}):
+            self.assertEqual(M.cmd_watch(args), 0)
+        self.assertEqual(len(runs), 1)
+
+
+# --------------------------------------------------- round 3: proxy trust
+
+class TestTrustedProxies(unittest.TestCase):
+    def test_a_header_is_ignored_when_no_proxy_is_trusted(self):
+        self.assertEqual(W._forwarded_ip("9.9.9.9", "1.2.3.4", []), "9.9.9.9")
+
+    def test_the_right_most_untrusted_hop_wins(self):
+        trusted = ["10.0.0.0/8"]
+        self.assertEqual(
+            W._forwarded_ip("10.0.0.1", "6.6.6.6, 1.2.3.4, 10.0.0.2", trusted),
+            "1.2.3.4")
+
+    def test_garbage_and_ipv6_hops(self):
+        self.assertEqual(W._forwarded_ip("10.0.0.1", "unknown, 1.2.3.4",
+                                         ["10.0.0.0/8"]), "1.2.3.4")
+        self.assertEqual(W._forwarded_ip("10.0.0.1", "2001:db8::1",
+                                         ["10.0.0.0/8"]), "2001:db8::1")
+
+    def test_clean_cidrs_normalises_and_rejects_typos(self):
+        self.assertEqual(W._clean_cidrs("10.0.0.0/8, 192.168.1.5"),
+                         ["10.0.0.0/8", "192.168.1.5/32"])
+        self.assertEqual(W._clean_cidrs(["  127.0.0.1/32 "]),
+                         ["127.0.0.1/32"])
+        with self.assertRaises(W._Http):
+            W._clean_cidrs("not-a-network")
+        with self.assertRaises(W._Http):
+            W._clean_cidrs(5)
+
+    def test_the_cache_reads_settings(self):
+        old = (C.CONFIG_DIR, C.CONFIG_FILE)
+        with tempfile.TemporaryDirectory() as td:
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            with open(C.CONFIG_FILE, "w") as f:
+                json.dump({"settings": {"trusted_proxies": ["10.0.0.0/8"]}}, f)
+            W._invalidate("proxies")
+            try:
+                self.assertEqual(W._trusted_proxies(), ["10.0.0.0/8"])
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE = old
+                W._invalidate("proxies")
+
+
+# --------------------------------------------- round 3: odd repository names
+
+class TestOddRepoNameSync(unittest.TestCase):
+    """'a b' and 'a_b' used to sanitise to the same hub folder *and* the same
+    local target, so one repo silently overwrote the other. Both now survive
+    a real sync with their own history."""
+
+    NAMES = ["a b", "a_b", "\u00fcn\u00ef", "\u00f6\u00f1\u00ef"]
+
+    def setUp(self):
+        if not _have_git():
+            self.skipTest("git not available")
+
+    def _bare(self, root, name, msg):
+        bare = os.path.join(root, name + ".git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        subprocess.run(["git", "-C", bare, "symbolic-ref", "HEAD",
+                        "refs/heads/main"], check=True)
+        work = os.path.join(os.path.dirname(root), "w-" + msg)
+        os.makedirs(work)
+        ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+        env = dict(os.environ,
+                   GIT_AUTHOR_DATE="2020-01-01T00:00:00 +0000",
+                   GIT_COMMITTER_DATE="2020-01-01T00:00:00 +0000")
+        subprocess.run(["git", "init", "-q", work], check=True)
+        subprocess.run(["git", "-C", work, "checkout", "-q", "-b", "main"],
+                       check=True)
+        with open(os.path.join(work, "f"), "w") as f:
+            f.write(msg)
+        subprocess.run(["git", "-C", work, "add", "."], check=True)
+        subprocess.run(["git", "-C", work] + ident +
+                       ["commit", "-q", "-m", msg], check=True, env=env)
+        subprocess.run(["git", "-C", work, "push", "-q", bare, "main"],
+                       check=True, env=env)
+
+    def test_every_repo_keeps_its_own_history(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dst = os.path.join(td, "dst")
+            os.makedirs(src)
+            os.makedirs(dst)
+            for i, name in enumerate(self.NAMES):
+                self._bare(src, name, "c%d" % i)
+            cfg = {"platforms": {
+                "src": {"type": "local", "enabled": True, "path": src},
+                "dst": {"type": "local", "enabled": True, "path": dst}},
+                "routes": [{"name": "r", "source": "src",
+                            "targets": ["dst"]}],
+                "settings": {"mode": "safe"}}
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                totals = SY.run_sync(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+            self.assertEqual(totals["failed"], 0, totals)
+            self.assertEqual(totals["ok"], len(self.NAMES), totals)
+            # one folder per source repo, each holding its own commit
+            for i, name in enumerate(self.NAMES):
+                target = os.path.join(dst, P._fs_unique(name) + ".git")
+                self.assertTrue(os.path.isdir(target), target)
+                rc, out, err = P.run(
+                    ["git", "-C", target, "log", "-1", "--format=%s", "main"])
+                self.assertEqual(rc, 0, err)
+                self.assertEqual(out.strip(), "c%d" % i)
+
+    def test_an_empty_bare_repo_is_listed_and_mirrored(self):
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            os.makedirs(src)
+            subprocess.run(["git", "init", "-q", "--bare",
+                            os.path.join(src, "empty.git")], check=True)
+            plat = P.LocalPlatform("src", {"path": src})
+            names = [r["name"] for r in plat.list_repos()]
+            self.assertEqual(names, ["empty"])
+
+    def test_the_hub_collision_guard_skips_and_names_the_pair(self):
+        """_fs_unique makes this practically impossible, but a silent merge
+        of two histories is bad enough that the route refuses the pair."""
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dst = os.path.join(td, "dst")
+            os.makedirs(src)
+            os.makedirs(dst)
+            self._bare(src, "one", "c1")
+            self._bare(src, "two", "c2")
+            cfg = {"platforms": {
+                "src": {"type": "local", "enabled": True, "path": src},
+                "dst": {"type": "local", "enabled": True, "path": dst}},
+                "routes": [{"name": "r", "source": "src",
+                            "targets": ["dst"]}],
+                "settings": {"mode": "safe"}}
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                with patch.object(SY, "hub_rel", return_value="same-path"):
+                    totals = SY.run_sync(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+            self.assertGreaterEqual(totals["failed"], 2)
+            errs = " ".join(str(f.get("error"))
+                            for f in totals.get("failures", []))
+            self.assertIn("hub path collision", errs)
+            self.assertEqual(os.listdir(dst), [])   # nothing was pushed
+
+
+# ------------------------------------------------ round 3: /metrics, verify
+
+class TestVerifyAndConfigExport(unittest.TestCase):
+    def test_verify_reports_drift_then_in_sync(self):
+        if not _have_git():
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dst = os.path.join(td, "dst")
+            os.makedirs(src)
+            os.makedirs(dst)
+            bare = os.path.join(src, "a.git")
+            subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+            work = os.path.join(td, "w")
+            os.makedirs(work)
+            ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+            env = dict(os.environ,
+                       GIT_AUTHOR_DATE="2020-01-01T00:00:00 +0000",
+                       GIT_COMMITTER_DATE="2020-01-01T00:00:00 +0000")
+            subprocess.run(["git", "init", "-q", work], check=True)
+            subprocess.run(["git", "-C", work, "checkout", "-q", "-b", "main"],
+                           check=True)
+            for msg in ("c1", "c2"):
+                with open(os.path.join(work, "f"), "w") as f:
+                    f.write(msg)
+                subprocess.run(["git", "-C", work, "add", "."], check=True)
+                subprocess.run(["git", "-C", work] + ident +
+                               ["commit", "-q", "-m", msg], check=True,
+                               env=env)
+            subprocess.run(["git", "-C", work, "tag", "v1"], check=True)
+            subprocess.run(["git", "-C", work, "push", "-q", bare, "main",
+                            "--tags"], check=True, env=env)
+
+            cfg = {"platforms": {
+                "src": {"type": "local", "enabled": True, "path": src},
+                "dst": {"type": "local", "enabled": True, "path": dst}},
+                "routes": [{"name": "r", "source": "src",
+                            "targets": ["dst"]}],
+                "settings": {"mode": "safe"}}
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                SY.run_sync(cfg)
+                rows = SY.verify(cfg)
+                self.assertEqual([r["state"] for r in rows], ["in-sync"], rows)
+                self.assertEqual(rows[0]["refs"], 2)      # main + the tag
+
+                # a push to the *source* alone is not drift yet: verify
+                # compares the hub (what was already backed up) to the target
+                with open(os.path.join(work, "f"), "w") as f:
+                    f.write("c3")
+                subprocess.run(["git", "-C", work] + ident +
+                               ["commit", "-qam", "c3"], check=True, env=env)
+                subprocess.run(["git", "-C", work, "push", "-q", bare,
+                                "main"], check=True, env=env)
+                self.assertEqual([r["state"] for r in SY.verify(cfg)],
+                                 ["in-sync"])
+
+                SY.run_sync(cfg)          # hub and target move to c3
+                self.assertEqual([r["state"] for r in SY.verify(cfg)],
+                                 ["in-sync"])
+
+                # now make the target disagree with the hub for real: move
+                # its main back one commit, the way a lost push looks
+                prev = subprocess.run(
+                    ["git", "-C", work, "rev-parse", "HEAD~1"],
+                    check=True, capture_output=True, text=True).stdout.strip()
+                subprocess.run(["git", "-C", os.path.join(dst, "a.git"),
+                                "update-ref", "refs/heads/main", prev],
+                               check=True)
+                rows = SY.verify(cfg)
+                self.assertEqual(rows[0]["state"], "drift", rows)
+                self.assertIn("refs/heads/main", rows[0]["differ"])
+
+                SY.run_sync(cfg)
+                rows = SY.verify(cfg)
+                self.assertEqual([r["state"] for r in rows], ["in-sync"], rows)
+                self.assertEqual(SY.verify_summary(rows), {"in-sync": 1})
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+    def test_verify_never_creates_a_missing_target_repo(self):
+        if not _have_git():
+            self.skipTest("git not available")
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dst = os.path.join(td, "dst")
+            os.makedirs(src)
+            os.makedirs(dst)
+            subprocess.run(["git", "init", "-q", "--bare",
+                            os.path.join(src, "a.git")], check=True)
+            cfg = {"platforms": {
+                "src": {"type": "local", "enabled": True, "path": src},
+                "dst": {"type": "local", "enabled": True, "path": dst}},
+                "routes": [{"name": "r", "source": "src",
+                            "targets": ["dst"]}],
+                "settings": {}}
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                rows = SY.verify(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+            self.assertEqual(rows[0]["state"], "no-mirror")
+            self.assertEqual(os.listdir(dst), [])
+
+    def test_export_blanks_every_credential_and_is_private(self):
+        cfg = {"platforms": {
+            "github": {"type": "github", "token": "ghp_SECRET",
+                       "enabled": True},
+            "local": {"type": "local", "path": "/tmp/x", "enabled": True}},
+            "routes": [{"name": "r", "source": "github",
+                        "targets": ["local"]}],
+            "settings": {"notify": {"discord_webhook": "https://discord/hook",
+                                    "telegram_token": "123:abc"}}}
+        clean, removed = C.strip_secrets(cfg)
+        text = json.dumps(clean)
+        self.assertNotIn("ghp_SECRET", text)
+        self.assertNotIn("discord/hook", text)
+        self.assertNotIn("123:abc", text)
+        self.assertEqual(clean["platforms"]["github"]["token"], "")
+        self.assertEqual(clean["routes"], cfg["routes"])   # shape is kept
+        self.assertIn("github.token", removed)
+        self.assertIn("settings.notify.telegram_token", removed)
+        # the original is untouched
+        self.assertEqual(cfg["platforms"]["github"]["token"], "ghp_SECRET")
+
+    def test_import_keeps_local_secrets_and_backs_up(self):
+        with tempfile.TemporaryDirectory() as td:
+            cfgdir = os.path.join(td, "cfg")
+            os.makedirs(cfgdir)
+            old = (C.CONFIG_DIR, C.CONFIG_FILE)
+            C.CONFIG_DIR = cfgdir
+            C.CONFIG_FILE = os.path.join(cfgdir, "config.json")
+            try:
+                C.save_config({"platforms": {
+                    "github": {"type": "github", "token": "KEEP-ME",
+                               "enabled": True}},
+                    "routes": [], "settings": {}})
+                incoming = os.path.join(td, "in.json")
+                with open(incoming, "w") as f:
+                    json.dump({"platforms": {
+                        "github": {"type": "github", "token": "",
+                                   "enabled": True, "owner": "me"},
+                        "gitlab": {"type": "gitlab", "token": "",
+                                   "enabled": True}},
+                        "routes": [{"name": "all", "source": "github",
+                                    "targets": ["gitlab"]}],
+                        "settings": {}}, f)
+                report = C.import_config(incoming)
+                self.assertEqual(report["platforms"], 2)
+                self.assertEqual(report["routes"], 1)
+                self.assertIn("github.token", report["kept_secrets"])
+                self.assertEqual(report["needs_token"], ["gitlab"])
+                with open(C.CONFIG_FILE, "r", encoding="utf-8") as f:
+                    saved = json.load(f)
+                self.assertEqual(saved["platforms"]["github"]["token"],
+                                 "KEEP-ME")
+                self.assertEqual(saved["platforms"]["github"]["owner"], "me")
+                backups = [n for n in os.listdir(cfgdir) if ".bak-" in n]
+                self.assertEqual(len(backups), 1, backups)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE = old
+
+    def test_import_refuses_junk(self):
+        with tempfile.TemporaryDirectory() as td:
+            bad = os.path.join(td, "bad.json")
+            with open(bad, "w") as f:
+                f.write("[]")
+            with self.assertRaises(C.ConfigImportError):
+                C.import_config(bad, cfg={"platforms": {}, "routes": []})
+            with open(bad, "w") as f:
+                json.dump({"platforms": [], "routes": []}, f)
+            with self.assertRaises(C.ConfigImportError):
+                C.import_config(bad, cfg={"platforms": {}, "routes": []})
+            with open(bad, "w") as f:
+                json.dump({"nope": 1}, f)
+            with self.assertRaises(C.ConfigImportError):
+                C.import_config(bad, cfg={"platforms": {}, "routes": []})
+
+    def test_export_writes_a_0600_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "export.json")
+            text, _removed = C.export_config(out)
+            self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
+            with open(out, "r", encoding="utf-8") as f:
+                self.assertEqual(json.load(f), json.loads(text))
 
 if __name__ == '__main__':
     unittest.main()

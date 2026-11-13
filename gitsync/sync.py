@@ -196,6 +196,15 @@ def _rotate_log():
         pass
 
 
+def _rmtree(path):
+    """delete a mirror directory without shelling out to `rm -rf`.
+
+    A path that starts with "-" cannot be mistaken for an option this way,
+    and it works the same on every platform git itself supports.
+    """
+    shutil.rmtree(path, ignore_errors=True)
+
+
 def hub_rel(repo_id):
     """'group/docs' -> 'gitlab/group__docs': the hub path inside MIRROR_DIR.
 
@@ -203,7 +212,7 @@ def hub_rel(repo_id):
     `docs` in different groups used to share one mirror and overwrite each
     other.
     """
-    return P._fs_safe(str(repo_id).replace("/", "__"))
+    return P._fs_unique(str(repo_id).replace("/", "__"))
 
 
 def mirror_path(repo, ptype, claimants=None):
@@ -261,7 +270,7 @@ def sync_repo(repo, source, targets, mode, claimants=None, relax=False):
     # 1. hub mirror
     if os.path.isdir(hub) and not mirror_is_valid(hub):
         log("  removing incomplete mirror for %s" % name)
-        P.run(["rm", "-rf", hub])
+        _rmtree(hub)
     clean_src_url, src_user, src_token = split_url_auth(src_url)
     genv = source.git_env() if hasattr(source, "git_env") else None
     if src_token or (genv and "GIT_ASKPASS" in genv):
@@ -278,7 +287,7 @@ def sync_repo(repo, source, targets, mode, claimants=None, relax=False):
         rc, _, err = P.run(["git", "clone", "--mirror", clean_src_url, hub],
                             timeout=P.GIT_TIMEOUT, env=genv)
         if rc != 0:
-            P.run(["rm", "-rf", hub])
+            _rmtree(hub)
             return "clone-failed", _redact(err.strip())[:200], []
         P.run(["git", "remote", "set-url", "origin", clean_src_url], cwd=hub)
         _secure_hub_config(hub)
@@ -529,7 +538,7 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
             return "ok", "in sync on %d peers" % len(reachable), []
 
     if os.path.isdir(hub) and not mirror_is_valid(hub):
-        P.run(["rm", "-rf", hub])
+        _rmtree(hub)
     if not os.path.isdir(hub):
         rc, _, err = P.run(["git", "init", "--bare", hub])
         if rc != 0:
@@ -1094,6 +1103,31 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
         for r in repos:
             key = (P._fs_safe(r.get("name") or ""), source.ptype)
             claims.setdefault(key, []).append(r)
+        # new-layout guard: distinct repos must never share one hub folder.
+        # _fs_unique() makes a clash practically impossible, but a silent
+        # merge of two histories is bad enough that we refuse the pair and
+        # name them instead of pushing one over the other.
+        by_path = {}
+        for r in repos:
+            rid = r.get("id") or r.get("name") or ""
+            by_path.setdefault(hub_rel(rid), []).append(r)
+        clash = {p: rs for p, rs in by_path.items() if len(rs) > 1}
+        if clash:
+            for path, rs in clash.items():
+                names = ", ".join(sorted(str(r.get("name")) for r in rs))
+                log("  %s: %d repos map to the same folder %s (%s) — "
+                    "skipping them. Rename one, or exclude it: "
+                    "gitsync routes edit %s --exclude '%s'"
+                    % (sname, len(rs), path, names, rname,
+                       str(rs[0].get("name"))))
+                totals["failures"].append({"route": rname, "repo": names,
+                                           "error": "hub path collision"})
+                totals["failed"] += len(rs)
+            bad = set()
+            for path, rs in clash.items():
+                for r in rs:
+                    bad.add(id(r))
+            repos = [r for r in repos if id(r) not in bad]
         if not include_forks:
             # best-effort fork filter (platforms that expose it)
             repos = [r for r in repos if not r.get("fork", False)]
@@ -1339,6 +1373,119 @@ def last_records(n=10):
     except (OSError, ValueError):
         pass
     return []
+
+
+# ---------------------------------------------------------------- verify
+
+def _refs_local(path):
+    """{ref: sha} for a local bare repo, or None if it is not one."""
+    rc, out, _ = P.run(["git", "for-each-ref",
+                        "--format=%(refname) %(objectname)"],
+                       cwd=path, timeout=120)
+    if rc != 0:
+        return None
+    refs = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            refs[parts[0]] = parts[1]
+    return refs
+
+
+def _refs_remote(url):
+    """({ref: sha}, error) from `git ls-remote` (works for paths and URLs)."""
+    # stdin is /dev/null inside P.run, so this fails fast instead of hanging
+    # on a credential prompt for a private repo with a bad token
+    rc, out, err = P.run(["git", "ls-remote", url], timeout=P.GIT_TIMEOUT)
+    if rc != 0:
+        return None, _redact(err.strip())[:200]
+    refs = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2:                 # ls-remote prints "sha<TAB>ref"
+            refs[parts[1]] = parts[0]
+    return refs, ""
+
+
+def _tracked(ref):
+    return ref.startswith("refs/heads/") or ref.startswith("refs/tags/")
+
+
+def verify(cfg, route_name=None, log_fn=None):
+    """read-only drift report: hub vs every target, per branch and tag.
+
+    Nothing here pushes, creates or deletes. It answers "is the backup
+    actually a backup?" long before a restore is needed: a target that
+    stopped accepting pushes still looks healthy in the dashboard, because
+    the run records only say what was attempted.
+    """
+    log = log_fn or globals()["log"]
+    rows = []
+    for route in C.routes(cfg):
+        rname = route.get("name")
+        if route_name and rname != route_name:
+            continue
+        if route.get("enabled") is False:
+            rows.append({"route": rname, "state": "paused", "repo": "-",
+                         "target": "-"})
+            continue
+        sname = route.get("source")
+        sp = C.platform(cfg, sname)
+        if not sp or not sp.get("enabled"):
+            rows.append({"route": rname, "state": "source-disabled",
+                         "repo": "-", "target": "-"})
+            continue
+        source = P.make(sname, sp)
+        # these helpers return platform *config dicts*; verify needs the
+        # live platform objects to build URLs
+        if route.get("direction") == "mesh":
+            peers = {n: P.make(n, p)
+                     for n, p in route_peers(cfg, route).items()}
+        else:
+            peers = {n: P.make(n, p)
+                     for n, p in active_targets(cfg, route).items()}
+        try:
+            repos = source.list_repos()
+        except Exception as e:
+            rows.append({"route": rname, "state": "list-failed", "repo": "-",
+                         "target": "-", "detail": _redact(str(e))[:200]})
+            continue
+        log("verifying %d repo(s) on route '%s'" % (len(repos), rname))
+        for repo in repos:
+            name = repo.get("name")
+            hub = mirror_path(repo, source.ptype)
+            hub_refs = _refs_local(hub) if os.path.isdir(hub) else None
+            if hub_refs is None:
+                rows.append({"route": rname, "repo": name,
+                             "target": "-", "state": "no-mirror"})
+                continue
+            hub_refs = {r: v for r, v in hub_refs.items() if _tracked(r)}
+            for tname, tgt in peers.items():
+                url = tgt.repo_url(repo)
+                refs, err = _refs_remote(url)
+                if refs is None:
+                    rows.append({"route": rname, "repo": name,
+                                 "target": tname, "state": "unreachable",
+                                 "detail": err})
+                    continue
+                refs = {r: v for r, v in refs.items() if _tracked(r)}
+                missing = sorted(r for r in hub_refs if r not in refs)
+                differ = sorted(r for r in hub_refs
+                                if r in refs and refs[r] != hub_refs[r])
+                extra = sorted(r for r in refs if r not in hub_refs)
+                rows.append({
+                    "route": rname, "repo": name, "target": tname,
+                    "state": "drift" if (missing or differ) else "in-sync",
+                    "missing": missing, "differ": differ, "extra": extra,
+                    "refs": len(hub_refs)})
+    return rows
+
+
+def verify_summary(rows):
+    counts = {}
+    for r in rows:
+        counts[r["state"]] = counts.get(r["state"], 0) + 1
+    return counts
 
 
 # ---------------------------------------------------------------- restore
