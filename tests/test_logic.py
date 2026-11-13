@@ -51,6 +51,7 @@ def _have_git():
     return shutil.which("git") is not None
 
 _real_connect = socket.socket.connect
+_REAL_CANARY = {}          # live data-dir canary, filled by setUpModule()
 
 def _hermetic_connect(self, address):
     host = address[0] if isinstance(address, tuple) and len(address) > 0 else address
@@ -72,11 +73,28 @@ def setUpModule():
     # fake "runs" into the live records.json and gitsync.log — the operator's
     # dashboard then showed a run that never happened. Redirect the whole
     # module; tests that want their own dir still override it.
-    global _REAL_DATA_DIR, _TEST_DATA_DIR
+    global _REAL_DATA_DIR, _TEST_DATA_DIR, _REAL_CANARY
     _REAL_DATA_DIR = (C.DATA_DIR, C.MIRROR_DIR)
+    # the redirect above is the fix; this canary proves it still holds. A
+    # subprocess or a helper that resolved the path before the redirect (or
+    # one that ignores C.DATA_DIR) wrote empty "runs" into the live
+    # records.json on several occasions, and the operator's dashboard then
+    # showed a run that never happened. Compare and fail loudly instead.
+    _REAL_CANARY = {p: _stat_sig(p) for p in
+                    (os.path.join(_REAL_DATA_DIR[0], "records.json"),
+                     os.path.join(_REAL_DATA_DIR[0], "gitsync.log"))}
     _TEST_DATA_DIR = tempfile.mkdtemp(prefix="gitsync-test-data-")
     C.DATA_DIR = _TEST_DATA_DIR
     C.MIRROR_DIR = os.path.join(_TEST_DATA_DIR, "mirrors")
+
+
+def _stat_sig(path):
+    """(size, mtime) of a file, or None when it does not exist."""
+    try:
+        st = os.stat(path)
+        return (st.st_size, st.st_mtime)
+    except OSError:
+        return None
 
 
 def tearDownModule():
@@ -84,6 +102,12 @@ def tearDownModule():
     C.DATA_DIR, C.MIRROR_DIR = _REAL_DATA_DIR
     import shutil
     shutil.rmtree(_TEST_DATA_DIR, ignore_errors=True)
+    dirty = [p for p, was in _REAL_CANARY.items() if _stat_sig(p) != was]
+    if dirty:
+        raise AssertionError(
+            "the test run wrote into the live data dir: %s — a code path is "
+            "ignoring C.DATA_DIR, so `gitsync ci` would add fake runs to the "
+            "operator's dashboard" % ", ".join(sorted(dirty)))
 
 
 # --------------------------------------------------------------- platforms
