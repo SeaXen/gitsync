@@ -366,6 +366,15 @@ def _push_target(tname, tplat, repo, hub, mode, refspecs=None,
     """
     try:
         push_url = tplat.ensure_repo(repo)
+        # An empty repo has no refs, and `git push` with none to push says
+        # "No refs in common and none specified; doing nothing" and exits
+        # non-zero — which turned every empty source repo into a red run
+        # (P2-3 made them visible; this makes them sync). The repo is still
+        # created on the target, because the source does have it.
+        rc0, refs, _ = P.run(["git", "for-each-ref", "--format=%(refname)"],
+                             cwd=hub, timeout=30)
+        if rc0 == 0 and not refs.strip():
+            return None
         clean_push_url, dst_user, dst_token = split_url_auth(push_url)
         cmd = push_args(mode, tplat.ptype, clean_push_url, refspecs)
         if not cmd:

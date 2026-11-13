@@ -869,6 +869,10 @@ class TestRedaction(unittest.TestCase):
             try:
                 def fake_run(cmd, *a, **kw):
                     captured.append((cmd, kw.get("env") or {}))
+                    # the empty-repo short circuit asks for the ref list
+                    # first; answer it with one ref so the push is reached
+                    if "for-each-ref" in cmd:
+                        return 0, "refs/heads/main\n", ""
                     return 0, "", ""
                 P.run = fake_run
                 SY._push_target("gh", FakeTarget(), {"name": "testrepo"}, hub, "safe")
@@ -876,7 +880,8 @@ class TestRedaction(unittest.TestCase):
                 P.run = orig_run
 
             self.assertTrue(captured)
-            cmd, env = captured[0]
+            # the push itself, not the ref probe that precedes it
+            cmd, env = next((c, e) for c, e in captured if "push" in c)
             # argv must contain no secrets
             for arg in cmd:
                 self.assertNotIn("ghp_TESTSECRET", arg)
@@ -3894,6 +3899,39 @@ class TestRetryScoping(unittest.TestCase):
     def test_a_plain_only_list_still_applies_to_every_route(self):
         self.assertEqual(SY._wanted_names(["a"], None, "r1"), ["a"])
         self.assertIsNone(SY._wanted_names([], None, "r1"))
+
+
+class TestEmptyRepoPush(unittest.TestCase):
+    """P2-3 made an empty repo *visible*; it still had to sync.
+
+    `git push` with no refs exits non-zero ("No refs in common and none
+    specified; doing nothing"), so every empty source repo was a red run
+    forever. The repo is created on the target; nothing is pushed.
+    """
+
+    def setUp(self):
+        if not _have_git():
+            self.skipTest("git not available")
+
+    def test_an_empty_repo_syncs_without_an_error(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as td:
+            src = os.path.join(td, "src")
+            dst = os.path.join(td, "dst")
+            for d in (src, dst):
+                os.makedirs(d)
+            subprocess.run(["git", "init", "-q", "--bare",
+                            os.path.join(src, "empty.git")], check=True)
+            cfg = {"platforms": {
+                       "src": {"type": "local", "enabled": True, "path": src},
+                       "dst": {"type": "local", "enabled": True, "path": dst}},
+                   "routes": [{"name": "r", "source": "src",
+                               "targets": ["dst"], "mode": "safe"}],
+                   "settings": {"workers": 1}}
+            t = SY.run_sync(cfg, quiet=True)
+            self.assertEqual(t["failed"], 0, t.get("failures"))
+            self.assertEqual(t["ok"], 1)
+            self.assertTrue(os.path.isdir(os.path.join(dst, "empty.git")))
 
 
 class TestMirrorExtras(unittest.TestCase):
