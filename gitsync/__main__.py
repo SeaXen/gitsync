@@ -143,27 +143,40 @@ def cmd_sync(args):
             print("no route targets '%s'" % args.to)
             return 2
     only = [r for r in (args.repos or "").split(",") if r.strip()]
+    only_map = None
     if getattr(args, "retry_failed", False):
         recs = SYNC.last_records(1)
-        failed = []
+        failed = {}
         if recs:
             for f in recs[-1].get("failures", []):
                 r = f.get("repo")
                 rt = f.get("route")
-                if r and r != "-":
+                if r and r != "-" and rt:
                     if not args.route or rt == args.route:
-                        failed.append(r)
+                        failed.setdefault(rt, set()).add(r)
         if not failed:
             print("no failed repos in last run to retry")
             return 0
-        only = list(set(only + failed))
+        # scoped by (route, repo): the same repo name can be healthy on a
+        # route that did not fail, and retrying it there was wasted work
+        only_map = {rt: sorted(names) for rt, names in failed.items()}
+        if only:
+            only_map["*"] = only
+        print("retrying %d repo(s) on %d route(s): %s"
+              % (sum(len(v) for v in failed.values()), len(failed),
+                 ", ".join(sorted(failed))))
     t = SYNC.run_sync(cfg, route_name=args.route, quiet=args.quiet,
-                      only=only or None, dry_run=args.dry_run,
+                      only=only or None, only_map=only_map,
+                      dry_run=args.dry_run,
                       scheduled=args.scheduled,
                       force=getattr(args, "force", False),
                       prune_repos=getattr(args, "prune_repos", False))
     if t.get("paused"):
         return 0
+    if t.get("blocked"):
+        # disk guard / pre-sync hook: the timer's non-zero exit (and its
+        # mail) is the only alarm on a headless machine
+        return 1
     if args.dry_run:
         n_upd = sum(1 for p in t.get("planned", [])
                     if p.get("verdict") == "update")
@@ -2150,9 +2163,35 @@ def cmd_ci(args):
     def c_sums():
         check_sums(root_for_sums)
 
+    def c_packaging():
+        """the shipped tree must contain what the docs and the container
+        promise. `install.sh` and the Dockerfile both copy docs/; a rename or
+        a dropped COPY line makes every guide disappear from an install while
+        the source tree still looks complete."""
+        for rel in ("docs/GETTING-STARTED.md", "docs/CONFIGURATION.md",
+                    "README.md"):
+            p = os.path.join(root_for_sums, rel)
+            if not os.path.isfile(p):
+                raise RuntimeError("%s is missing" % rel)
+            with open(p, encoding="utf-8") as f:
+                if len(f.read().strip().splitlines()) < 20:
+                    raise RuntimeError("%s is a stub" % rel)
+        with open(os.path.join(root_for_sums, "Dockerfile"),
+                  encoding="utf-8") as f:
+            dock = f.read()
+        if "COPY docs ./docs" not in dock:
+            raise RuntimeError("Dockerfile must copy docs to ./docs "
+                               "(a trailing slash flattens it)")
+        with open(os.path.join(root_for_sums, "install.sh"),
+                  encoding="utf-8") as f:
+            inst = f.read()
+        if '"$SRC_DIR/docs"' not in inst:
+            raise RuntimeError("install.sh no longer copies docs/")
+
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
     check("release checksums (SHA256SUMS)", c_sums)
+    check("packaging (installer + Docker docs)", c_packaging)
     check("CLI smoke tests", c_cli)
     check("unit checks (tests.test_logic)", c_unit)
 
@@ -2200,16 +2239,70 @@ def cmd_notify(args):
         C.save_config(cfg)
         print("telegram credentials saved")
         return 0
+    notify = cfg.setdefault("settings", {}).setdefault("notify", {})
+    if getattr(args, "set_ntfy", None):
+        url = args.set_ntfy.strip()
+        if not NT.http_url_ok(url):
+            print("that is not an http(s) topic URL")
+            return 2
+        notify["ntfy_url"] = url
+        if getattr(args, "ntfy_token", None):
+            notify["ntfy_token"] = args.ntfy_token.strip()
+        C.save_config(cfg)
+        print("ntfy topic saved")
+        return 0
+    if getattr(args, "set_webhook", None):
+        url = args.set_webhook.strip()
+        if not NT.http_url_ok(url):
+            print("that is not an http(s) URL")
+            return 2
+        notify["webhook_url"] = url
+        C.save_config(cfg)
+        print("webhook URL saved")
+        return 0
+    if getattr(args, "set_smtp", None):
+        if not (getattr(args, "smtp_to", None) or "").strip():
+            print("--set-smtp needs --smtp-to")
+            return 2
+        notify["smtp_host"] = args.set_smtp.strip()
+        notify["smtp_to"] = args.smtp_to.strip()
+        if getattr(args, "smtp_port", None):
+            notify["smtp_port"] = int(args.smtp_port)
+        for flag, key in (("smtp_user", "smtp_user"),
+                          ("smtp_password", "smtp_password"),
+                          ("smtp_from", "smtp_from")):
+            v = getattr(args, flag, None)
+            if v:
+                notify[key] = v.strip()
+        if getattr(args, "no_tls", False):
+            notify["smtp_tls"] = False
+        C.save_config(cfg)
+        print("email settings saved")
+        return 0
     url, on = NT._settings(cfg)
     tok, chat = NT._telegram(cfg)
+    nurl, ntok = NT._ntfy(cfg)
+    wh = NT._webhook(cfg)
+    smtp = NT._smtp(cfg)
     print("discord webhook : %s" % ("configured" if url else "NOT configured"))
     print("telegram        : %s" % ("configured" if (tok and chat)
                                     else "NOT configured"))
+    print("ntfy            : %s" % ("configured" if nurl else "NOT configured"))
+    print("webhook         : %s" % ("configured" if wh else "NOT configured"))
+    print("email           : %s"
+          % ("%s -> %s" % (smtp["host"], smtp["to"]) if smtp
+             else "NOT configured"))
     print("notify on       : %s" % on)
-    if not url and not (tok and chat):
+    problem = NT.problem(cfg)
+    if problem:
+        print("problem         : %s" % problem)
+    if not NT.channels(cfg):
         print("\nset one with:")
         print("  gitsync notify --set-url https://discord.com/api/webhooks/...")
         print("  gitsync notify --set-telegram BOTTOKEN --chat-id 12345")
+        print("  gitsync notify --set-ntfy https://ntfy.sh/my-topic")
+        print("  gitsync notify --set-webhook https://example.com/hook")
+        print("  gitsync notify --set-smtp smtp.example.com --smtp-to me@example.com")
     return 0
 
 
@@ -2659,7 +2752,9 @@ def main(argv=None):
                     help="rewrite SHA256SUMS after a release-worthy change")
     sp.set_defaults(func=cmd_ci)
 
-    sp = sub.add_parser("notify", help="Discord / Telegram notification settings")
+    sp = sub.add_parser("notify",
+                        help="Discord / Telegram / ntfy / webhook / email "
+                             "notification settings")
     sp.add_argument("--test", action="store_true", help="send a test message")
     sp.add_argument("--set-url", dest="set_url",
                     help="save a Discord webhook URL")
@@ -2667,6 +2762,23 @@ def main(argv=None):
                     help="save a Telegram bot token (needs --chat-id)")
     sp.add_argument("--chat-id", dest="chat_id",
                     help="Telegram chat id for --set-telegram")
+    sp.add_argument("--set-ntfy", dest="set_ntfy",
+                    help="save an ntfy topic URL (https://ntfy.sh/<topic>)")
+    sp.add_argument("--ntfy-token", dest="ntfy_token",
+                    help="access token for a protected ntfy topic")
+    sp.add_argument("--set-webhook", dest="set_webhook",
+                    help="save a generic JSON webhook URL")
+    sp.add_argument("--set-smtp", dest="set_smtp",
+                    help="save the SMTP host for email alerts")
+    sp.add_argument("--smtp-port", dest="smtp_port", type=int,
+                    help="SMTP port (default 587)")
+    sp.add_argument("--smtp-to", dest="smtp_to", help="recipient address")
+    sp.add_argument("--smtp-user", dest="smtp_user", help="SMTP username")
+    sp.add_argument("--smtp-password", dest="smtp_password",
+                    help="SMTP password (stored in the config, mode 0600)")
+    sp.add_argument("--smtp-from", dest="smtp_from", help="From address")
+    sp.add_argument("--no-tls", dest="no_tls", action="store_true",
+                    help="do not STARTTLS (plain relay on port 25)")
     sp.set_defaults(func=cmd_notify)
 
     sp = sub.add_parser("fix", help="detect drift and re-sync mismatched repos")

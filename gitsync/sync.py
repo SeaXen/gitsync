@@ -10,7 +10,9 @@ import fnmatch
 import json
 import os
 import re as _re
+import shlex
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -291,6 +293,11 @@ def sync_repo(repo, source, targets, mode, claimants=None, relax=False):
             return "clone-failed", _redact(err.strip())[:200], []
         P.run(["git", "remote", "set-url", "origin", clean_src_url], cwd=hub)
         _secure_hub_config(hub)
+
+    # LFS/submodule awareness: refs are synced either way, so this is a log
+    # line, not a failure — red runs people cannot fix train them to ignore
+    # red runs. A target clone missing its LFS blobs is still worth saying.
+    _note_extras(hub, name)
 
     # 2. push to each target
     pushed = []
@@ -740,6 +747,129 @@ def _filter_repos(repos, route, only=None):
     return repos
 
 
+def _wanted_names(only, only_map, rname):
+    """which repo names a route should keep in a selective run.
+
+    None means "no selection — sync everything on this route"; a list means
+    "only these", and an empty list means "this route has nothing to do".
+
+    only_map exists because `only` is a flat list of names: retrying route
+    A's failure used to re-run that name on every other route too (a repo
+    that is healthy on B got pushed again, and a missing one failed again).
+    The "*" key carries an explicit --repos choice, which does apply
+    everywhere.
+    """
+    if only_map is None:
+        return list(only) if only else None
+    return list(only_map.get(rname) or []) + list(only_map.get("*") or [])
+
+
+def _apply_route_skips(cfg, route, repos):
+    """drop repos the route asked to skip: forks, archived, empty.
+
+    Forks default to the global `include_forks` and a route may override it.
+    Archived repos are read-only on every supported host, so syncing one only
+    produces push failures (and a mesh cannot converge on it either). An empty
+    repo is only known for the local platform — no API reports "no commits" —
+    and is almost always a placeholder, so skipping is opt-in.
+
+    Returns (kept, {"fork": n, "archived": n, "empty": n}).
+    """
+    inc_forks = route.get("include_forks")
+    if inc_forks is None:
+        inc_forks = bool(C.setting(cfg, "include_forks", False))
+    skip_archived = route.get("skip_archived")
+    skip_archived = True if skip_archived is None else bool(skip_archived)
+    skip_empty = bool(route.get("skip_empty", False))
+    kept, skipped = [], {"fork": 0, "archived": 0, "empty": 0}
+    for r in repos:
+        if not inc_forks and r.get("fork"):
+            skipped["fork"] += 1
+            continue
+        if skip_archived and r.get("archived"):
+            skipped["archived"] += 1
+            continue
+        if skip_empty and r.get("empty"):
+            skipped["empty"] += 1
+            continue
+        kept.append(r)
+    return kept, skipped
+
+
+def _mirror_extras(hub):
+    """(needs_lfs, has_submodules) for one bare mirror.
+
+    gitsync mirrors refs, and that is all: LFS blobs and submodule
+    checkouts are separate object stores. A target clone then silently misses
+    the large files, which is worth one local `git ls-tree` per repo to say
+    out loud. The files are read out of HEAD, so nothing is checked out.
+    """
+    ls = P.run(["git", "ls-tree", "-r", "--name-only", "HEAD", "--",
+                ".gitattributes", ".gitmodules"], cwd=hub, timeout=30)
+    if ls[0] != 0:
+        return False, False
+    names = [l.strip() for l in (ls[1] or "").splitlines() if l.strip()]
+    lfs = False
+    if ".gitattributes" in names:
+        rc, text, _ = P.run(["git", "show", "HEAD:.gitattributes"],
+                            cwd=hub, timeout=30)
+        lfs = rc == 0 and "filter=lfs" in (text or "")
+    return lfs, ".gitmodules" in names
+
+
+def _note_extras(hub, name, say=None):
+    """warn about LFS/submodules, and fetch LFS objects when git-lfs exists"""
+    lfs, subs = _mirror_extras(hub)
+    if not (lfs or subs):
+        return []
+    notes = []
+    if lfs:
+        rc, _, _ = P.run(["git", "lfs", "version"], timeout=15)
+        if rc == 0:
+            rc2, _, err2 = P.run(["git", "lfs", "fetch", "--all"], cwd=hub,
+                                 timeout=P.GIT_TIMEOUT)
+            notes.append("LFS objects fetched" if rc2 == 0
+                         else "LFS fetch failed: %s"
+                              % _redact((err2 or "").strip())[:80])
+        else:
+            notes.append("uses Git LFS — install git-lfs to mirror the "
+                         "objects (refs are synced, blobs are not)")
+    if subs:
+        notes.append("has submodules — gitsync mirrors the refs, not the "
+                     "submodule working trees")
+    for n in notes:
+        (say or log)("  %-24s %s" % (name, n))
+    return notes
+
+
+def _run_hook(what, cmd, extra_env=None, timeout=300):
+    """run settings.hooks.pre/post. Returns (ok, message).
+
+    shlex.split, never shell=True: the config is a file a web session can
+    write, so a shell would turn "save settings" into remote code execution.
+    A hook that needs a pipeline can call a script of its own.
+    """
+    try:
+        argv = shlex.split(cmd or "")
+    except ValueError as e:
+        return False, "%s hook is not a valid command: %s" % (what, e)
+    if not argv:
+        return True, ""
+    env = os.environ.copy()
+    env.update({k: str(v) for k, v in (extra_env or {}).items()})
+    try:
+        r = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, env=env)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "%s hook could not run: %s" % (what, e)
+    if r.returncode != 0:
+        lines = [l for l in ((r.stderr or "") + "\n" + (r.stdout or ""))
+                 .splitlines() if l.strip()]
+        return False, "%s hook exited %d: %s" % (
+            what, r.returncode, _redact(lines[-1])[:160] if lines else "")
+    return True, ""
+
+
 def _remote_head(url, timeout=60, env=None):
     """HEAD sha of a remote, or None if unreachable / no refs"""
     clean_url, user, token = split_url_auth(url)
@@ -953,7 +1083,8 @@ def _short_error(err, limit=160):
 
 
 def run_sync(cfg=None, route_name=None, quiet=False, only=None,
-             dry_run=False, scheduled=False, force=False, prune_repos=False):
+             dry_run=False, scheduled=False, force=False, prune_repos=False,
+             only_map=None):
     """Run all routes (or one). Returns a summary dict.
 
     dry_run=True    computes what would change without touching anything.
@@ -964,6 +1095,10 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                     "prune_repos", every repository the source does not
                     have. Refused when scheduled: repo deletion is never
                     something an unattended timer decides.
+    only_map        {route name: [repo names]} — a selective run that keeps
+                    the scoping of a failure. `only` is by repo name alone, so
+                    retrying a failure on route A used to re-run the same
+                    name on every other route too.
     """
     global _start
     # one run at a time — the timer and manual runs must never overlap
@@ -1005,9 +1140,58 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                 "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "routes": 0, "skipped": "paused", "paused": True}
 
+    def _finish_lock():
+        if fcntl:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_UN)
+            except OSError:
+                pass
+        try:
+            lockf.close()
+        except OSError:
+            pass
+
+    def _bail(reason, message):
+        """stop before anything was touched, and record why.
+
+        A blocked run is not a silent no-op: it goes into records.json (so
+        the dashboard and history show it), pages the notification channel,
+        and makes the CLI exit non-zero — the timer's mail is the only alarm
+        a headless box has.
+        """
+        log(message)
+        totals = {"repos": 0, "ok": 0, "partial": 0, "failed": 0,
+                  "failures": [], "elapsed_sec": 0,
+                  "finished_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                  "routes": 0, "skipped": reason, "blocked": reason,
+                  "error": message}
+        _record(totals)
+        try:
+            if NT.channels(cfg):
+                NT.notify_run(cfg, totals, routes=None)
+        except Exception:
+            pass
+        _finish_lock()
+        return totals
+
+    # A full disk corrupts a mirror half-way through a fetch; stopping with a
+    # sentence beats a confusing git error on every run afterwards.
+    min_free = float(C.setting(cfg, "min_free_gb", 0.5) or 0)
+    if not dry_run and min_free > 0:
+        ok_disk, disk_msg = DK.guard(C.MIRROR_DIR, min_free_gb=min_free)
+        if not ok_disk:
+            return _bail("disk", "sync blocked: " + disk_msg)
+
+    hooks = C.setting(cfg, "hooks", {}) or {}
+    pre_hook = (hooks.get("pre") or "").strip()
+    post_hook = (hooks.get("post") or "").strip()
+    if pre_hook and not dry_run:
+        ok_hook, hook_msg = _run_hook("pre", pre_hook)
+        if not ok_hook:
+            return _bail("hook", "sync blocked — " + hook_msg)
+
     _start = time.time()
     reset_progress()
-    include_forks = bool(C.setting(cfg, "include_forks", False))
     pace = float(C.setting(cfg, "pace", 0) or 0)
     # changing branch protection is a lasting security change on a
     # destination; it is opt-in (P1-2)
@@ -1023,6 +1207,13 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
 
     for route in selected:
         rname = route.get("name")
+        # decided before any network call: a retry run must not list (or
+        # push) a route that had no failure in the first place
+        want = _wanted_names(only, only_map, rname)
+        if want == []:
+            log("route '%s': nothing to retry — skipped" % rname)
+            totals["skipped"] = totals.get("skipped", 0) + 1
+            continue
         if route.get("enabled") is False:
             log("route '%s': paused — skipped" % rname)
             totals["skipped"] = totals.get("skipped", 0) + 1
@@ -1084,6 +1275,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                 % (rname, sname, ", ".join(targets), workers, mode_note,
                    ", DRY RUN" if dry_run else ""))
         progress["route"] = rname
+        _rt_before = (totals["ok"], totals["partial"], totals["failed"])
         try:
             repos = source.list_repos()
         except Exception as e:
@@ -1096,7 +1288,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             continue
         if not dry_run:
             mark_route_run(route)
-        repos = _filter_repos(repos, route, only)
+        repos = _filter_repos(repos, route, want)
         # legacy-collision guard: two repos whose short names are equal would
         # both claim mirrors/{name}.git and mix two histories into one mirror
         claims = {}
@@ -1128,9 +1320,11 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                 for r in rs:
                     bad.add(id(r))
             repos = [r for r in repos if id(r) not in bad]
-        if not include_forks:
-            # best-effort fork filter (platforms that expose it)
-            repos = [r for r in repos if not r.get("fork", False)]
+        repos, skipped = _apply_route_skips(cfg, route, repos)
+        if any(skipped.values()):
+            log("  skipped: %s"
+                % ", ".join("%d %s" % (n, k) for k, n in sorted(skipped.items())
+                            if n))
         totals["repos"] += len(repos)
         log("  %s: %d repos" % ("mesh" if mesh else sname, len(repos)))
 
@@ -1223,6 +1417,14 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
         if prune_repos:
             _prune_route_repos(cfg, route, repos, dry_run, totals)
 
+        # per-route counters: notifications and the UI both need to know
+        # WHICH route failed, not just how many repos did
+        totals.setdefault("per_route", {})[rname] = {
+            "ok": totals["ok"] - _rt_before[0],
+            "partial": totals["partial"] - _rt_before[1],
+            "failed": totals["failed"] - _rt_before[2],
+        }
+
     elapsed = round(time.time() - _start, 1)
     totals["elapsed_sec"] = elapsed
     totals["finished_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1237,9 +1439,24 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             % (totals["ok"], totals["partial"], totals["failed"],
                totals["repos"], elapsed))
     _record(totals)
+    if post_hook and not dry_run:
+        ok_hook, hook_msg = _run_hook("post", post_hook, {
+            "GITSYNC_OK": totals.get("ok", 0),
+            "GITSYNC_PARTIAL": totals.get("partial", 0),
+            "GITSYNC_FAILED": totals.get("failed", 0),
+            "GITSYNC_REPOS": totals.get("repos", 0),
+            "GITSYNC_ELAPSED": totals.get("elapsed_sec", 0),
+            "GITSYNC_FINISHED": totals.get("finished_at", ""),
+        })
+        if not ok_hook:
+            # the sync itself succeeded; a broken post hook must not change
+            # the exit code of a backup that worked
+            log("  " + hook_msg)
     try:
-        if NT.enabled(cfg):
-            NT.notify_run(cfg, totals)
+        if NT.channels(cfg):
+            # per-route rules: a route set to notify_on:never stays silent, a
+            # route set to always pages even when the global mode is failure
+            NT.notify_run(cfg, totals, routes=selected)
     except Exception as e:
         log("  notification failed: %s" % e)
     if fcntl:

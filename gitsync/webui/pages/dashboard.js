@@ -43,12 +43,16 @@
       var s = document.getElementById("dash-sub");
       if (s) s.textContent = G.apiError(e);
     });
-    G.api("GET", "/api/platforms").then(fillPlatforms).catch(fillPlatErr);
+    G.api("GET", "/api/platforms").then(function (d) {
+      fillPlatforms(d); WIZ.plats = d.platforms || []; wizardCheck();
+    }).catch(fillPlatErr);
     G.api("GET", "/api/history?n=40").then(fillLastRun).catch(function (e) {
       fillLastRun({ error: e });
     });
     G.api("GET", "/api/health").then(fillHealth).catch(fillHealthErr);
-    G.api("GET", "/api/routes").then(fillRoutes).catch(function () {});
+    G.api("GET", "/api/routes").then(function (d) {
+      fillRoutes(d); WIZ.routes = d.routes || []; wizardCheck();
+    }).catch(function () {});
     G.api("GET", "/api/log?tail=60").then(fillLog).catch(function (e) {
       fillLog({ error: e });
     });
@@ -409,6 +413,7 @@
           '<span class="muted" id="sync-pct">0%</span></div>' +
         '<div class="progress"><span id="sync-fill" class="u-w0"></span></div>' +
       "</section>" +
+      '<div id="wizard-host"></div>' +
       '<div class="grid">' +
         '<section class="card"><p class="label" id="plats-label">Platforms</p>' +
           '<div class="stack" id="plats-body">' + G.loading() + "</div></section>" +
@@ -438,6 +443,231 @@
         "On this page: <b>Sync now</b> and <b>Dry run</b> are in the top bar, " +
         "<b>Pause</b> suspends every run, and each panel has a minimise button.</p>" +
       "</section>";
+
+
+  // ---- first-run wizard ------------------------------------------------
+  // Four steps, all driven by the same API the individual pages use: add two
+  // sites, connect them, pick (or take all) repos, preview, then sync. It
+  // only appears while the config has no routes, so an existing setup never
+  // sees it; "Hide" remembers that for the rest of the browser session.
+  var WIZ = { plats: null, routes: null, log: null };
+  var TYPES = ["github", "gitlab", "forgejo", "gitea", "bitbucket", "local"];
+
+  function wizardHost() { return document.getElementById("wizard-host"); }
+
+  function wizardCheck() {
+    var host = wizardHost();
+    if (!host) return;
+    if (!WIZ.plats || !WIZ.routes) return;
+    try {
+      if (sessionStorage.getItem("gs-wizard-off") === "1") { host.innerHTML = ""; return; }
+    } catch (e) { /* private mode */ }
+    if (WIZ.routes.length) {
+      host.innerHTML = "";
+      return;
+    }
+    renderWizard();
+  }
+
+  function wizErr(e) { G.toast(G.apiError(e), "bad"); }
+
+  function renderWizard() {
+    var host = wizardHost();
+    if (!host) return;
+    var live = (WIZ.plats || []).filter(function (p) { return p.enabled; });
+    var names = live.map(function (p) { return p.name; });
+    var ready = live.length >= 2;
+    var html = '<section class="card" id="wizard-card"><div class="bar"><div>' +
+      '<span class="route-title">First run — four steps to a working backup</span>' +
+      '<div class="muted sub">Add two sites, connect them, pick repos, preview, sync. ' +
+      'Nothing is pushed until the last step.</div></div>' +
+      '<div class="actions"><button class="btn sm ghost" id="wiz-hide" type="button">Hide</button></div></div>' +
+
+      '<div class="stack mt">' +
+      '<div><b>1. Sites</b> ' + (ready
+        ? '<span class="chip ok">' + names.join(" + ") + "</span>"
+        : '<span class="muted">— add at least two (a source and a target)</span>') + "</div>" +
+      (ready ? "" :
+        '<div class="form-grid mt">' +
+        G.field("Type", G.select("wiz-type", "github", TYPES)) +
+        G.field("Name", '<input type="text" id="wiz-name" spellcheck="false" placeholder="github…">', "short, used in routes") +
+        G.field("Token", '<input type="password" id="wiz-token" autocomplete="off" spellcheck="false" placeholder="paste a token…">', "write-only; skipped for a local folder") +
+        G.field("Folder", '<input type="text" id="wiz-path" spellcheck="false" placeholder="/path/to/bare/repos (type=local)…">') +
+        "</div>" +
+        '<div class="actions mt"><button class="btn primary" id="wiz-add" type="button">Add site</button>' +
+        '<span class="muted" id="wiz-add-status"></span></div>') +
+
+      '<div class="mt"><b>2. Route</b> ' + (WIZ.routes.length
+        ? '<span class="chip ok">' + G.esc(WIZ.routes[0].name) + "</span>"
+        : '<span class="muted">— pick which site is copied to which</span>') + "</div>" +
+      (WIZ.routes.length ? "" : ready ?
+        '<div class="form-grid mt">' +
+        G.field("Source (truth)", G.select("wiz-src", names[0], names)) +
+        '<div class="field"><label>Targets</label><div class="u-col6">' +
+          names.map(function (n, i) {
+            return '<label class="check"><input type="checkbox" class="wiz-t" value="' +
+              G.esc(n) + '"' + (i === 1 ? " checked" : "") + "> " + G.esc(n) + "</label>";
+          }).join("") + "</div></div></div>" +
+        '<div class="actions mt"><button class="btn primary" id="wiz-route" type="button">Create route</button></div>'
+        : '<div class="muted u-fs125">Add your second site above first.</div>') +
+
+      '<div class="mt"><b>3. Repos</b> <span class="muted">— optional: copy everything, or tick what you want</span></div>' +
+      (WIZ.routes.length ?
+        '<div class="actions mt"><button class="btn" id="wiz-repos" type="button">List repos</button>' +
+        '<button class="btn ghost" id="wiz-skiprepos" type="button">Take all of them</button></div>' +
+        '<div id="wiz-repo-list" class="stack mt"></div>'
+        : '<div class="muted u-fs125">Create the route first.</div>') +
+
+      '<div class="mt"><b>4. Preview, then sync</b> <span class="muted">— a dry run changes nothing</span></div>' +
+      (WIZ.routes.length ?
+        '<div class="actions mt"><button class="btn" id="wiz-preview" type="button">Preview</button>' +
+        '<button class="btn primary" id="wiz-sync" type="button">Run first sync</button></div>'
+        : '<div class="muted u-fs125">Preview unlocks once the route exists.</div>') +
+      '<div class="viewer mt hide" id="wiz-log" role="log" aria-live="polite"></div>' +
+      "</div></section>";
+    host.innerHTML = html;
+
+    document.getElementById("wiz-hide").addEventListener("click", function () {
+      try { sessionStorage.setItem("gs-wizard-off", "1"); } catch (e) {}
+      host.innerHTML = "";
+    });
+    var add = document.getElementById("wiz-add");
+    if (add) add.addEventListener("click", function () {
+      G.busy(add, function () { return wizAdd(); });
+    });
+    var r = document.getElementById("wiz-route");
+    if (r) r.addEventListener("click", function () { G.busy(r, function () { return wizRoute(); }); });
+    var rl = document.getElementById("wiz-repos");
+    if (rl) rl.addEventListener("click", function () { G.busy(rl, function () { return wizListRepos(); }); });
+    var sk = document.getElementById("wiz-skiprepos");
+    if (sk) sk.addEventListener("click", function () {
+      G.api("PUT", "/api/routes/" + encodeURIComponent(WIZ.routes[0].name),
+        { clear_filters: true }).then(function () {
+          G.toast("every repo on the source will be copied", "ok");
+          wizSync(true);
+        }).catch(wizErr);
+    });
+    var pv = document.getElementById("wiz-preview");
+    if (pv) pv.addEventListener("click", function () { G.busy(pv, function () { return wizSync(true); }); });
+    var sy = document.getElementById("wiz-sync");
+    if (sy) sy.addEventListener("click", function () {
+      return G.modalConfirm({
+        title: "Run the first sync",
+        message: "This pushes mirrors to your target site. It never deletes anything in safe mode.",
+        confirmText: "Sync now"
+      }).then(function (ok) { if (ok) return wizSync(false); });
+    });
+  }
+
+  function wizAdd() {
+    var t = document.getElementById("wiz-type").value;
+    var body = { type: t, name: (document.getElementById("wiz-name").value || "").trim() };
+    if (!body.name) { G.toast("give the site a short name", "warn"); return Promise.resolve(); }
+    if (t === "local") {
+      body.path = (document.getElementById("wiz-path").value || "").trim();
+    } else {
+      var tok = (document.getElementById("wiz-token").value || "").trim();
+      if (tok) body.token = tok;
+    }
+    var st = document.getElementById("wiz-add-status");
+    return G.api("POST", "/api/platforms", body).then(function (d) {
+      var ok = !(d.test && d.test.ok === false);
+      G.toast("added " + body.name + (ok ? "" : " — test failed: " +
+        ((d.test && d.test.info) || "")), ok ? "ok" : "warn");
+      return G.api("GET", "/api/platforms");
+    }).then(function (d) {
+      WIZ.plats = d.platforms || [];
+      renderWizard();
+      var s2 = document.getElementById("wiz-add-status");
+      if (s2) s2.textContent = "added — add one more site";
+    }).catch(function (e) {
+      if (st) st.textContent = "";
+      wizErr(e);
+    });
+  }
+
+  function wizRoute() {
+    var targets = Array.prototype.slice.call(
+      document.querySelectorAll(".wiz-t:checked")).map(function (c) { return c.value; });
+    var body = { name: "main", source: document.getElementById("wiz-src").value,
+                 targets: targets };
+    return G.api("POST", "/api/routes", body).then(function () {
+      G.toast("route main created", "ok");
+      return G.api("GET", "/api/routes");
+    }).then(function (d) {
+      WIZ.routes = d.routes || [];
+      renderWizard();
+    }).catch(wizErr);
+  }
+
+  function wizListRepos() {
+    var name = WIZ.routes[0].name;
+    var host = document.getElementById("wiz-repo-list");
+    host.innerHTML = G.loading("listing repos…");
+    return G.api("GET", "/api/repos?platform=" +
+      encodeURIComponent(WIZ.routes[0].source)).then(function (d) {
+      var rows = d.repos || [];
+      if (!rows.length) {
+        host.innerHTML = '<div class="muted">No repos found on the source — ' +
+          "check the token, or use a local folder that holds bare repos.</div>";
+        return;
+      }
+      host.innerHTML = '<div class="muted u-fs125">' + rows.length +
+        " repos — untick any you do not want:</div>" +
+        '<div class="u-col6 u-mt8">' + rows.map(function (r) {
+          return '<label class="check"><input type="checkbox" class="wiz-repo" value="' +
+            G.esc(r.name) + '" checked> ' + G.esc(r.name) +
+            (r.private ? ' <span class="chip">private</span>' : "") + "</label>";
+        }).join("") + "</div>" +
+        '<div class="actions mt"><button class="btn primary" id="wiz-saverepos" type="button">' +
+        "Save selection</button></div>";
+      document.getElementById("wiz-saverepos").addEventListener("click", function () {
+        var inc = Array.prototype.slice.call(
+          document.querySelectorAll(".wiz-repo:checked")).map(function (c) { return c.value; });
+        if (!inc.length) { G.toast("tick at least one repo, or use Take all", "warn"); return; }
+        G.api("PUT", "/api/routes/" + encodeURIComponent(name), { include: inc })
+          .then(function () {
+            G.toast(inc.length + " repos selected", "ok");
+            return wizSync(true);
+          }).catch(wizErr);
+      });
+    }).catch(function (e) {
+      host.innerHTML = G.errorBox(e);
+    });
+  }
+
+  function wizSync(dry) {
+    var log = document.getElementById("wiz-log");
+    if (log) { log.classList.remove("hide"); log.innerHTML = ""; }
+    return G.api("POST", "/api/sync", { dry_run: !!dry, route: WIZ.routes[0].name })
+      .then(function (r) {
+        if (log) {
+          log.innerHTML = '<div class="muted"><span class="spinner"></span>' +
+            (dry ? "previewing…" : "syncing…") + "</div>";
+        }
+        G.watchJob("/api/sync/stream?job_id=" + encodeURIComponent(r.job_id), {
+          onLine: function (line, cls) {
+            if (!log) return;
+            var div = document.createElement("div");
+            div.className = cls; div.textContent = line;
+            log.appendChild(div); log.scrollTop = log.scrollHeight;
+          },
+          onDone: function (d) {
+            G.toast((dry ? "preview" : "first sync") +
+              (d.exit === 0 ? " finished" : " finished with errors"),
+              d.exit === 0 ? "ok" : "bad");
+            if (!dry && d.exit === 0 && log) {
+              log.appendChild(document.createElement("div")).textContent =
+                "✓ done — this route is now on the timer; the dashboard shows the next run.";
+            }
+            refresh();
+          }
+        });
+      }).catch(function (e) {
+        if (e && e.status === 409) G.toast(e.error || "a sync is already running", "warn");
+        else wizErr(e);
+      });
+  }
 
     refresh();
     G.onSync(function (jobId) { attachSync(jobId); });

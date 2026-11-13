@@ -71,9 +71,24 @@ DEFAULT_CONFIG = {
         "mesh_conflict": "skip", # newest | skip
         "schedule": "hourly",    # hourly | 6h | 12h | daily | off
         "include_forks": False,
-        "notify": {              # Discord webhook alerts
+        # refuse to start a sync when the mirror disk has less than this free
+        # (0 disables); settings.hooks.pre/post run before/after a real run
+        "min_free_gb": 0.5,
+        "hooks": {"pre": "", "post": ""},
+        # One or more channels; any that are filled in are used. Everything
+        # here is standard library: urllib for HTTP, smtplib for mail.
+        "notify": {
             "discord_webhook": "",
-            "on": "failure",     # failure | success | always | never
+            "telegram_token": "",
+            "telegram_chat_id": "",
+            "ntfy_url": "",       # https://ntfy.sh/<private-topic>
+            "ntfy_token": "",
+            "webhook_url": "",    # receives {"title","text","fields",...}
+            "smtp_host": "", "smtp_port": 587,
+            "smtp_user": "", "smtp_password": "",
+            "smtp_from": "", "smtp_to": "",
+            "smtp_tls": True,
+            "on": "failure",      # failure | success | always | never
         },
     },
 }
@@ -351,7 +366,11 @@ _PLATFORM_SECRETS = ("token", "password", "api_key", "app_password",
 
 def _looks_secret(key):
     k = str(key).lower()
-    # discord_webhook is a credential: anyone holding it can post as us
+    # discord_webhook is a credential: anyone holding it can post as us.
+    # A generic webhook URL (Slack, Gotify, n8n) usually embeds its own token,
+    # and an ntfy topic name is the only thing protecting the subscription.
+    if k in ("webhook_url", "ntfy_url"):
+        return True
     return k in _PLATFORM_SECRETS or k.endswith("_token") or \
         k.endswith("_secret") or k.endswith("_password") or \
         k.endswith("_webhook")
@@ -457,8 +476,11 @@ def import_config(path, cfg=None, replace=False):
             needs_token.append(name)
     notify = (merged.setdefault("settings", {}).setdefault("notify", {}))
     old_notify = (current.get("settings") or {}).get("notify") or {}
-    for key in ("discord_webhook", "telegram_token", "telegram_chat_id"):
-        if not notify.get(key) and old_notify.get(key) and not replace:
+    # every notify key that holds a credential (a URL can embed one) is
+    # carried over from the live config when the incoming file left it blank
+    for key in list(old_notify):
+        if (_looks_secret(key) and not notify.get(key)
+                and old_notify.get(key) and not replace):
             notify[key] = old_notify[key]
             kept.append("settings.notify.%s" % key)
 

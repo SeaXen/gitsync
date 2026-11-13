@@ -46,16 +46,33 @@
         '<div class="muted mt u-fs125">Uses the Schedule chosen in Options above. Runs <span class="mono">gitsync sync --scheduled</span> on a systemd timer (or cron).</div>' +
         "</section>" +
 
-      '<section class="card"><div class="bar"><span class="route-title">Notifications</span>' +
+      '<section class="card" id="notify-card"><div class="bar"><span class="route-title">Notifications</span>' +
         '<div class="actions">' +
         '<button class="btn sm" id="n-clear-discord" title="Remove the stored Discord webhook">Clear Discord</button>' +
         '<button class="btn sm" id="n-clear-telegram" title="Remove the stored Telegram token">Clear Telegram</button>' +
+        '<button class="btn sm" id="n-clear-ntfy" title="Remove the stored ntfy topic">Clear ntfy</button>' +
+        '<button class="btn sm" id="n-clear-webhook" title="Remove the stored webhook URL">Clear webhook</button>' +
+        '<button class="btn sm" id="n-clear-smtp" title="Remove the stored mail settings">Clear email</button>' +
         '<button class="btn" id="notify-test">Send Test</button></div></div>' +
+        '<div class="muted mt" id="n-state">—</div>' +
         '<div class="form-grid mt">' +
-        f("Notify on", G.select("n-on", "", ["failure", "success", "always", "never"])) +
+        f("Notify on", G.select("n-on", "", ["failure", "success", "always", "never"]),
+          "Global default. A route can override it in Routes → Edit.") +
         f("Discord webhook", '<input type="password" id="n-discord" name="discord_webhook" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "write-only; validated on save") +
         f("Telegram bot token", '<input type="password" id="n-tgtoken" name="telegram_token" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "write-only") +
         f("Telegram chat id", '<input type="text" id="n-tgchat" name="telegram_chat_id" placeholder="required with token…">') +
+        f("ntfy topic URL", '<input type="password" id="n-ntfy" name="ntfy_url" autocomplete="off" spellcheck="false" placeholder="https://ntfy.sh/my-topic…">',
+          "Push to your phone. Use a private topic, or set a token below.") +
+        f("ntfy access token", '<input type="password" id="n-ntfytoken" name="ntfy_token" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "optional; only for protected topics") +
+        f("Webhook URL", '<input type="password" id="n-webhook" name="webhook_url" autocomplete="off" spellcheck="false" placeholder="https://example.com/hooks/gitsync…">',
+          "POSTs JSON: title, text, color, fields, version") +
+        f("Mail server", '<input type="text" id="n-smtphost" name="smtp_host" spellcheck="false" placeholder="smtp.example.com…">', "SMTP host for email alerts") +
+        f("Mail port", '<input type="number" id="n-smtpport" name="smtp_port" value="587" min="1" max="65535" inputmode="numeric">', "587 (STARTTLS) or 25") +
+        f("Mail username", '<input type="text" id="n-smtpuser" name="smtp_user" autocomplete="off" spellcheck="false" placeholder="optional…">') +
+        f("Mail password", '<input type="password" id="n-smtppass" name="smtp_password" autocomplete="off" spellcheck="false" placeholder="leave blank to keep…">', "write-only") +
+        f("Mail from", '<input type="text" id="n-smtpfrom" name="smtp_from" spellcheck="false" placeholder="gitsync@example.com…">', "defaults to the username") +
+        f("Mail to", '<input type="text" id="n-smtpto" name="smtp_to" spellcheck="false" placeholder="you@example.com…">', "comma-separated is allowed") +
+        f("Mail STARTTLS", '<label class="check"><input type="checkbox" id="n-smtptls" name="smtp_tls"> Use STARTTLS</label>', "On for port 587; off for a plain relay") +
         "</div></section>" +
 
       '<section class="card"><div class="bar"><span class="route-title">Webhook receiver</span>' +
@@ -78,6 +95,9 @@
     document.getElementById("notify-test").addEventListener("click", notifyTest);
     document.getElementById("n-clear-discord").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["discord"]); }); });
     document.getElementById("n-clear-telegram").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["telegram"]); }); });
+    document.getElementById("n-clear-ntfy").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["ntfy"]); }); });
+    document.getElementById("n-clear-webhook").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["webhook"]); }); });
+    document.getElementById("n-clear-smtp").addEventListener("click", function () { G.busy(this, function () { return clearNotify(["smtp"]); }); });
     document.getElementById("s-apptheme").addEventListener("change", function () {
       G.setTheme(this.value);
     });
@@ -177,6 +197,16 @@
         f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "The timer fires at the finest route schedule") +
         f("Include forks", '<label class="check"><input type="checkbox" id="s-forks" name="include_forks"' + (S.include_forks ? " checked" : "") + "> Mirror forked repos</label>", "Include repositories you have forked") +
         f("Pause between repos", G.select("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "Seconds — spare laptop heat / disk") +
+        f("Keep free disk", G.select("s-minfree", S.min_free_gb === undefined ? 0.5 : S.min_free_gb,
+          [{ v: 0, l: "no guard" }, { v: 0.25, l: "250 MB" }, { v: 0.5, l: "500 MB" },
+           { v: 1, l: "1 GB" }, { v: 2, l: "2 GB" }, { v: 5, l: "5 GB" }, { v: 10, l: "10 GB" }]),
+          "Refuse to start a sync below this much free space on the mirror disk. A full disk corrupts a half-written mirror.") +
+        f("Before sync", '<input type="text" id="s-hookpre" spellcheck="false" placeholder="e.g. /usr/local/bin/wake-nas…" value="' +
+          G.esc((S.hooks && S.hooks.pre) || "") + '">',
+          "Optional command, run before a real sync. No shell: quote arguments as on a command line. A non-zero exit stops the sync.") +
+        f("After sync", '<input type="text" id="s-hookpost" spellcheck="false" placeholder="e.g. /usr/local/bin/notify-nas…" value="' +
+          G.esc((S.hooks && S.hooks.post) || "") + '">',
+          "Optional command after a real sync. Gets GITSYNC_OK, GITSYNC_FAILED, GITSYNC_PARTIAL, GITSYNC_ELAPSED in its environment.") +
         f("Token warning", G.select("s-warn", S.token_warn_days || 30, [7, 14, 30, 60, 90]), "Days before a credential warns") +
         f("TUI theme", G.select("s-theme", S.theme, (S.themes || [])), "Colours the terminal TUI only") +
         f("Trusted proxies",
@@ -186,6 +216,28 @@
         f("Relax protection", '<label class="check danger-check"><input type="checkbox" id="s-relax" name="relax_protection"' + (S.relax_protection ? " checked" : "") + "> Allow force-push over branch protection</label>", "Advanced: allows overwriting protected branches. Off by default.");
       document.getElementById("sched-status").textContent = S.scheduler || "—";
       document.getElementById("n-on").value = (S.notify && S.notify.on) || "failure";
+      var N = S.notify || {};
+      document.getElementById("n-ntfy").value = "";
+      document.getElementById("n-ntfytoken").value = "";
+      document.getElementById("n-webhook").value = "";
+      document.getElementById("n-smtphost").value = N.smtp_host || "";
+      document.getElementById("n-smtpport").value = N.smtp_port || 587;
+      document.getElementById("n-smtpuser").value = N.smtp_user || "";
+      document.getElementById("n-smtppass").value = "";
+      document.getElementById("n-smtpfrom").value = N.smtp_from || "";
+      document.getElementById("n-smtpto").value = N.smtp_to || "";
+      document.getElementById("n-smtptls").checked = N.smtp_tls !== false;
+      var nstate = document.getElementById("n-state");
+      if (N.problem) {
+        nstate.textContent = "⚠ " + N.problem;
+        nstate.className = "mt l-bad";
+      } else if ((N.channels || []).length) {
+        nstate.textContent = "Active: " + N.channels.join(", ");
+        nstate.className = "mt l-ok";
+      } else {
+        nstate.textContent = "No channel configured — nothing is sent.";
+        nstate.className = "mt muted";
+      }
       document.getElementById("paths").innerHTML =
         "config " + G.esc(S.paths.config) + "<br>mirrors " + G.esc(S.paths.mirror) +
         "<br>log " + G.esc(S.paths.log) + "<br>data " + G.esc(S.paths.data);
@@ -253,6 +305,9 @@
       theme: document.getElementById("s-theme").value,
       trusted_proxies: document.getElementById("s-proxies").value,
       relax_protection: document.getElementById("s-relax").checked,
+      min_free_gb: document.getElementById("s-minfree").value,
+      hook_pre: document.getElementById("s-hookpre").value.trim(),
+      hook_post: document.getElementById("s-hookpost").value.trim(),
       on: document.getElementById("n-on").value
     };
     var dv = document.getElementById("n-discord").value.trim();
@@ -260,12 +315,30 @@
     var tv = document.getElementById("n-tgtoken").value.trim();
     var cv = document.getElementById("n-tgchat").value.trim();
     if (tv) { body.telegram_token = tv; body.telegram_chat_id = cv; }
+    var nv = document.getElementById("n-ntfy").value.trim();
+    if (nv) body.ntfy_url = nv;
+    var ntv = document.getElementById("n-ntfytoken").value.trim();
+    if (ntv) body.ntfy_token = ntv;
+    var wv = document.getElementById("n-webhook").value.trim();
+    if (wv) body.webhook_url = wv;
+    body.smtp_host = document.getElementById("n-smtphost").value.trim();
+    body.smtp_port = document.getElementById("n-smtpport").value;
+    body.smtp_user = document.getElementById("n-smtpuser").value.trim();
+    body.smtp_from = document.getElementById("n-smtpfrom").value.trim();
+    body.smtp_to = document.getElementById("n-smtpto").value.trim();
+    body.smtp_tls = document.getElementById("n-smtptls").checked;
+    var spv = document.getElementById("n-smtppass").value.trim();
+    if (spv) body.smtp_password = spv;
     return G.api("PUT", "/api/settings", body).then(function () {
       G.toast("settings saved", "ok");
       var dirtyPill = document.getElementById("settings-dirty");
       if (dirtyPill) dirtyPill.classList.add("hide");
       document.getElementById("n-discord").value = "";
       document.getElementById("n-tgtoken").value = "";
+      document.getElementById("n-ntfy").value = "";
+      document.getElementById("n-ntfytoken").value = "";
+      document.getElementById("n-webhook").value = "";
+      document.getElementById("n-smtppass").value = "";
       G.refreshStatus();
     }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }

@@ -198,6 +198,21 @@
         ? G.field("Conflicts", G.select("e-conflict", r.mesh_conflict || "inherit", ["inherit", "newest", "skip"]))
         : "") +
       G.field("Schedule", G.select("e-schedule", r.schedule || "inherit", SCHED)) +
+      G.field("Notify on", G.select("e-notify", r.notify_on || "inherit",
+        ["inherit", "failure", "success", "always", "never"]),
+        "Overrides the global Notification mode for this route only") +
+      G.field("Forked repos", G.select("e-forks",
+        r.include_forks === null || r.include_forks === undefined ? "inherit"
+          : (r.include_forks ? "include" : "skip"),
+        ["inherit", "include", "skip"])) +
+      '<div class="field"><label>Skip partners</label><div class="u-col6">' +
+        '<label class="check"><input type="checkbox" id="e-archived"' +
+          (r.skip_archived === false ? "" : " checked") +
+          "> Skip archived repos (read-only on every host)</label>" +
+        '<label class="check"><input type="checkbox" id="e-empty"' +
+          (r.skip_empty ? " checked" : "") +
+          "> Skip empty repos (local folders with no commits)</label>" +
+        "</div></div>" +
       '<div class="field"><label>Delete extra repos</label>' +
         '<div class="u-col6">' +
         r.targets.map(function (t) {
@@ -230,6 +245,11 @@
       if (inc !== origInc) body.include = splitList(inc);
       if (exc !== origExc) body.exclude = splitList(exc);
       if (r.direction === "mesh") body.mesh_conflict = document.getElementById("e-conflict").value;
+      body.notify_on = document.getElementById("e-notify").value;
+      var fk = document.getElementById("e-forks").value;
+      body.include_forks = fk === "inherit" ? "inherit" : (fk === "include");
+      body.skip_archived = document.getElementById("e-archived").checked;
+      body.skip_empty = document.getElementById("e-empty").checked;
       body.prune_repos = Array.prototype.slice.call(
         panel.querySelectorAll("input[name=prune_repos]:checked"))
         .map(function (c) { return c.value; });

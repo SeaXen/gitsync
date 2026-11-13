@@ -1115,6 +1115,175 @@ class TestNotifyChannels(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class TestNotifyExtras(unittest.TestCase):
+    """ntfy / generic webhook / email, and per-route notify rules.
+
+    Nothing here touches the network: the transport is patched, so these
+    assert the decision ("should this channel fire, and with what text"),
+    not that a third-party service is reachable.
+    """
+
+    def test_channels_only_counts_complete_configs(self):
+        self.assertEqual(NT.channels({"settings": {"notify": {}}}), [])
+        self.assertEqual(NT.channels({"settings": {"notify": {
+            "ntfy_url": "https://ntfy.sh/x"}}}), ["ntfy"])
+        self.assertEqual(NT.channels({"settings": {"notify": {
+            "telegram_token": "T"}}}), [])           # no chat id -> not a channel
+        self.assertEqual(NT.channels({"settings": {"notify": {
+            "smtp_host": "h", "smtp_to": "a@b"}}}), ["smtp"])
+        self.assertEqual(NT.channels({"settings": {"notify": {
+            "webhook_url": "https://x/hook"}}}), ["webhook"])
+
+    def test_problem_names_a_half_configured_channel(self):
+        self.assertIn("chat id", NT.problem({"settings": {"notify": {
+            "telegram_token": "T"}}}))
+        self.assertIn("recipient", NT.problem({"settings": {"notify": {
+            "smtp_host": "h"}}}))
+        self.assertEqual(NT.problem({"settings": {"notify": {
+            "smtp_host": "h", "smtp_to": "a@b"}}}), "")
+
+    def test_urls_must_be_http_with_a_host(self):
+        for bad in ("", "ntfy.sh/x", "ftp://x/y", "https://"):
+            self.assertFalse(NT.http_url_ok(bad), bad)
+        for good in ("https://ntfy.sh/x", "http://10.0.0.5:8080/topic"):
+            self.assertTrue(NT.http_url_ok(good), good)
+
+    def test_ntfy_send_sets_the_title_header_and_token(self):
+        seen = {}
+
+        def fake(url, data, headers=None, method="POST"):
+            seen.update(url=url, data=data, headers=headers)
+            return True
+
+        cfg = {"settings": {"notify": {"ntfy_url": "https://ntfy.sh/topic",
+                                       "ntfy_token": "tk"}}}
+        orig = NT._post_raw
+        NT._post_raw = fake
+        try:
+            self.assertTrue(NT.ntfy_send(cfg, "title", "body"))
+        finally:
+            NT._post_raw = orig
+        self.assertEqual(seen["headers"]["Title"], "title")
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer tk")
+        self.assertEqual(seen["data"], b"body")
+
+    def test_webhook_payload_is_json_and_names_gitsync(self):
+        seen = {}
+        orig = NT._post_json
+        NT._post_json = lambda url, payload, headers=None: seen.update(
+            url=url, payload=payload) or True
+        try:
+            NT.webhook_send({"settings": {"notify": {
+                "webhook_url": "https://x/y"}}}, "t",
+                [("Repos synced", "3 ok", True)], color="warn")
+        finally:
+            NT._post_json = orig
+        self.assertEqual(seen["payload"]["source"], "gitsync")
+        self.assertEqual(seen["payload"]["color"], "warn")
+        self.assertEqual(seen["payload"]["fields"][0]["value"], "3 ok")
+
+    def test_send_succeeds_when_any_channel_works(self):
+        orig = NT._post_json
+        NT._post_json = lambda url, payload, headers=None: False
+        orig_ntfy = NT.ntfy_send
+        NT.ntfy_send = lambda cfg, title, text: True
+        cfg = {"settings": {"notify": {"webhook_url": "https://x/y",
+                                       "ntfy_url": "https://ntfy.sh/t"}}}
+        try:
+            self.assertTrue(NT.send(cfg, "t", []))
+        finally:
+            NT._post_json = orig
+            NT.ntfy_send = orig_ntfy
+
+    def test_per_route_rules(self):
+        cfg = {"settings": {"notify": {"ntfy_url": "https://ntfy.sh/t",
+                                       "on": "failure"}}}
+        self.assertTrue(NT.wants(cfg, {"name": "a"}, failed=1))
+        self.assertFalse(NT.wants(cfg, {"name": "a"}, failed=0))
+        quiet = {"name": "a", "notify_on": "never"}
+        self.assertFalse(NT.wants(cfg, quiet, failed=3))
+        loud = {"name": "a", "notify_on": "always"}
+        self.assertTrue(NT.wants(cfg, loud, failed=0))
+        only_ok = {"name": "a", "notify_on": "success"}
+        self.assertFalse(NT.wants(cfg, only_ok, failed=1))
+        self.assertTrue(NT.wants(cfg, only_ok, failed=0))
+
+    def test_a_quiet_route_does_not_mute_a_failing_one(self):
+        cfg = {"settings": {"notify": {"ntfy_url": "https://ntfy.sh/t",
+                                       "on": "failure"}}}
+        sent = []
+        orig = NT.send
+        NT.send = lambda c, t, f, color="ok", content=None: sent.append(
+            (t, color)) or True
+        routes = [{"name": "noisy", "notify_on": "never"},
+                  {"name": "broken"}]
+        summary = {"failed": 1, "partial": 0, "ok": 4, "elapsed_sec": 2,
+                   "per_route": {"noisy": {"ok": 4, "failed": 0},
+                                 "broken": {"ok": 0, "failed": 1}},
+                   "failures": [{"route": "broken", "repo": "r",
+                                 "error": "boom"}]}
+        try:
+            self.assertTrue(NT.notify_run(cfg, summary, routes=routes))
+        finally:
+            NT.send = orig
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0][1], "fail")
+
+    def test_a_route_set_to_never_stays_silent_alone(self):
+        cfg = {"settings": {"notify": {"ntfy_url": "https://ntfy.sh/t",
+                                       "on": "always"}}}
+        orig = NT.send
+        NT.send = lambda *a, **k: self.fail("sent a muted route")
+        try:
+            self.assertFalse(NT.notify_run(
+                cfg, {"failed": 1, "partial": 0, "ok": 0,
+                      "per_route": {"a": {"failed": 1}}},
+                routes=[{"name": "a", "notify_on": "never"}]))
+        finally:
+            NT.send = orig
+
+    def test_email_is_stripped_on_export_and_carried_on_import(self):
+        cfg = {"platforms": {}, "routes": [],
+               "settings": {"notify": {"smtp_password": "p",
+                                       "webhook_url": "https://x/y",
+                                       "ntfy_url": "https://ntfy.sh/t",
+                                       "smtp_to": "a@b"}}}
+        clean, removed = C.strip_secrets(cfg)
+        self.assertEqual(clean["settings"]["notify"]["smtp_password"], "")
+        self.assertEqual(clean["settings"]["notify"]["webhook_url"], "")
+        self.assertEqual(clean["settings"]["notify"]["ntfy_url"], "")
+        self.assertEqual(clean["settings"]["notify"]["smtp_to"], "a@b")
+        self.assertIn("settings.notify.smtp_password", removed)
+
+
+class TestRouteSkips(unittest.TestCase):
+    """skip archived / empty / forks, per route, without a network call."""
+
+    REPOS = [{"name": "a"}, {"name": "b", "fork": True},
+             {"name": "c", "archived": True}, {"name": "d", "empty": True}]
+
+    def names(self, kept):
+        return [r["name"] for r in kept]
+
+    def test_archived_and_forks_are_skipped_by_default(self):
+        kept, skipped = SY._apply_route_skips({}, {}, self.REPOS)
+        self.assertEqual(self.names(kept), ["a", "d"])
+        self.assertEqual(skipped["archived"], 1)
+        self.assertEqual(skipped["fork"], 1)
+
+    def test_a_route_can_include_forks(self):
+        kept, _ = SY._apply_route_skips({}, {"include_forks": True},
+                                          self.REPOS)
+        self.assertIn("b", self.names(kept))
+
+    def test_a_route_can_keep_archived_and_skip_empty(self):
+        kept, skipped = SY._apply_route_skips(
+            {}, {"skip_archived": False, "skip_empty": True,
+                 "include_forks": True}, self.REPOS)
+        self.assertEqual(self.names(kept), ["a", "b", "c"])
+        self.assertEqual(skipped["empty"], 1)
+
+
 class TestScheduler(unittest.TestCase):
     """P0-1: the calendar is derived, and every schedule key is allowed."""
 
@@ -2995,9 +3164,12 @@ class TestRetryFailed(unittest.TestCase):
                               {"route": "r1", "repo": "failed_repo_2", "error": "err"}]}]
         captured = {}
 
-        def fake_run_sync(cfg, route_name=None, quiet=False, only=None, dry_run=False, scheduled=False, **kwargs):
+        def fake_run_sync(cfg, route_name=None, quiet=False, only=None,
+                          dry_run=False, scheduled=False, **kwargs):
             captured["only"] = only
-            return {"ok": 2, "partial": 0, "failed": 0, "repos": 2, "elapsed_sec": 1.0, "planned": []}
+            captured["only_map"] = kwargs.get("only_map")
+            return {"ok": 2, "partial": 0, "failed": 0, "repos": 2,
+                    "elapsed_sec": 1.0, "planned": []}
 
         with patch.object(main_mod.SYNC, "last_records", return_value=recs), \
              patch.object(main_mod.SYNC, "run_sync", fake_run_sync), \
@@ -3006,9 +3178,9 @@ class TestRetryFailed(unittest.TestCase):
             args = SimpleNamespace(route=None, to=None, repos="", retry_failed=True, quiet=True, dry_run=False, scheduled=False)
             rc = main_mod.cmd_sync(args)
             self.assertEqual(rc, 0)
-            self.assertIsNotNone(captured.get("only"))
-            self.assertIn("failed_repo_1", captured["only"])
-            self.assertIn("failed_repo_2", captured["only"])
+            # scoped per route now: the same two names, filed under their route
+            self.assertEqual(captured["only_map"],
+                             {"r1": ["failed_repo_1", "failed_repo_2"]})
 
     def test_retry_failed_scoped_by_route(self):
         from gitsync import __main__ as main_mod
@@ -3019,9 +3191,12 @@ class TestRetryFailed(unittest.TestCase):
         ]}]
         captured = {}
 
-        def fake_run_sync(cfg, route_name=None, quiet=False, only=None, dry_run=False, scheduled=False, **kwargs):
+        def fake_run_sync(cfg, route_name=None, quiet=False, only=None,
+                          dry_run=False, scheduled=False, **kwargs):
             captured["only"] = only
-            return {"ok": 1, "partial": 0, "failed": 0, "repos": 1, "elapsed_sec": 0.5, "planned": []}
+            captured["only_map"] = kwargs.get("only_map")
+            return {"ok": 1, "partial": 0, "failed": 0, "repos": 1,
+                    "elapsed_sec": 0.5, "planned": []}
 
         with patch.object(main_mod.SYNC, "last_records", return_value=recs), \
              patch.object(main_mod.SYNC, "run_sync", fake_run_sync), \
@@ -3031,7 +3206,7 @@ class TestRetryFailed(unittest.TestCase):
             args = SimpleNamespace(route="r1", to=None, repos="", retry_failed=True, quiet=True, dry_run=False, scheduled=False)
             rc = main_mod.cmd_sync(args)
             self.assertEqual(rc, 0)
-            self.assertEqual(captured.get("only"), ["repo_a"])
+            self.assertEqual(captured["only_map"], {"r1": ["repo_a"]})
 
 
 class TestNewFeatures(unittest.TestCase):
@@ -3621,6 +3796,137 @@ class TestReleaseSums(unittest.TestCase):
 
 
 # ------------------------------------------------------- round 3: watch
+
+class TestDiskGuard(unittest.TestCase):
+    """A full disk must stop a sync with a sentence, not a corrupt mirror."""
+
+    def test_enough_space_passes(self):
+        orig = D.fs_free
+        D.fs_free = lambda p: (10 * 1024 ** 3, 100 * 1024 ** 3)
+        try:
+            ok, msg = D.guard("/tmp", min_free_gb=1)
+        finally:
+            D.fs_free = orig
+        self.assertTrue(ok)
+        self.assertEqual(msg, "")
+
+    def test_too_little_space_names_the_numbers(self):
+        orig = D.fs_free
+        D.fs_free = lambda p: (100 * 1024 ** 2, 100 * 1024 ** 3)
+        try:
+            ok, msg = D.guard("/tmp", min_free_gb=1)
+        finally:
+            D.fs_free = orig
+        self.assertFalse(ok)
+        self.assertIn("1.0G", msg)
+        self.assertIn("gitsync disk", msg)
+
+    def test_zero_disables_the_guard(self):
+        orig = D.fs_free
+        D.fs_free = lambda p: (0, 0)
+        try:
+            self.assertTrue(D.guard("/tmp", min_free_gb=0)[0])
+        finally:
+            D.fs_free = orig
+
+    def test_an_unreadable_filesystem_never_blocks(self):
+        orig = D.fs_free
+        D.fs_free = lambda p: (None, None)
+        try:
+            self.assertTrue(D.guard("/tmp", min_free_gb=5)[0])
+        finally:
+            D.fs_free = orig
+
+
+class TestSyncHooks(unittest.TestCase):
+    """settings.hooks.pre/post: argv only, and a failed pre hook blocks."""
+
+    def test_a_hook_runs_without_a_shell(self):
+        ok, msg = SY._run_hook("pre", "/bin/sh -c true")
+        self.assertTrue(ok, msg)
+
+    def test_a_failing_hook_reports_its_exit_code(self):
+        ok, msg = SY._run_hook("pre", "/bin/sh -c false")
+        self.assertFalse(ok)
+        self.assertIn("exited 1", msg)
+
+    def test_an_unbalanced_quote_is_reported_not_executed(self):
+        ok, msg = SY._run_hook("pre", "/bin/sh -c 'oops")
+        self.assertFalse(ok)
+        self.assertIn("not a valid command", msg)
+
+    def test_the_post_hook_sees_the_result_in_its_environment(self):
+        with tempfile.TemporaryDirectory() as td:
+            out = os.path.join(td, "env.txt")
+            cmd = "/bin/sh -c 'echo \"$GITSYNC_FAILED\" > " + out + "'"
+            ok, msg = SY._run_hook("post", cmd, {"GITSYNC_FAILED": 3})
+            self.assertTrue(ok, msg)
+            with open(out) as f:
+                self.assertEqual(f.read().strip(), "3")
+
+
+class TestRetryScoping(unittest.TestCase):
+    """--retry-failed must not re-run a repo that only broke elsewhere.
+
+    `only` is a flat list of names, so retrying r1's failure used to re-run
+    that name on r2 as well. The scoping decision is one function; assert it
+    directly rather than through a whole run.
+    """
+
+    def test_a_route_only_gets_its_own_names(self):
+        only_map = {"r1": ["a"], "r2": ["b"]}
+        self.assertEqual(SY._wanted_names(None, only_map, "r1"), ["a"])
+        self.assertEqual(SY._wanted_names(None, only_map, "r2"), ["b"])
+
+    def test_a_route_with_no_failures_gets_an_empty_list_not_none(self):
+        # [] means "skip this route"; None would mean "sync all of it", which
+        # is what made a retry re-run healthy routes
+        self.assertEqual(SY._wanted_names(None, {"r1": ["a"]}, "r2"), [])
+        self.assertIsNotNone(SY._wanted_names(None, {"r1": ["a"]}, "r2"))
+
+    def test_the_star_entry_means_every_route(self):
+        only_map = {"r1": ["a"], "*": ["--repos", "pick"]}
+        self.assertEqual(SY._wanted_names(None, only_map, "r1"),
+                         ["a", "--repos", "pick"])
+        self.assertEqual(SY._wanted_names(None, only_map, "r2"),
+                         ["--repos", "pick"])
+
+    def test_a_plain_only_list_still_applies_to_every_route(self):
+        self.assertEqual(SY._wanted_names(["a"], None, "r1"), ["a"])
+        self.assertIsNone(SY._wanted_names([], None, "r1"))
+
+
+class TestMirrorExtras(unittest.TestCase):
+    """LFS and submodules are detected, not silently half-mirrored."""
+
+    def setUp(self):
+        if not _have_git():
+            self.skipTest("git not available")
+
+    def test_an_ordinary_repo_needs_nothing(self):
+        with tempfile.TemporaryDirectory() as td:
+            bare = os.path.join(td, "r.git")
+            subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+            self.assertEqual(SY._mirror_extras(bare), (False, False))
+
+    def test_gitattributes_lfs_and_gitmodules_are_reported(self):
+        with tempfile.TemporaryDirectory() as td:
+            work = os.path.join(td, "w")
+            os.makedirs(work)
+            ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+            subprocess.run(["git", "init", "-q", work], check=True)
+            with open(os.path.join(work, ".gitattributes"), "w") as f:
+                f.write("*.bin filter=lfs diff=lfs merge=lfs -text\n")
+            with open(os.path.join(work, ".gitmodules"), "w") as f:
+                f.write('[submodule "s"]\n\tpath = s\n\turl = ../s\n')
+            subprocess.run(["git", "-C", work, "add", "."], check=True)
+            subprocess.run(["git", "-C", work] + ident +
+                           ["commit", "-qm", "c"], check=True)
+            bare = os.path.join(td, "r.git")
+            subprocess.run(["git", "clone", "-q", "--bare", work, bare],
+                           check=True)
+            self.assertEqual(SY._mirror_extras(bare), (True, True))
+
 
 class TestStrictCsp(unittest.TestCase):
     """style-src is 'self'. That only holds while the assets keep their side

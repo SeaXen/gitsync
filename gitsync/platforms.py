@@ -365,7 +365,8 @@ class GitHubPlatform:
             while True:
                 rc, out, err = self._gh(
                     ["api", "user/repos?per_page=100&page=%d" % page,
-                     "--jq", ".[] | [.name, .visibility, .fork, .html_url] "
+                     "--jq", ".[] | [.name, .visibility, .fork, .html_url, "
+                             ".archived] "
                              "| @tsv"])
                 if rc != 0:
                     raise RuntimeError("gh api user/repos failed: "
@@ -375,11 +376,12 @@ class GitHubPlatform:
                     name = r[0]
                     vis = r[1] if len(r) > 1 else "PUBLIC"
                     fork = (r[2] if len(r) > 2 else "false") == "true"
+                    archived = (r[4] if len(r) > 4 else "false") == "true"
                     url = r[3] if len(r) > 3 else ""
                     rid = (url.split("github.com/")[-1].replace(".git", "")
                            if "github.com/" in url else name)
                     repos.append({"name": name, "id": rid or name,
-                                  "private": vis != "PUBLIC",
+                                  "private": vis != "PUBLIC", "archived": archived,
                                   "fork": fork, "clone_url": url})
                 if len(rows) < 100:
                     break
@@ -399,6 +401,7 @@ class GitHubPlatform:
                               "id": r.get("full_name") or r["name"],
                               "private": bool(r.get("private")),
                               "fork": bool(r.get("fork")),
+                              "archived": bool(r.get("archived")),
                               "clone_url": self._clone_url(r["full_name"])})
             if len(out) < 100:
                 break
@@ -605,6 +608,7 @@ class GitLabPlatform:
                               p["name"], "private":
                               p.get("visibility") == "private",
                               "fork": bool(p.get("forked_from_project")),
+                              "archived": bool(p.get("archived")),
                               "clone_url": self._url_with_token(
                                   p.get("http_url_to_repo"))})
             if len(out) < 100:
@@ -848,6 +852,7 @@ class ForgejoPlatform:
                               if owner else r["name"],
                               "private": bool(r.get("private")),
                               "fork": bool(r.get("fork")),
+                              "archived": bool(r.get("archived")),
                               "clone_url": self._push_url(
                                   owner, r["name"])})
             if len(out) < 50:
@@ -983,8 +988,14 @@ class LocalPlatform:
             rc, out, _ = run(["git", "rev-parse", "--is-bare-repository"],
                              cwd=full, timeout=30)
             if rc == 0 and out.strip() == "true":
+                # a folder with no refs is legitimate but usually a
+                # placeholder; report it so a route can skip_empty
+                rc2, out2, _ = run(["git", "rev-list", "--count", "--all"],
+                                   cwd=full, timeout=30)
+                empty = rc2 == 0 and out2.strip() in ("", "0")
                 repos.append({"name": entry[:-4], "id": entry[:-4],
                               "private": True, "fork": False,
+                              "archived": False, "empty": empty,
                               "clone_url": full})
         return repos
 

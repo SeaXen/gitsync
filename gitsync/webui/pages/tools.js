@@ -87,27 +87,42 @@
         }).catch(handleErr);
       });
     } else if (kind === "restore") {
+      // Restore is the one tool that can overwrite every target at once, so
+      // it now previews first: run the dry-run, stream it, and only then ask
+      // for the typed confirmation. The preview is not optional — a checkbox
+      // you forget to tick was the only thing standing between a click and a
+      // push of ~every mirror.
       if (!val("restore-to")) return G.toast("restore needs a target platform", "warn");
       body = { to: val("restore-to"), repos: val("restore-repos"),
-               dry_run: checked("restore-dry"), prune: checked("restore-prune"),
-               public: checked("restore-public"), kind: kind };
-      label = "restore → " + val("restore-to");
-      var sendRestore = function () {
-        return G.api("POST", "/api/jobs", body).then(function (r) {
-          showOut(label, r.job_id);
+               prune: checked("restore-prune"),
+               public: checked("restore-public") };
+      var to = val("restore-to");
+      var sendRestore = function (dry, done) {
+        var b2 = { to: body.to, repos: body.repos, prune: body.prune,
+                   public: body.public, dry_run: dry, kind: "restore" };
+        var lbl = "restore → " + to + (dry ? " (preview)" : "");
+        return G.api("POST", "/api/jobs", b2).then(function (r) {
+          showOut(lbl, r.job_id, done);
+          return r;
         }).catch(handleErr);
       };
-      if (!checked("restore-dry")) {
-        return G.modalConfirm({
+      if (checked("restore-dry")) return sendRestore(true);
+      return sendRestore(true, function (d) {
+        if (d.exit !== 0) {
+          G.toast("preview failed — nothing was restored", "bad");
+          return;
+        }
+        G.modalConfirm({
           title: "Restore from hub",
-          message: "Restore pushes hub mirrors out to " + val("restore-to") + ". Continue?",
-          confirmText: "Restore Mirrors",
+          message: "The preview above is what restore will push to " + to +
+            ". Type restore to confirm; nothing has been changed yet.",
+          prompt: "restore",
+          confirmText: "Restore mirrors",
           danger: true
         }).then(function (ok) {
-          if (ok) return sendRestore();
+          if (ok) return sendRestore(false);
         });
-      }
-      return sendRestore();
+      });
     } else if (kind === "mirror") {
       if (!val("mirror-repos")) return G.toast("mirror needs repo names", "warn");
       body = { repos: val("mirror-repos"), src: val("mirror-from"), to: val("mirror-to") };
@@ -119,7 +134,7 @@
     }).catch(handleErr);
   }
 
-  function showOut(label, jobId) {
+  function showOut(label, jobId, done) {
     document.getElementById("tool-out-card").classList.remove("hide");
     document.getElementById("tool-out-title").textContent = label;
     var lines = document.getElementById("tool-out");
@@ -136,6 +151,7 @@
         status.textContent = "done · exit " + d.exit + " · " + d.elapsed + "s";
         G.toast(label + (d.exit === 0 ? " finished" : " finished (exit " + d.exit + ")"),
           d.exit === 0 ? "ok" : "bad");
+        if (done) done(d);
       },
       onLost: function () {
         status.textContent = "connection lost";

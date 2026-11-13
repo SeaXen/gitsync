@@ -85,6 +85,29 @@ def fs_free(path):
         return None, None
 
 
+def guard(path, min_free_gb=0.5, need_bytes=0):
+    """is there room to keep mirroring? (ok, message).
+
+    A full disk turns a fetch into a half-written mirror, which then fails
+    every later run with a confusing git error. Checking once at the start
+    is cheap; a stopped sync with a plain sentence is better than that.
+
+    Never blocks when the free space cannot be read (an exotic filesystem),
+    and min_free_gb=0 disables it.
+    """
+    need = int(float(min_free_gb or 0) * (1024 ** 3)) + int(need_bytes or 0)
+    if need <= 0:
+        return True, ""
+    free, _total = fs_free(path)
+    if free is None:
+        return True, ""
+    if free < need:
+        return False, ("only %s free on the mirror disk, %s needed — free "
+                       "space, run 'gitsync disk --gc', or lower "
+                       "settings.min_free_gb" % (human(free), human(need)))
+    return True, ""
+
+
 def gc_mirror(path, aggressive=False, timeout=600):
     """reflog-expire + gc one mirror. Returns bytes reclaimed."""
     before = dir_size(path)

@@ -2981,10 +2981,8 @@ def draw_settings(stdscr, h, w, dim):
         ("Mirror mode        : %s" % eff_mode_cached(), 0),
         ("Include forks      : %s" % st.get("include_forks", False), 0),
         ("Schedule           : %s" % st.get("schedule", "hourly"), 0),
-        ("Discord webhook    : %s"
-         % ("configured" if notify.get("discord_webhook") else "not set"), 0),
-        ("Telegram bot       : %s"
-         % ("configured" if notify.get("telegram_token") else "not set"), 0),
+        ("Notification chans : %s"
+         % (", ".join(NT.channels({"settings": st})) or "none configured"), 0),
         ("Notify on          : %s" % notify.get("on", "failure"), 0),
         ("Pause between repos : %ss" % (st.get("pace", 0) or 0), 0),
         ("Mesh conflicts     : %s" % st.get("mesh_conflict", "newest"), 0),

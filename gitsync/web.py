@@ -718,6 +718,19 @@ def _public_settings(cfg):
         "discord_set": bool(notify.get("discord_webhook")),
         "telegram_set": bool(notify.get("telegram_token")
                              and notify.get("telegram_chat_id")),
+        "ntfy_set": bool(notify.get("ntfy_url")),
+        "webhook_set": bool(notify.get("webhook_url")),
+        "smtp_set": bool(notify.get("smtp_host") and notify.get("smtp_to")),
+        # mail headers are not secrets and the UI needs them to edit a
+        # configured server without retyping the password
+        "smtp_host": notify.get("smtp_host", ""),
+        "smtp_port": notify.get("smtp_port", 587),
+        "smtp_user": notify.get("smtp_user", ""),
+        "smtp_from": notify.get("smtp_from", ""),
+        "smtp_to": notify.get("smtp_to", ""),
+        "smtp_tls": notify.get("smtp_tls", True),
+        "channels": NT.channels({"settings": st}),
+        "problem": NT.problem({"settings": st}),
     }
     return st
 
@@ -738,6 +751,10 @@ def _route_view(cfg, r):
             "workers": r.get("workers"), "mode": r.get("mode"),
             "mesh_conflict": r.get("mesh_conflict"),
             "effective_mode": C.route_mode(cfg, r),
+            "notify_on": r.get("notify_on") or "",
+            "include_forks": r.get("include_forks"),
+            "skip_archived": r.get("skip_archived"),
+            "skip_empty": bool(r.get("skip_empty", False)),
             "prune_repos": C.prune_targets(cfg, r)}
 
 
@@ -2118,6 +2135,21 @@ def h_route_edit(handler, name):
                 raise _Http(400, "invalid schedule")
         if "enabled" in b:
             route["enabled"] = bool(b["enabled"])
+        if "notify_on" in b:
+            v = b["notify_on"]
+            if v in (None, "", "inherit"):
+                route.pop("notify_on", None)
+            elif v not in ("failure", "success", "always", "never"):
+                raise _Http(400, "invalid notify mode")
+            else:
+                route["notify_on"] = v
+        for key in ("include_forks", "skip_archived", "skip_empty"):
+            if key in b:
+                v = b[key]
+                if v in (None, "", "inherit"):
+                    route.pop(key, None)
+                else:
+                    route[key] = bool(v)
         if "prune_repos" in b:
             # per-target opt-in for whole-repository deletion; only names
             # that are actually targets of this route are accepted
@@ -2314,6 +2346,16 @@ def h_settings_put(handler):
         _apply_setting(st, "pace", b, float, [0, 1, 2, 5, 10])
         _apply_setting(st, "relax_protection", b, bool)
         _apply_setting(st, "token_warn_days", b, int, [7, 14, 30, 60, 90])
+        _apply_setting(st, "min_free_gb", b, float,
+                       [0, 0.25, 0.5, 1, 2, 5, 10])
+        for key, name in (("hook_pre", "pre"), ("hook_post", "post")):
+            if key in b:
+                hooks = st.setdefault("hooks", {})
+                v = (b.get(key) or "").strip()
+                if v:
+                    hooks[name] = v[:500]
+                else:
+                    hooks.pop(name, None)
         _apply_setting(st, "theme", b, str, list(C.THEMES))
         if "trusted_proxies" in b:
             st["trusted_proxies"] = _clean_cidrs(b["trusted_proxies"])
@@ -2330,6 +2372,16 @@ def h_settings_put(handler):
             elif what == "telegram":
                 notify.pop("telegram_token", None)
                 notify.pop("telegram_chat_id", None)
+            elif what == "ntfy":
+                notify.pop("ntfy_url", None)
+                notify.pop("ntfy_token", None)
+            elif what == "webhook":
+                notify.pop("webhook_url", None)
+            elif what == "smtp":
+                for k in ("smtp_host", "smtp_port", "smtp_user",
+                          "smtp_password", "smtp_from", "smtp_to",
+                          "smtp_tls"):
+                    notify.pop(k, None)
             else:
                 raise _Http(400, "unknown notify target: %r" % (what,))
         if (b.get("discord_webhook") or "").strip():
@@ -2344,6 +2396,39 @@ def h_settings_put(handler):
                 raise _Http(400, "telegram needs a chat id too")
             notify["telegram_token"] = tok
             notify["telegram_chat_id"] = chat
+        if (b.get("ntfy_url") or "").strip():
+            url = b["ntfy_url"].strip()
+            if not NT.http_url_ok(url):
+                raise _Http(400, "ntfy needs an http(s) topic URL")
+            notify["ntfy_url"] = url
+        if (b.get("ntfy_token") or "").strip():
+            notify["ntfy_token"] = b["ntfy_token"].strip()
+        if (b.get("webhook_url") or "").strip():
+            url = b["webhook_url"].strip()
+            if not NT.http_url_ok(url):
+                raise _Http(400, "the webhook needs an http(s) URL")
+            notify["webhook_url"] = url
+        # email: the host/recipient are not secrets, so they round-trip and
+        # can be edited; the password is write-only like every other secret
+        for key in ("smtp_host", "smtp_user", "smtp_from", "smtp_to"):
+            if key in b:
+                notify[key] = (b.get(key) or "").strip()
+        if "smtp_port" in b:
+            try:
+                port = int(b.get("smtp_port") or 587)
+            except (TypeError, ValueError):
+                raise _Http(400, "smtp_port must be a number")
+            if not 1 <= port <= 65535:
+                raise _Http(400, "smtp_port must be 1-65535")
+            notify["smtp_port"] = port
+        if "smtp_tls" in b:
+            notify["smtp_tls"] = bool(b["smtp_tls"])
+        if (b.get("smtp_password") or "").strip():
+            notify["smtp_password"] = b["smtp_password"].strip()
+        problem = NT.problem({"settings": st})
+        if problem:
+            raise _Http(400, problem)
+        _invalidate("health")
         _audit("settings updated")
         return {"ok": True}
 
