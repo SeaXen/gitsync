@@ -40,6 +40,7 @@
       root.removeAttribute("data-theme");
     }
     var effective = mode === "auto" ? (osIsLight() ? "light" : "dark") : mode;
+    root.style.colorScheme = effective;
     var m = document.querySelector('meta[name="theme-color"]');
     if (m) m.setAttribute("content", CHROME[effective]);
     if (persist) {

@@ -472,7 +472,7 @@
       '<section class="card"><div class="bar"><span class="route-title">Syncing ' +
       G.esc(label) + '</span><span class="muted mono" id="rl-pct"></span></div>' +
       '<div class="progress mt"><span id="rl-fill" class="u-w0"></span></div>' +
-      '<div class="viewer mt" id="rl-lines" role="log" aria-live="polite"></div></section>';
+      '<div class="viewer mt" id="rl-lines" role="log" aria-live="polite" tabindex="0" aria-label="Log lines"></div></section>';
     var lines = document.getElementById("rl-lines");
     lines.textContent = "running…";
     G.watchJob("/api/sync/stream?job_id=" + encodeURIComponent(jobId), {

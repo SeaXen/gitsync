@@ -16,7 +16,7 @@
           '<button class="btn u-end" id="l-refresh">Refresh</button>' +
         "</div>" +
         '<div class="muted mb" id="l-meta"></div>' +
-        '<div class="viewer" id="l-lines" role="log" aria-live="polite">' +
+        '<div class="viewer" id="l-lines" role="log" aria-live="polite" tabindex="0" aria-label="Log lines">' +
           G.loading() + "</div>" +
       "</section>";
 

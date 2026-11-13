@@ -359,5 +359,62 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
             finally:
                 C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
 
+    def test_07_accessibility_axe_core_audit(self):
+        """Run axe-core WCAG 2 A/AA audit across all 9 pages in both light and dark themes.
+        Fails if any serious or critical violations are found.
+        """
+        self._login()
+        axe_path = os.path.join(APP_DIR, "tests", "vendor", "axe.min.js")
+        with open(axe_path, "r", encoding="utf-8") as f:
+            axe_script = f.read()
+
+        cdp = self.context.new_cdp_session(self.page)
+        cdp.send("Page.setBypassCSP", {"enabled": True})
+
+        pages = [
+            ("dashboard", "/"),
+            ("repos", "/repos.html"),
+            ("platforms", "/platforms.html"),
+            ("routes", "/routes.html"),
+            ("history", "/history.html"),
+            ("log", "/log.html"),
+            ("stars", "/stars.html"),
+            ("settings", "/settings.html"),
+            ("tools", "/tools.html"),
+        ]
+
+        violations_found = []
+
+        for theme in ("dark", "light"):
+            for page_name, url_path in pages:
+                self.page.goto(f"{self.base_url}{url_path}")
+                self.page.wait_for_load_state("networkidle")
+                self.page.evaluate(f"document.documentElement.setAttribute('data-theme', '{theme}')")
+                self.page.wait_for_timeout(100)
+
+                self.page.evaluate(axe_script)
+                results = self.page.evaluate("""
+                    axe.run({
+                        runOnly: {
+                            type: 'tag',
+                            values: ['wcag2a', 'wcag2aa']
+                        }
+                    })
+                """)
+                for v in results.get("violations", []):
+                    if v.get("impact") in ("serious", "critical"):
+                        violations_found.append({
+                            "theme": theme,
+                            "page": page_name,
+                            "id": v.get("id"),
+                            "impact": v.get("impact"),
+                            "description": v.get("description"),
+                            "nodes": [n.get("html") for n in v.get("nodes", [])[:3]]
+                        })
+
+        self.assertEqual(violations_found, [],
+                         f"Accessibility violations found: {json.dumps(violations_found, indent=2)}")
+
+
 if __name__ == "__main__":
     unittest.main()
