@@ -41,6 +41,8 @@ def records_file():
     """the run history, resolved at call time (see log_file())."""
     return os.path.join(DATA_DIR, "records.json")
 
+DEFAULT_MESH_CONFLICT = "skip"
+
 DEFAULT_CONFIG = {
     "version": 1,
     "platforms": {

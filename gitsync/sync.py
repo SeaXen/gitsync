@@ -204,7 +204,14 @@ def _rmtree(path):
     A path that starts with "-" cannot be mistaken for an option this way,
     and it works the same on every platform git itself supports.
     """
-    shutil.rmtree(path, ignore_errors=True)
+    import stat
+    def _onerror(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+    shutil.rmtree(path, onerror=_onerror)
 
 
 def hub_rel(repo_id):
@@ -586,8 +593,8 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
         for t, cand in pt.items():
             cand_tags.setdefault(t, []).append(cand)
 
-    chosen_heads, skip_heads = _choose(cand_heads, conflict)
-    chosen_tags, skip_tags = _choose(cand_tags, conflict)
+    chosen_heads, skip_heads = _choose(cand_heads, conflict, hub=hub, is_tag=False)
+    chosen_tags, skip_tags = _choose(cand_tags, conflict, hub=hub, is_tag=True)
     skipped = skip_heads + skip_tags
 
     updated = 0
@@ -637,33 +644,79 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
     if skipped:
         # a mesh that refused to overwrite is NOT a clean run: say so, or a
         # newbie reads "ok" and assumes everything converged
-        names = ", ".join(sorted(skipped)[:20])
-        if len(skipped) > 20:
-            names += " +%d more" % (len(skipped) - 20)
-        detail += ", %d conflict(s) SKIPPED: %s" % (len(skipped), names)
+        desc_list = []
+        has_diverged = False
+        for b in skip_heads:
+            shas = sorted({s[:7] for _d, s in cand_heads.get(b, [])})
+            shas_str = " vs ".join(shas) if len(shas) > 1 else (shas[0] if shas else "")
+            desc_list.append("%s (%s)" % (b, shas_str) if shas_str else b)
+            has_diverged = True
+        for t in skip_tags:
+            shas = sorted({s[:7] for _d, s in cand_tags.get(t, [])})
+            shas_str = " vs ".join(shas) if len(shas) > 1 else (shas[0] if shas else "")
+            desc_list.append("%s [tag] (%s)" % (t, shas_str) if shas_str else t)
+
+        names = ", ".join(desc_list[:20])
+        if len(desc_list) > 20:
+            names += " +%d more" % (len(desc_list) - 20)
+
+        kind_label = "diverged" if has_diverged and not skip_tags else ("conflict(s)" if not has_diverged else "diverged/conflict(s)")
+        detail += ", %d %s SKIPPED: %s" % (len(skipped), kind_label, names)
+        reason_word = "branches diverged" if has_diverged and not skip_tags else "peers disagree"
         return "partial", detail, [
-            "%d ref(s) left alone because the peers disagree: %s"
-            % (len(skipped), names)]
+            "%d ref(s) left alone because the %s: %s"
+            % (len(skipped), reason_word, names)]
     return "ok", detail, []
 
 
-def _choose(cands, conflict):
+def _choose(cands, conflict, hub=None, is_tag=False):
     """({ref: (date, sha)}, [skipped refs]) for one namespace
 
     "newest" takes the newest candidate. "skip" keeps only refs every peer
-    agrees on, and reports the rest instead of overwriting anyone.
+    agrees on, or branches where one candidate is a strict descendant of all
+    others (fast-forward). Truly diverged branches and mismatched tags are
+    skipped and reported instead of overwriting anyone.
     """
     out, skipped = {}, []
     for ref, options in cands.items():
-        if conflict == "skip" and len({s for _d, s in options}) > 1:
+        distinct_shas = {s for _d, s in options}
+        if len(distinct_shas) <= 1:
+            out[ref] = _newest(options)
+            continue
+        if conflict == "newest":
+            out[ref] = _newest(options)
+            continue
+        # conflict == "skip":
+        if is_tag or not hub or not os.path.isdir(hub):
             skipped.append(ref)
             continue
-        out[ref] = _newest(options)
+        winner = None
+        for cand_sha in distinct_shas:
+            is_ahead = True
+            for other_sha in distinct_shas:
+                if other_sha == cand_sha:
+                    continue
+                rc, _, _ = P.run(
+                    ["git", "merge-base", "--is-ancestor", other_sha, cand_sha],
+                    cwd=hub, timeout=30)
+                if rc != 0:
+                    is_ahead = False
+                    break
+            if is_ahead:
+                winner = cand_sha
+                break
+        if winner:
+            matching = [c for c in options if c[1] == winner]
+            out[ref] = _newest(matching) if matching else options[0]
+        else:
+            skipped.append(ref)
     return out, skipped
 
 
-def mesh_plan_repo(repo, peers, conflict="newest"):
+def mesh_plan_repo(repo, peers, conflict=None, hub=None):
     """read-only plan for a mesh route: do the peers agree?"""
+    if conflict is None:
+        conflict = C.DEFAULT_MESH_CONFLICT
     heads = {}
     for pname, plat in peers.items():
         try:
@@ -683,7 +736,26 @@ def mesh_plan_repo(repo, peers, conflict="newest"):
                                              next(iter(distinct))[:8])], "ok"
     detail = ", ".join("%s %s" % (p, h[:8]) for p, h in heads.items())
     if conflict == "skip":
-        return ["peers disagree - would SKIP (newest wins is off): %s"
+        winner = None
+        if hub and os.path.isdir(hub):
+            for cand_sha in distinct:
+                is_ahead = True
+                for other_sha in distinct:
+                    if other_sha == cand_sha:
+                        continue
+                    rc, _, _ = P.run(
+                        ["git", "merge-base", "--is-ancestor", other_sha, cand_sha],
+                        cwd=hub, timeout=30)
+                    if rc != 0:
+                        is_ahead = False
+                        break
+                if is_ahead:
+                    winner = cand_sha
+                    break
+        if winner:
+            return ["peers differ but fast-forward possible (%s ahead) — would merge: %s"
+                    % (winner[:8], detail)], "update"
+        return ["peers diverged — would SKIP (newest wins is off): %s"
                 % detail], "update"
     return ["would merge: %s" % detail], "update"
 
@@ -1269,7 +1341,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                       or C.setting(cfg, "workers", 4) or 4)
         mode = C.route_mode(cfg, route)
         conflict = route.get("mesh_conflict") or \
-            C.setting(cfg, "mesh_conflict", "newest")
+            C.setting(cfg, "mesh_conflict", C.DEFAULT_MESH_CONFLICT)
 
         mode_note = ("mode=%s (%s)"
                      % (mode, "will not delete or force-push" if mode != "full"
@@ -1349,8 +1421,9 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
             try:
                 if dry_run:
                     if mesh:
-                        actions, verdict = mesh_plan_repo(repo, peers,
-                                                          conflict)
+                        actions, verdict = mesh_plan_repo(
+                            repo, peers, conflict,
+                            hub=mirror_path(repo, next(iter(peers.values())).ptype, shared))
                     else:
                         actions, verdict = _plan_repo(repo, source, targets,
                                                       mode)

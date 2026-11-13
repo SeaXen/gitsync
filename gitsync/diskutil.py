@@ -6,6 +6,7 @@ without touching any reachable commit, so it is safe to run on a mirror.
 """
 
 import os
+import shutil
 import subprocess
 import time
 
@@ -79,9 +80,9 @@ def mirrors():
 def fs_free(path):
     """(free, total) bytes for the filesystem holding path"""
     try:
-        st = os.statvfs(path)
-        return st.f_bavail * st.f_frsize, st.f_blocks * st.f_frsize
-    except OSError:
+        usage = shutil.disk_usage(path)
+        return usage.free, usage.total
+    except (OSError, AttributeError):
         return None, None
 
 
@@ -152,8 +153,15 @@ def orphans(source_names):
 def delete_mirror(path):
     """remove one hub mirror. Returns True on success."""
     import shutil
+    import stat
+    def _onerror(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
     try:
-        shutil.rmtree(path)
+        shutil.rmtree(path, onerror=_onerror)
         return True
     except OSError:
         return False

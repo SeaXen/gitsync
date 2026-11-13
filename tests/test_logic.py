@@ -14,6 +14,7 @@ except ImportError:
     from gitsync.tui import curses
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1891,8 +1892,24 @@ class TestPruneRepos(unittest.TestCase):
         # everything would be catastrophic
         with tempfile.TemporaryDirectory() as td:
             cfg, src, dst = self._cfg(td, prune_repos=["dst"])
+            def _onerror(func, p, _exc):
+                try:
+                    import stat
+                    os.chmod(p, stat.S_IWRITE)
+                    func(p)
+                except Exception:
+                    pass
             for n in os.listdir(src):
-                subprocess.run(["rm", "-rf", os.path.join(src, n)], check=True)
+                p = os.path.join(src, n)
+                if os.path.isdir(p):
+                    shutil.rmtree(p, onerror=_onerror)
+                else:
+                    try:
+                        import stat
+                        os.chmod(p, stat.S_IWRITE)
+                    except Exception:
+                        pass
+                    os.remove(p)
             self.assertEqual(SY.prune_repos(cfg, cfg["routes"][0]), {})
             self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
 
@@ -2578,11 +2595,13 @@ class TestWeb(unittest.TestCase):
             try:
                 self.assertFalse(SY.engine_busy())
                 fh = open(os.path.join(td, "sync.lock"), "a+")
-                fcntl.flock(fh, fcntl.LOCK_EX)
                 try:
-                    self.assertTrue(SY.engine_busy())    # locked case
+                    fcntl.flock(fh, fcntl.LOCK_EX)
+                    try:
+                        self.assertTrue(SY.engine_busy())    # locked case
+                    finally:
+                        fcntl.flock(fh, fcntl.LOCK_UN)
                 finally:
-                    fcntl.flock(fh, fcntl.LOCK_UN)
                     fh.close()
                 self.assertFalse(SY.engine_busy())
             finally:
@@ -3540,7 +3559,8 @@ class TestSessions(unittest.TestCase):
             raw = f.read()
         self.assertNotIn(sid, raw)                      # replay-proof store
         self.assertIn(hashlib.sha256(sid.encode("utf-8")).hexdigest(), raw)
-        self.assertEqual(os.stat(self._store()).st_mode & 0o777, 0o600)
+        if os.name != "nt":
+            self.assertEqual(os.stat(self._store()).st_mode & 0o777, 0o600)
 
     def test_validate_accepts_a_live_id_and_returns_its_metadata(self):
         sid = SS.create(ip="10.0.0.5", ua="Firefox")
@@ -3616,7 +3636,8 @@ class TestWebhookSecretMode(unittest.TestCase):
             C.CONFIG_DIR = old_cfg
         try:
             path = os.path.join(td, "webhook.secret")
-            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
             self.assertFalse(os.path.exists(path + ".tmp"))
             with open(path) as f:
                 self.assertEqual(f.read(), "s3cr3t-value")
@@ -3706,7 +3727,8 @@ class TestUpdateSafety(unittest.TestCase):
 
         self.assertEqual(rc, 0)
         self.assertTrue(seen["existed_at_run"])
-        self.assertEqual(seen["mode"], 0o700)            # 0600, then 0700
+        if os.name != "nt":
+            self.assertEqual(seen["mode"], 0o700)            # 0600, then 0700
         self.assertFalse(os.path.exists(seen["path"]))   # removed in finally
         cmd = seen["cmd"]
         self.assertEqual(cmd[0], "bash")
@@ -3845,6 +3867,10 @@ class TestDiskGuard(unittest.TestCase):
 
 class TestSyncHooks(unittest.TestCase):
     """settings.hooks.pre/post: argv only, and a failed pre hook blocks."""
+
+    def setUp(self):
+        if not os.path.exists("/bin/sh"):
+            self.skipTest("/bin/sh is not available on this platform")
 
     def test_a_hook_runs_without_a_shell(self):
         ok, msg = SY._run_hook("pre", "/bin/sh -c true")
@@ -4395,9 +4421,343 @@ class TestVerifyAndConfigExport(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             out = os.path.join(td, "export.json")
             text, _removed = C.export_config(out)
-            self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(os.stat(out).st_mode & 0o777, 0o600)
             with open(out, "r", encoding="utf-8") as f:
                 self.assertEqual(json.load(f), json.loads(text))
+
+
+class TestMeshSync(unittest.TestCase):
+    """Round 4 N1: mesh sync fast-forward, divergence, and moved tags."""
+
+    def setUp(self):
+        if not _have_git():
+            self.skipTest("git not available")
+
+    def _rmtree(self, path):
+        def _onerror(func, p, _exc):
+            try:
+                import stat
+                os.chmod(p, stat.S_IWRITE)
+                func(p)
+            except Exception:
+                pass
+        shutil.rmtree(path, onerror=_onerror)
+
+    def _init_repo(self, root, name, msg):
+        bare = os.path.join(root, name + ".git")
+        os.makedirs(bare, exist_ok=True)
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        subprocess.run(["git", "-C", bare, "symbolic-ref", "HEAD",
+                        "refs/heads/main"], check=True)
+        work = tempfile.mkdtemp()
+        try:
+            ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+            env = dict(os.environ,
+                       GIT_AUTHOR_DATE="2020-01-01T00:00:00 +0000",
+                       GIT_COMMITTER_DATE="2020-01-01T00:00:00 +0000")
+            subprocess.run(["git", "init", "-q", work], check=True)
+            subprocess.run(["git", "-C", work, "checkout", "-q", "-b", "main"],
+                           check=True)
+            with open(os.path.join(work, "f"), "w") as f:
+                f.write(msg + "\n")
+            subprocess.run(["git", "-C", work, "add", "."], check=True)
+            subprocess.run(["git", "-C", work] + ident +
+                           ["commit", "-q", "-m", msg], check=True, env=env)
+            subprocess.run(["git", "-C", work, "push", "-q", bare, "main"],
+                           check=True, env=env)
+            sha = subprocess.run(["git", "-C", work, "rev-parse", "HEAD"],
+                                 check=True, capture_output=True,
+                                 text=True).stdout.strip()
+            return sha
+        finally:
+            self._rmtree(work)
+
+    def _clone_bare(self, src_bare, dst_bare):
+        subprocess.run(["git", "clone", "-q", "--mirror", src_bare, dst_bare],
+                       check=True)
+
+    def _add_commit(self, bare, msg, tag=None, date="2020-01-02T00:00:00 +0000"):
+        work = tempfile.mkdtemp()
+        try:
+            ident = ["-c", "user.name=t", "-c", "user.email=t@t"]
+            env = dict(os.environ,
+                       GIT_AUTHOR_DATE=date,
+                       GIT_COMMITTER_DATE=date)
+            subprocess.run(["git", "clone", "-q", bare, work], check=True)
+            with open(os.path.join(work, "f"), "a") as f:
+                f.write(msg + "\n")
+            subprocess.run(["git", "-C", work, "add", "."], check=True)
+            subprocess.run(["git", "-C", work] + ident +
+                           ["commit", "-q", "-m", msg], check=True, env=env)
+            if tag:
+                subprocess.run(["git", "-C", work, "tag", "-f", tag],
+                               check=True)
+            subprocess.run(["git", "-C", work, "push", "-q", "--tags",
+                            "origin", "main"], check=True, env=env)
+            sha = subprocess.run(["git", "-C", work, "rev-parse", "HEAD"],
+                                 check=True, capture_output=True,
+                                 text=True).stdout.strip()
+            return sha
+        finally:
+            self._rmtree(work)
+
+    def test_mesh_fast_forward_propagates_under_skip_and_newest(self):
+        """Scenario (a): fast-forward on one peer propagates to both in skip and newest."""
+        for conflict_mode in ("skip", "newest"):
+            with tempfile.TemporaryDirectory() as td:
+                p1 = os.path.join(td, "p1")
+                p2 = os.path.join(td, "p2")
+                os.makedirs(p1, exist_ok=True)
+                os.makedirs(p2, exist_ok=True)
+                c1_sha = self._init_repo(p1, "r", "c1")
+                b1 = os.path.join(p1, "r.git")
+                b2 = os.path.join(p2, "r.git")
+                self._clone_bare(b1, b2)
+
+                c2_sha = self._add_commit(b2, "c2")
+                self.assertNotEqual(c1_sha, c2_sha)
+
+                cfg = {
+                    "platforms": {
+                        "m1": {"type": "local", "enabled": True, "path": p1},
+                        "m2": {"type": "local", "enabled": True, "path": p2},
+                    },
+                    "routes": [{
+                        "name": "mesh-route",
+                        "direction": "mesh",
+                        "source": "m1",
+                        "targets": ["m2"],
+                    }],
+                    "settings": {
+                        "mesh_conflict": conflict_mode,
+                    }
+                }
+                old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+                C.CONFIG_DIR = td
+                C.CONFIG_FILE = os.path.join(td, "config.json")
+                C.DATA_DIR = os.path.join(td, "data")
+                C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+                try:
+                    totals = SY.run_sync(cfg)
+                finally:
+                    C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+                self.assertEqual(totals["failed"], 0, totals)
+                self.assertEqual(totals["ok"], 1, totals)
+                m1_sha = subprocess.run(["git", "-C", b1, "rev-parse", "main"],
+                                        check=True, capture_output=True,
+                                        text=True).stdout.strip()
+                m2_sha = subprocess.run(["git", "-C", b2, "rev-parse", "main"],
+                                        check=True, capture_output=True,
+                                        text=True).stdout.strip()
+                self.assertEqual(m1_sha, c2_sha)
+                self.assertEqual(m2_sha, c2_sha)
+
+    def test_mesh_true_divergence_is_skipped_and_reported(self):
+        """Scenario (b): true divergence returns partial, names the branch,
+        includes both short SHAs, and preserves both peers."""
+        with tempfile.TemporaryDirectory() as td:
+            p1 = os.path.join(td, "p1")
+            p2 = os.path.join(td, "p2")
+            os.makedirs(p1, exist_ok=True)
+            os.makedirs(p2, exist_ok=True)
+            self._init_repo(p1, "r", "c1")
+            b1 = os.path.join(p1, "r.git")
+            b2 = os.path.join(p2, "r.git")
+            self._clone_bare(b1, b2)
+
+            sha_a = self._add_commit(b1, "c2a")
+            sha_b = self._add_commit(b2, "c2b")
+
+            cfg = {
+                "platforms": {
+                    "m1": {"type": "local", "enabled": True, "path": p1},
+                    "m2": {"type": "local", "enabled": True, "path": p2},
+                },
+                "routes": [{
+                    "name": "mesh-route",
+                    "direction": "mesh",
+                    "source": "m1",
+                    "targets": ["m2"],
+                }],
+                "settings": {
+                    "mesh_conflict": "skip",
+                }
+            }
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                totals = SY.run_sync(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+            self.assertEqual(totals["ok"], 0)
+            self.assertEqual(totals["partial"], 1)
+            # Neither peer overwritten
+            m1_sha = subprocess.run(["git", "-C", b1, "rev-parse", "main"],
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            m2_sha = subprocess.run(["git", "-C", b2, "rev-parse", "main"],
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            self.assertEqual(m1_sha, sha_a)
+            self.assertEqual(m2_sha, sha_b)
+
+            # Failure record includes branch name, diverged label, and both short SHAs
+            self.assertEqual(len(totals["failures"]), 1)
+            err_msg = totals["failures"][0]["error"]
+            self.assertIn("diverged", err_msg)
+            self.assertIn("main", err_msg)
+            self.assertIn(sha_a[:7], err_msg)
+            self.assertIn(sha_b[:7], err_msg)
+
+    def test_mesh_moved_tag_is_skipped(self):
+        """Scenario (c): a moved tag is treated as a conflict and skipped in skip mode."""
+        with tempfile.TemporaryDirectory() as td:
+            p1 = os.path.join(td, "p1")
+            p2 = os.path.join(td, "p2")
+            os.makedirs(p1, exist_ok=True)
+            os.makedirs(p2, exist_ok=True)
+            c1_sha = self._init_repo(p1, "r", "c1")
+            b1 = os.path.join(p1, "r.git")
+            b2 = os.path.join(p2, "r.git")
+            self._clone_bare(b1, b2)
+
+            # Tag v1 on p1 points to c1
+            subprocess.run(["git", "-C", b1, "tag", "v1", c1_sha], check=True)
+            # Commit c2 on p2, tag v1 points to c2
+            c2_sha = self._add_commit(b2, "c2", tag="v1")
+
+            cfg = {
+                "platforms": {
+                    "m1": {"type": "local", "enabled": True, "path": p1},
+                    "m2": {"type": "local", "enabled": True, "path": p2},
+                },
+                "routes": [{
+                    "name": "mesh-route",
+                    "direction": "mesh",
+                    "source": "m1",
+                    "targets": ["m2"],
+                }],
+                "settings": {
+                    "mesh_conflict": "skip",
+                }
+            }
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                totals = SY.run_sync(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+            self.assertEqual(totals["partial"], 1)
+            # p1 tag v1 was not overwritten by p2 tag v1
+            t1_sha = subprocess.run(["git", "-C", b1, "rev-parse", "v1"],
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            self.assertEqual(t1_sha, c1_sha)
+
+    def test_mesh_three_peers_ahead_one_wins(self):
+        """Scenario (d): three peers where one is ahead of two -> ahead one wins."""
+        with tempfile.TemporaryDirectory() as td:
+            p1 = os.path.join(td, "p1")
+            p2 = os.path.join(td, "p2")
+            p3 = os.path.join(td, "p3")
+            os.makedirs(p1, exist_ok=True)
+            os.makedirs(p2, exist_ok=True)
+            os.makedirs(p3, exist_ok=True)
+            c1_sha = self._init_repo(p1, "r", "c1")
+            b1 = os.path.join(p1, "r.git")
+            b2 = os.path.join(p2, "r.git")
+            b3 = os.path.join(p3, "r.git")
+            self._clone_bare(b1, b2)
+            self._clone_bare(b1, b3)
+
+            c2_sha = self._add_commit(b3, "c2")
+
+            cfg = {
+                "platforms": {
+                    "m1": {"type": "local", "enabled": True, "path": p1},
+                    "m2": {"type": "local", "enabled": True, "path": p2},
+                    "m3": {"type": "local", "enabled": True, "path": p3},
+                },
+                "routes": [{
+                    "name": "mesh-route",
+                    "direction": "mesh",
+                    "source": "m1",
+                    "targets": ["m2", "m3"],
+                }],
+                "settings": {
+                    "mesh_conflict": "skip",
+                }
+            }
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                totals = SY.run_sync(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+            self.assertEqual(totals["ok"], 1, totals)
+            for b in (b1, b2, b3):
+                sha = subprocess.run(["git", "-C", b, "rev-parse", "main"],
+                                     check=True, capture_output=True,
+                                     text=True).stdout.strip()
+                self.assertEqual(sha, c2_sha)
+
+    def test_mesh_default_config_behaves_as_fast_forward(self):
+        """Scenario (e): default config (no setting) behaves as fast-forward."""
+        with tempfile.TemporaryDirectory() as td:
+            p1 = os.path.join(td, "p1")
+            p2 = os.path.join(td, "p2")
+            os.makedirs(p1, exist_ok=True)
+            os.makedirs(p2, exist_ok=True)
+            self._init_repo(p1, "r", "c1")
+            b1 = os.path.join(p1, "r.git")
+            b2 = os.path.join(p2, "r.git")
+            self._clone_bare(b1, b2)
+
+            c2_sha = self._add_commit(b2, "c2")
+
+            cfg = {
+                "platforms": {
+                    "m1": {"type": "local", "enabled": True, "path": p1},
+                    "m2": {"type": "local", "enabled": True, "path": p2},
+                },
+                "routes": [{
+                    "name": "mesh-route",
+                    "direction": "mesh",
+                    "source": "m1",
+                    "targets": ["m2"],
+                }],
+                "settings": {}  # no mesh_conflict specified
+            }
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+            try:
+                totals = SY.run_sync(cfg)
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+            self.assertEqual(totals["ok"], 1, totals)
+            m1_sha = subprocess.run(["git", "-C", b1, "rev-parse", "main"],
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            self.assertEqual(m1_sha, c2_sha)
+
 
 if __name__ == '__main__':
     unittest.main()

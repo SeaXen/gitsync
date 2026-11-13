@@ -564,9 +564,9 @@ def options_screen(stdscr):
         ("Pause between repos: %ss" % (C.setting(cfg, "pace", 0) or 0),
          "0 = flat out; slows a run to spare heat/disk",
          lambda: cycle(cfg, "pace", [0, 1, 2, 5, 10], "pace")),
-        ("Mesh conflicts: %s" % C.setting(cfg, "mesh_conflict", "newest"),
-         "newest = overwrite; skip = leave and report",
-         lambda: cycle(cfg, "mesh_conflict", ["newest", "skip"],
+        ("Mesh conflicts: %s" % C.setting(cfg, "mesh_conflict", C.DEFAULT_MESH_CONFLICT),
+         "skip = only diverged branches left alone; newest = overwrite",
+         lambda: cycle(cfg, "mesh_conflict", ["skip", "newest"],
                        "mesh conflicts")),
         ("Token warning: %s days" % (C.setting(cfg, "token_warn_days", 30)
                                      or 30),
@@ -2424,7 +2424,7 @@ def _route_options_screen(stdscr, route):
         mesh = cur.get("direction") == "mesh"
         gw = C.setting(cfg, "workers", 4)
         gm = C.route_mode(cfg)
-        gc = C.setting(cfg, "mesh_conflict", "newest")
+        gc = C.setting(cfg, "mesh_conflict", C.DEFAULT_MESH_CONFLICT)
         rows = [
             ("Parallel workers",
              "%s (global %s)" % (cur.get("workers") or "inherit", gw),
@@ -2985,7 +2985,8 @@ def draw_settings(stdscr, h, w, dim):
          % (", ".join(NT.channels({"settings": st})) or "none configured"), 0),
         ("Notify on          : %s" % notify.get("on", "failure"), 0),
         ("Pause between repos : %ss" % (st.get("pace", 0) or 0), 0),
-        ("Mesh conflicts     : %s" % st.get("mesh_conflict", "newest"), 0),
+        ("Mesh conflicts     : %s (only diverged branches left alone; normal pushes still sync)"
+         % st.get("mesh_conflict", C.DEFAULT_MESH_CONFLICT), 0),
         ("Token warning      : %s days" % (st.get("token_warn_days", 30)
                                            or 30), 0),
         ("Colour theme       : %s" % st.get("theme", "default"), 0),

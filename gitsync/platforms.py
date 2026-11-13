@@ -1010,11 +1010,18 @@ class LocalPlatform:
     def delete_repo(self, repo):
         """remove the bare folder for a repo. Opt-in only (see
         sync.prune_repos) — this is the most destructive of the four."""
+        import stat
         path = os.path.join(self.path, _fs_unique(repo["name"]) + ".git")
         if not os.path.isdir(path):
             return True, ""                     # already gone
+        def _onerror(func, p, _exc):
+            try:
+                os.chmod(p, stat.S_IWRITE)
+                func(p)
+            except Exception:
+                pass
         try:
-            shutil.rmtree(path)
+            shutil.rmtree(path, onerror=_onerror)
         except OSError as e:
             return False, str(e)[:120]
         return True, ""
