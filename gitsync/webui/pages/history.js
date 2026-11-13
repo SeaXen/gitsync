@@ -9,7 +9,12 @@
       var recs = (d.records || []).slice().reverse();
       var host = document.getElementById("h-host");
       if (!recs.length) {
-        host.innerHTML = G.emptyState("No runs recorded yet", "Run a sync to see history.", "history");
+        host.innerHTML = G.emptyState("No runs recorded yet",
+          "Run a sync to see history.", "history",
+          '<button class="btn primary" id="h-run">Run sync now</button>');
+        document.getElementById("h-run").addEventListener("click", function () {
+          G.busy(this, function () { return G.startSync({}); });
+        });
         return;
       }
       var sparkHtml = (d.spark && d.spark.length)

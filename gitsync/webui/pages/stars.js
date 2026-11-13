@@ -77,7 +77,8 @@
       !state.stars.length);
     if (!state.stars.length) {
       host.innerHTML = G.emptyState("No stars",
-        "or this site does not expose them", "stars");
+        "or this site does not expose them", "stars",
+        '<a class="btn" href="repos.html">Browse repos instead →</a>');
       return;
     }
     host.innerHTML = '<p class="label">' + state.stars.length + " starred</p>" +

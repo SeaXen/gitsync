@@ -513,10 +513,13 @@
       (msg ? '<div class="muted u-mt8 u-fs125">' +
         esc(msg) + "</div>" : "") + "</div>";
   }
-  function emptyState(title, msg, icon) {
+  // action: raw HTML for the one button that gets the user out of the empty
+  // state (a dead end with no way forward is the worst kind of page)
+  function emptyState(title, msg, icon, action) {
     return '<div class="empty-state">' + (I[icon || "box"] || I.box) +
       '<div class="t">' + esc(title) + "</div>" +
-      (msg ? "<div>" + esc(msg) + "</div>" : "") + "</div>";
+      (msg ? "<div>" + esc(msg) + "</div>" : "") +
+      (action ? '<div class="mt">' + action + "</div>" : "") + "</div>";
   }
   function errorBox(err) {
     return '<div class="state error">' + esc(apiError(err)) + "</div>";

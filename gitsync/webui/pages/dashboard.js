@@ -385,7 +385,8 @@
     if (lbl) lbl.textContent = "Platforms: " + rows.length + " sites, " + live +
       " connected · " + totalRepos + " repos";
     if (!rows.length) {
-      host.innerHTML = G.emptyState("No platforms", "Add one on the Platforms page.", "platforms");
+      host.innerHTML = G.emptyState("No platforms", "Add one to start backing up.",
+        "platforms", '<a class="btn primary" href="platforms.html">Add platform →</a>');
       return;
     }
     host.innerHTML = rows.map(function (r) {

@@ -396,7 +396,17 @@
     if (!rows.length) {
       host.innerHTML = G.emptyState(
         state.q ? "No matching repos" : "No repos",
-        state.q ? "clear the filter to see all" : "this platform has none", "repos");
+        state.q ? "clear the filter to see all" : "this platform has none",
+        "repos", state.q
+          ? '<button class="btn" id="r-clearq">Clear the filter</button>'
+          : '<a class="btn" href="platforms.html">Check the platform →</a>');
+      var cq = document.getElementById("r-clearq");
+      if (cq) cq.addEventListener("click", function () {
+        var box = document.getElementById("r-q");
+        if (box) { box.value = ""; }
+        state.q = "";
+        renderList();
+      });
       return;
     }
     host.innerHTML = rows.map(function (r) {
