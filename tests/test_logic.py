@@ -4929,6 +4929,64 @@ class TestM1PolishFixes(unittest.TestCase):
             finally:
                 C.MIRROR_DIR = orig_hub
 
+    def test_orphans_collision_names_and_lifecycle(self):
+        """R5-1: collision-safe mirror names (a b -> a_b-7dbde9) must not be treated as orphans."""
+        with tempfile.TemporaryDirectory() as td:
+            orig_hub = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                local_dir = os.path.join(td, "local")
+                os.makedirs(local_dir, exist_ok=True)
+                # Create mirrors for "a b", "a_b", "ünï", "alpha"
+                m_ab = os.path.join(local_dir, P._fs_unique("a b") + ".git")
+                m_a_b = os.path.join(local_dir, P._fs_unique("a_b") + ".git")
+                m_uni = os.path.join(local_dir, P._fs_unique("ünï") + ".git")
+                m_alpha = os.path.join(local_dir, P._fs_unique("alpha") + ".git")
+                m_legacy = os.path.join(td, "legacy_repo.git")
+                for p in (m_ab, m_a_b, m_uni, m_alpha, m_legacy):
+                    os.makedirs(p, exist_ok=True)
+
+                # All live at source: expected relative paths computed from live repos
+                live_repos = [
+                    {"name": "a b", "id": "a b"},
+                    {"name": "a_b", "id": "a_b"},
+                    {"name": "ünï", "id": "ünï"},
+                    {"name": "alpha", "id": "alpha"},
+                    {"name": "legacy_repo", "id": "legacy_repo"},
+                ]
+                expected = []
+                for r in live_repos:
+                    mp = SY.mirror_path(r, "local")
+                    if mp:
+                        rel = os.path.relpath(mp, td).replace("\\", "/")
+                        if rel.endswith(".git"):
+                            rel = rel[:-4]
+                        expected.append(rel)
+
+                # 1. All synced -> orphans() == []
+                orphs = D.orphans(expected)
+                self.assertEqual(orphs, [], "expected zero orphans when all live repos are present")
+
+                # 2. Delete "alpha" at the source -> exactly alpha is an orphan
+                expected_no_alpha = [
+                    e for e in expected if not e.endswith("alpha") and e != "alpha"
+                ]
+                orphs_after_del = D.orphans(expected_no_alpha)
+                self.assertEqual(len(orphs_after_del), 1)
+                self.assertEqual(orphs_after_del[0][0], "local/alpha")
+
+                # 3. Legacy plain-named mirror still recognised when present
+                self.assertTrue(any(e == "legacy_repo" for e in expected))
+                # Delete legacy_repo as well -> both alpha and legacy_repo are orphans
+                expected_no_legacy = [
+                    e for e in expected_no_alpha if e != "legacy_repo"
+                ]
+                orphs_del_legacy = D.orphans(expected_no_legacy)
+                orph_names = {o[0] for o in orphs_del_legacy}
+                self.assertEqual(orph_names, {"local/alpha", "legacy_repo"})
+            finally:
+                C.MIRROR_DIR = orig_hub
+
     def test_repos_whitespace_stripping(self):
         raw = " foo ,  bar,baz  "
         cleaned = [r.strip() for r in raw.split(",") if r.strip()]

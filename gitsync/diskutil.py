@@ -135,17 +135,46 @@ def local_platform_paths(cfg):
 def orphans(source_names):
     """hub mirrors whose repo no longer exists on the source.
 
-    source_names: iterable of current repo names (any case). Returns
-    [(name, path, bytes)] sorted biggest-first — safe to delete, since a
-    mirror is only a cache of something that must exist upstream.
+    source_names: iterable of expected hub paths (e.g. 'local/a_b-7dbde9'),
+    full paths, or plain repo names. Returns [(name, path, bytes)] sorted
+    biggest-first — safe to delete, since a mirror is only a cache of something
+    that must exist upstream.
     """
-    live = {str(n).lower() for n in source_names}
+    from . import platforms as P
+    live = set()
+    for item in source_names:
+        s = str(item).strip().replace("\\", "/")
+        if not s:
+            continue
+        if os.path.isabs(s) and C.MIRROR_DIR:
+            try:
+                rel = os.path.relpath(s, C.MIRROR_DIR).replace("\\", "/")
+                if not rel.startswith(".."):
+                    s = rel
+            except ValueError:
+                pass
+        if s.endswith(".git"):
+            s = s[:-4]
+        live.add(s.lower())
+        parts = s.split("/")
+        if len(parts) > 1:
+            live.add(parts[-1].lower())
+            base_part = parts[-1].split("__")[-1]
+            live.add(base_part.lower())
+        else:
+            live.add(P._fs_safe(s).lower())
+            live.add(P._fs_unique(s).lower())
+
     out = []
     for name, path, size, _ in mirrors():
-        # name is "type/id" (new) or "name" (legacy): compare the id part
+        # name is "type/id" (new) or "name" (legacy)
         rid = name.split("/", 1)[1] if "/" in name else name
         base = rid.split("__")[-1] if "__" in rid else rid
-        if rid.lower() not in live and name.lower() not in live and base.lower() not in live:
+        path_norm = path.replace("\\", "/").lower()
+        if (name.lower() not in live and
+            rid.lower() not in live and
+            base.lower() not in live and
+            path_norm not in live):
             out.append((name, path, size))
     out.sort(key=lambda t: t[2], reverse=True)
     return out

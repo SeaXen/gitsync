@@ -1117,12 +1117,14 @@ def cmd_disk(args):
     # that a route's include/exclude glob keeps) as orphaned, and
     # --prune-orphans then deleted live data.
     orphans = []
-    live_names = set()
+    expected_rel = set()
     listed = False
     for route in C.routes(cfg):
         if route.get("enabled") is False:
             continue
         sname = route.get("source")
+        if getattr(args, "route_source", None) and sname != args.route_source:
+            continue
         sp = C.platform(cfg, sname)
         if not sp or not sp.get("enabled"):
             continue
@@ -1132,10 +1134,21 @@ def cmd_disk(args):
             print("cannot list %s to check for orphans: %s" % (sname, e))
             continue
         listed = True
+        ptype = sp.get("type") or "local"
         for r in SYNC._filter_repos(repos, route):
-            live_names.add(r["name"].lower())
+            mp = SYNC.mirror_path(r, ptype)
+            if mp:
+                rel = os.path.relpath(mp, C.MIRROR_DIR).replace("\\", "/")
+                if rel.endswith(".git"):
+                    rel = rel[:-4]
+                expected_rel.add(rel)
+            rid = r.get("id") or r.get("name") or ""
+            expected_rel.add("%s/%s" % (ptype, SYNC.hub_rel(rid)))
+            name = r.get("name") or rid
+            expected_rel.add(P._fs_safe(name))
+            expected_rel.add(str(name))
     if listed:
-        orphans = D.orphans(live_names)
+        orphans = D.orphans(expected_rel)
 
     ms = D.mirrors()
     total = sum(m[2] for m in ms)
