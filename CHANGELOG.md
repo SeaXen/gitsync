@@ -4,6 +4,22 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.8] - 2026-11-15
+
+### Core Sync & Disk Reclaim
+- Accurate orphan mirror detection (R5-1): Updated `diskutil.orphans()` and `cmd_disk` to match expected relative hub paths and handle collision-safe folder names (such as `a_b-7dbde9` generated for `a b`). Prevents live repositories with sanitized or hashed names from being marked as orphans or pruned by `--prune-orphans`.
+- Legacy flat mirror recognition: Maintained backward compatibility for plain repo mirror paths while honoring unique platform-scoped paths.
+
+### CLI Enhancements
+- Added `gitsync schedule` command: Supports `status`, `install`, and `remove`/`uninstall` subcommands, aligning the CLI with documented scheduler controls.
+
+### TUI Polish
+- Ellipsis on line truncation: Lines exceeding terminal width in the Dashboard live log, Log tab, and History panels are now trimmed cleanly with an ellipsis (`…`) rather than being cut abruptly at 80 columns.
+
+### Packaging & Documentation
+- Release formula template: Clarified Homebrew packaging formula in `packaging/homebrew/gitsync.rb` with release tag tarball checksum placeholders.
+- Documentation consistency: Replaced hard-coded version strings in active documentation with placeholders and added an automated CI packaging check to prevent doc version drift.
+
 ## [2.1.7] - 2026-11-14
 
 ### Core Sync & CLI Polish
