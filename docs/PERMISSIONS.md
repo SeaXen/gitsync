@@ -37,8 +37,7 @@ in the platform config, so org repos stay invisible until you do |
 | `write_repository` | Narrower alternative for git-over-HTTP only |
 
 **Minimum:** `api`
-**Note:** gitsync reads a GitLab *token* only. There is no `glab` CLI path —
-paste a personal access token with the `api` scope.
+**CLI alternative:** When using the GitLab CLI (`glab`), configure the platform with `"auth": "glab"` to use your existing `glab` login via `gitsync/glab_askpass.py`. Alternatively, provide a personal access token with the `api` scope (or set via `GITSYNC_<NAME>_TOKEN` / `GITLAB_TOKEN`).
 
 ---
 

@@ -6,7 +6,7 @@
 #   bash install.sh --user         # install to ~/.local/share/gitsync
 #   bash install.sh --schedule hourly|6h|12h|daily|off
 #   bash install.sh --cron         # use cron instead of a systemd timer
-#   bash install.sh --tag v2.1.4   # record which release this install is
+#   bash install.sh --tag v2.1.7   # record which release this install is
 #
 # What it does:
 #   1. copies the app (default: /opt/gitsync, or ~/.local/share/gitsync)
@@ -78,6 +78,7 @@ if [ -n "$RELEASE_TAG" ]; then
     printf '%s\n' "$RELEASE_TAG" > "$INSTALL_DIR/.release"
 fi
 [ -f "$INSTALL_DIR/gitsync/askpass.py" ] && chmod +x "$INSTALL_DIR/gitsync/askpass.py" || true
+[ -f "$INSTALL_DIR/gitsync/glab_askpass.py" ] && chmod +x "$INSTALL_DIR/gitsync/glab_askpass.py" || true
 
 # --- symlink ---
 $SUDO mkdir -p "$BIN_DIR"

@@ -71,7 +71,7 @@ while [ $# -gt 0 ]; do
         --no-setup)   DO_SETUP=0; shift ;;
         --no-sync)    DO_SYNC=0; shift ;;
         --branch)     BRANCH="${2:-main}"; shift 2 ;;
-        --tag)        TAG="${2:?--tag needs a value like v2.1.4}"; shift 2 ;;
+        --tag)        TAG="${2:?--tag needs a value like v2.1.7}"; shift 2 ;;
         --sha256)     SHA256="${2:?--sha256 needs a hash}"; shift 2 ;;
         --yes|-y)     shift ;;      # accepted; nothing to confirm;
         -h|--help)    sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;

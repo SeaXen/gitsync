@@ -4806,5 +4806,213 @@ class TestFirstRunWizardAndStaleState(unittest.TestCase):
         self.assertTrue(C.has_runnable_routes(cfg_ready))
         self.assertTrue(W._stale_state(cfg_ready, None)["stale"])
 
+
+class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
+    """Windows Task Scheduler integration, route result tracking, and env token overrides."""
+
+    def test_windows_task_install_and_status(self):
+        calls = []
+        def mock_sh(cmd, stdin_text=None, timeout=20):
+            calls.append(cmd)
+            if "schtasks" in cmd and "/Query" in cmd:
+                return subprocess.CompletedProcess(cmd, 0, '"\\gitsync","11/14/2026 12:00:00 PM","Ready"\n', "")
+            return subprocess.CompletedProcess(cmd, 0, "SUCCESS", "")
+
+        orig_sh = S._sh
+        orig_have = S.have_task_scheduler
+        S._sh = mock_sh
+        S.have_task_scheduler = lambda: True
+        try:
+            self.assertTrue(S.windows_task_installed())
+            st = S.windows_task_status()
+            self.assertIn("Ready", st)
+            self.assertIn("12:00:00", st)
+            self.assertIn("windows task:", S.status())
+
+            # Install hourly
+            ok = S.install_windows_task("hourly")
+            self.assertTrue(ok)
+            self.assertTrue(any("/SC" in c and "HOURLY" in c for c in calls))
+
+            # Install 6h
+            calls.clear()
+            ok = S.install_windows_task("6h")
+            self.assertTrue(ok)
+            self.assertTrue(any("/MO" in c and "6" in c for c in calls))
+
+            # Uninstall
+            calls.clear()
+            self.assertTrue(S.uninstall_windows_task())
+            self.assertTrue(any("/Delete" in c for c in calls))
+        finally:
+            S._sh = orig_sh
+            S.have_task_scheduler = orig_have
+
+    def test_install_cron_honesty(self):
+        orig_sh = S._sh
+        try:
+            S._sh = lambda *a, **k: subprocess.CompletedProcess([], 1, "", "crontab: command not found")
+            self.assertFalse(S.install_cron("hourly"))
+
+            S._sh = lambda *a, **k: subprocess.CompletedProcess([], 0, "", "")
+            self.assertTrue(S.install_cron("hourly"))
+        finally:
+            S._sh = orig_sh
+
+    def test_env_token_overrides(self):
+        old_env = os.environ.copy()
+        try:
+            os.environ["GITSYNC_WORK_GH_TOKEN"] = "ghp_work_token_123"
+            os.environ["GITSYNC_MY_GITLAB_TOKEN"] = "glpat_my_token_456"
+            os.environ["GITSYNC_FORK_FORGEJO_TOKEN"] = "forgejo_token_789"
+
+            gh = P.make("work_gh", {"type": "github"})
+            self.assertEqual(gh.token, "ghp_work_token_123")
+
+            gl = P.make("my_gitlab", {"type": "gitlab"})
+            self.assertEqual(gl.token, "glpat_my_token_456")
+
+            fj = P.make("fork_forgejo", {"type": "forgejo"})
+            self.assertEqual(fj.token, "forgejo_token_789")
+        finally:
+            os.environ.clear()
+            os.environ.update(old_env)
+
+    def test_route_result_tracking(self):
+        with tempfile.TemporaryDirectory() as td:
+            orig_data = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                SY.mark_route_run({"name": "route_alpha"}, status="ok", ok_count=5, failed_count=0)
+                res = SY.last_route_result("route_alpha")
+                self.assertIsNotNone(res)
+                self.assertEqual(res["status"], "ok")
+                self.assertEqual(res["ok"], 5)
+                self.assertEqual(res["failed"], 0)
+
+                # Legacy timestamp fallback in route_state.json
+                st = SY._load_route_state()
+                st["route_legacy"] = 1700000000.0
+                SY._save_route_state(st)
+
+                self.assertEqual(SY.last_route_run("route_legacy"), 1700000000.0)
+                res_leg = SY.last_route_result("route_legacy")
+                self.assertEqual(res_leg["status"], "ok")
+                self.assertEqual(res_leg["at"], 1700000000.0)
+            finally:
+                C.DATA_DIR = orig_data
+
+
+class TestM1PolishFixes(unittest.TestCase):
+    """Unit tests for M1 core sync & CLI bug fixes."""
+
+    def test_glab_and_oauth_auth_readiness(self):
+        self.assertTrue(C.is_platform_ready({"type": "gitlab", "auth": "glab"}))
+        self.assertTrue(C.is_platform_ready({"type": "gitlab", "auth": "oauth"}))
+        self.assertTrue(C.is_platform_ready({"type": "github", "auth": "gh"}))
+        self.assertFalse(C.is_platform_ready({"type": "gitlab"}))
+
+    def test_orphans_scoped_mirror_base_name(self):
+        with tempfile.TemporaryDirectory() as td:
+            orig_hub = C.MIRROR_DIR
+            C.MIRROR_DIR = td
+            try:
+                os.makedirs(os.path.join(td, "github"), exist_ok=True)
+                mirror_dir = os.path.join(td, "github", "user__myrepo.git")
+                os.makedirs(mirror_dir, exist_ok=True)
+                # If "myrepo" is live, user__myrepo should not be an orphan
+                orph = D.orphans(["myrepo"])
+                self.assertEqual(len(orph), 0)
+                # If only another repo is live, it should be an orphan
+                orph2 = D.orphans(["otherrepo"])
+                self.assertEqual(len(orph2), 1)
+            finally:
+                C.MIRROR_DIR = orig_hub
+
+    def test_repos_whitespace_stripping(self):
+        raw = " foo ,  bar,baz  "
+        cleaned = [r.strip() for r in raw.split(",") if r.strip()]
+        self.assertEqual(cleaned, ["foo", "bar", "baz"])
+
+
+class TestTUIHelpers(unittest.TestCase):
+    """Headless unit tests for TUI helper functions, wheel math, tab navigation, and formatting."""
+
+    def test_wheel_delta_math(self):
+        # Platform tab (tab 1): top-down list (0 is top)
+        tui.state["tab"] = 1
+        tui.state["platforms"] = [("p%d" % i, "github", True, True, "", 10) for i in range(10)]
+        tui.state["plat_scroll"] = 5
+        # Wheel up (delta < 0, e.g. -3) should scroll UP towards 0
+        tui._wheel(-3)
+        self.assertEqual(tui.state["plat_scroll"], 2)
+        # Wheel down (delta > 0, e.g. +3) should scroll DOWN towards max
+        tui._wheel(3)
+        self.assertEqual(tui.state["plat_scroll"], 5)
+
+        # Stars tab (tab 3): top-down list (0 is top)
+        tui.state["tab"] = 3
+        tui.STAR_STATE["rows"] = ["r%d" % i for i in range(10)]
+        tui.STAR_STATE["scroll"] = 5
+        tui._wheel(-3)
+        self.assertEqual(tui.STAR_STATE["scroll"], 2)
+        tui._wheel(3)
+        self.assertEqual(tui.STAR_STATE["scroll"], 5)
+
+        # Log tab (tab 4): log tail where higher offset means scrolled back in history
+        tui.state["tab"] = 4
+        tui.state["syncing"] = False
+        tui.state["log_tail"] = ["line %d" % i for i in range(20)]
+        tui.state["log_scroll"] = 2
+        # Wheel up (delta < 0) scrolls back into history
+        tui._wheel(-3)
+        self.assertEqual(tui.state["log_scroll"], 5)
+        # Wheel down (delta > 0) scrolls towards live tail
+        tui._wheel(3)
+        self.assertEqual(tui.state["log_scroll"], 2)
+
+    def test_tab_bar_and_tab_at(self):
+        # Full width: all tabs visible
+        bar = tui.tab_bar(w=120, active=0)
+        self.assertIn("1:Dashboard", bar)
+        self.assertIn("7:Settings", bar)
+
+        # Narrow width: windowed around active tab
+        bar_narrow = tui.tab_bar(w=30, active=2)
+        # Verify _tab_at resolves columns properly
+        hit = tui._tab_at(tui._TAB_HIT["start"] + tui._TAB_HIT.get("pad", 0) + 1, 30)
+        self.assertIsNotNone(hit)
+
+    def test_platform_rows_default_enabled(self):
+        cfg = {
+            "platforms": {
+                "default_plat": {"type": "github", "token": "tok123"},
+                "disabled_plat": {"type": "gitlab", "enabled": False},
+                "enabled_plat": {"type": "local", "enabled": True, "path": "/tmp"},
+            }
+        }
+        rows = tui._platform_rows(cfg)
+        rows_by_name = {r[0]: r for r in rows}
+        # default_plat has no "enabled" field, must default to True
+        self.assertTrue(rows_by_name["default_plat"][2])
+        # disabled_plat explicitly False
+        self.assertFalse(rows_by_name["disabled_plat"][2])
+        # enabled_plat explicitly True
+        self.assertTrue(rows_by_name["enabled_plat"][2])
+
+    def test_fit_footer(self):
+        long_footer = " [1-7]tabs  [S]ync  [P]ause  [D]ry-run  [L]og  [C]ron  [O]pt  [A]cc  [N]otify  [E]repos  [T]ools  [W]izard  [R]efresh  [?]Help  [Q]uit "
+        fitted = tui.fit_footer(long_footer, 60)
+        self.assertLessEqual(len(fitted), 60)
+        self.assertIn("[?]Help  [Q]uit", fitted)
+
+    def test_cached_config_and_records(self):
+        tui._DRAW_CACHE.clear()
+        cfg1 = tui._cached_config(ttl=5.0)
+        self.assertIsInstance(cfg1, dict)
+        cfg2 = tui._cached_config(ttl=5.0)
+        self.assertIs(cfg1, cfg2)
+
+
 if __name__ == '__main__':
     unittest.main()

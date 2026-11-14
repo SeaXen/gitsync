@@ -751,6 +751,7 @@ def _route_view(cfg, r):
             "schedule": r.get("schedule"),
             "effective_schedule": C.route_schedule(cfg, r),
             "next": SYNC.next_due_text(r, cfg),
+            "last_result": SYNC.last_route_result(r.get("name")),
             "include": list(r.get("include") or []),
             "exclude": list(r.get("exclude") or []),
             "include_file": r.get("include_file", ""),

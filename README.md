@@ -44,7 +44,7 @@ curl -fsSL .../quickinstall.sh | bash -s -- --user
 # unattended, daily, cron instead of systemd
 curl -fsSL .../quickinstall.sh | bash -s -- --yes --schedule daily --cron
 # a pinned, checksum-verified release
-curl -fsSL .../quickinstall.sh | bash -s -- --tag v2.1.6
+curl -fsSL .../quickinstall.sh | bash -s -- --tag v2.1.7
 ```
 
 | Flag | Effect |
@@ -115,7 +115,7 @@ you can run `full` once to re-align. Details:
 |---|---|
 | **Linux** | fully supported — systemd timer, or cron. The primary target. |
 | **macOS** | supported — installs a launchd agent instead of a systemd timer. |
-| **Windows** | **not supported.** The CLI, sync engine and web UI run under Python, and `gitsync/askpass.bat` exists for git credential prompts, but there is no installer, no scheduler integration and no test coverage. WSL2 works (it is Linux). |
+| **Windows** | **supported.** The CLI, sync engine, TUI, and web UI run natively under Python. `gitsync install` automatically configures persistent background synchronization via Windows Task Scheduler (`schtasks.exe`), with complete unit test coverage and cross-platform disk management. WSL2 is also supported. |
 | **Docker** | supported — web UI + CLI, x86-64 and arm64 base image |
 
 ## Documentation

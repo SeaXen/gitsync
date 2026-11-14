@@ -144,7 +144,8 @@ def orphans(source_names):
     for name, path, size, _ in mirrors():
         # name is "type/id" (new) or "name" (legacy): compare the id part
         rid = name.split("/", 1)[1] if "/" in name else name
-        if rid.lower() not in live and name.lower() not in live:
+        base = rid.split("__")[-1] if "__" in rid else rid
+        if rid.lower() not in live and name.lower() not in live and base.lower() not in live:
             out.append((name, path, size))
     out.sort(key=lambda t: t[2], reverse=True)
     return out

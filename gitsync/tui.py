@@ -172,7 +172,7 @@ def _probe(name, p):
         plat = P.make(name, p)
         ok, info = plat.test()
         count = "?"
-        if ok and p.get("enabled"):
+        if ok and p.get("enabled", True):
             try:
                 count = str(len(plat.list_repos()))
             except Exception:
@@ -184,7 +184,7 @@ def _probe(name, p):
             )
     except Exception as e:
         ok, info, count = False, str(e)[:80], "?"
-    return (name, p.get("type", "?"), bool(p.get("enabled")),
+    return (name, p.get("type", "?"), bool(p.get("enabled", True)),
             bool(ok), info, count)
 
 
@@ -325,7 +325,7 @@ def run_sync(dry_run=False, force=False):
 
     def worker():
         try:
-            cmd = ["python3", "-m", "gitsync", "sync"]
+            cmd = [sys.executable, "-m", "gitsync", "sync"]
             if dry_run:
                 cmd.append("--dry-run")
             if force:
@@ -646,7 +646,8 @@ def _form(stdscr, title, fields, note=None):
                 vals[key] = ch_o[(ch_o.index(cur) + 1) % len(ch_o)] \
                     if cur in ch_o else ch_o[0]
                 continue
-            new = prompt_line(stdscr, " %s: " % label, str(vals[key]))
+            new = prompt_line(stdscr, " %s: " % label, str(vals[key]),
+                              secret=bool(opts.get("secret")))
             if new is not None and new != "":
                 vals[key] = new
             elif new == "" and opts.get("clearable"):
@@ -660,7 +661,7 @@ def _platform_rows(cfg):
     for name, p in (cfg.get("platforms") or {}).items():
         ok, info = tested.get(name, (None, ""))
         extra = p.get("path") or p.get("url") or ""
-        rows.append((name, p.get("type", "?"), bool(p.get("enabled")),
+        rows.append((name, p.get("type", "?"), bool(p.get("enabled", True)),
                      bool(ok) if ok is not None else None, info,
                      bool(p.get("token")), extra,
                      p.get("auth") == "gh" and not p.get("token"),
@@ -733,6 +734,9 @@ def accounts_screen(stdscr):
         commit_screen(stdscr)
 
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (curses.KEY_UP, ord("k")):
@@ -849,6 +853,9 @@ def _remove_platform_screen(stdscr, name):
                      " Y=remove  N=keep it  (this cannot be undone) ")
         commit_screen(stdscr)
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
             return
         if ch in (ord("y"), ord("Y")):
@@ -1314,10 +1321,10 @@ def _webhooks_screen(stdscr, cfg):
         elif ch in (ord("r"), ord("R")):
             continue
         elif ch in (ord("i"), ord("I")):
-            _suspend_run(stdscr, ["python3", "-m", "gitsync", "webhooks",
+            _suspend_run(stdscr, [sys.executable, "-m", "gitsync", "webhooks",
                                   "--install"])
         elif ch in (ord("x"), ord("X")):
-            _suspend_run(stdscr, ["python3", "-m", "gitsync", "webhooks",
+            _suspend_run(stdscr, [sys.executable, "-m", "gitsync", "webhooks",
                                   "--uninstall"])
 
 
@@ -1521,6 +1528,7 @@ def repos_screen(stdscr, source=None):
         elif cur - top >= rows:
             top = cur - rows + 1
         view = items[top:top + rows]
+        name_w = max(26, min(60, w - 24))
         for i, (name, priv, fork) in enumerate(view):
             mark = "[x]" if name in state["repo_sel"] else "[ ]"
             attr = curses.color_pair(2) if name in state["repo_sel"] else 0
@@ -1528,7 +1536,7 @@ def repos_screen(stdscr, source=None):
                 attr |= curses.A_REVERSE
             is_mirrored = os.path.isdir(os.path.join(C.MIRROR_DIR, name + ".git"))
             hub_tag = "mirrored" if is_mirrored else "-"
-            line = " %s %-26s %-4s %-8s %s" % (mark, name[:26],
+            line = " %s %-*.*s %-4s %-8s %s" % (mark, name_w, name_w, name,
                                                "priv" if priv else "pub ",
                                                hub_tag,
                                                "fork" if fork else "")
@@ -1644,7 +1652,7 @@ def repos_screen(stdscr, source=None):
             if not state["repo_sel"]:
                 flash("nothing selected - press space on a repo", 5)
                 continue
-            cmd = ["python3", "-m", "gitsync", "sync", "--repos",
+            cmd = [sys.executable, "-m", "gitsync", "sync", "--repos",
                    ",".join(sorted(state["repo_sel"]))]
             if ch in (ord("l"), ord("L")):
                 local = _local_target(state.get("repo_src"))
@@ -1663,13 +1671,14 @@ def repos_screen(stdscr, source=None):
             query = ""
 
 
-def prompt_line(stdscr, label, initial=""):
+def prompt_line(stdscr, label, initial="", secret=False):
     """one-line text input at the bottom of the screen"""
     curses.curs_set(1)
     buf = initial or ""
     while True:
         h, w = stdscr.getmaxyx()
-        safe_add(stdscr, h - 1, 0, (label + buf + "_").ljust(w - 1)[:w - 1],
+        disp_buf = ("*" * len(buf)) if secret else buf
+        safe_add(stdscr, h - 1, 0, (label + disp_buf + "_").ljust(w - 1)[:w - 1],
                  curses.A_REVERSE)
         commit_screen(stdscr)
         try:
@@ -1691,8 +1700,8 @@ def prompt_line(stdscr, label, initial=""):
         if ch in (curses.KEY_BACKSPACE, 127, 8):
             buf = buf[:-1]
         elif ch == 27:
-            buf = ""
-            break
+            curses.curs_set(0)
+            return None
         elif c_val and c_val.isprintable():
             buf += c_val
         elif 32 <= ch < 0x110000 and ch != 127:
@@ -1760,6 +1769,22 @@ def modal_footer(stdscr, h, w, hint):
     msg, until = state.get("message", ("", 0))
     if msg and time.time() < until:
         text = " %s " % msg
+    room = max(1, w - 1)
+    if len(text) > room:
+        tail = "B=back" if "B=back" in text else ("B = back" if "B = back" in text else "")
+        if tail:
+            head = text[:text.rfind(tail)].rstrip()
+            keep = room - len(tail) - 5
+            if keep > 0:
+                cut = head[:keep].rstrip()
+                sp = cut.rfind("  ")
+                if sp > 0:
+                    cut = cut[:sp]
+                text = cut + " … " + tail
+            else:
+                text = tail
+        else:
+            text = text[:room]
     safe_add(stdscr, h - 1, 0, text.center(w - 1)[:w - 1], curses.A_REVERSE)
 
 
@@ -1822,9 +1847,10 @@ def _scroll_view(stdscr, title, lines, start=0):
         elif ch == ord("/"):
             # the footer has always advertised "/=filter" but the key was
             # never handled here, so search only worked from the tabs
-            state["search"] = prompt_line(stdscr, " filter: ",
-                                          state["search"]).strip()
-            scroll = 0
+            res = prompt_line(stdscr, " filter: ", state["search"])
+            if res is not None:
+                state["search"] = res.strip()
+                scroll = 0
 
 
 CLOCK_X = 1          # column of the clock inside the status line
@@ -1835,6 +1861,26 @@ _status_cache = {"txt": "checking...", "at": 0.0}
 # per-frame draw work (config/records/route_state reads) cached by key:
 # {key: (stamp, ttl, value)} — see _build_route_rows()
 _DRAW_CACHE = {}
+
+
+def _cached_config(ttl=1.0):
+    now = time.time()
+    hit = _DRAW_CACHE.get("config")
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    cfg = C.load_config()
+    _DRAW_CACHE["config"] = (now, cfg)
+    return cfg
+
+
+def _cached_last_records(n=10, ttl=1.0):
+    now = time.time()
+    hit = _DRAW_CACHE.get("records_%d" % n)
+    if hit and now - hit[0] < ttl:
+        return hit[1]
+    recs = SYNC.last_records(n)
+    _DRAW_CACHE["records_%d" % n] = (now, recs)
+    return recs
 
 
 def cached_status():
@@ -1855,7 +1901,7 @@ def cached_status():
 def status_line(cfg=None):
     """the row-1 status text (clock at CLOCK_X, sync state, schedule, age)"""
     if cfg is None:
-        cfg = C.load_config()
+        cfg = _cached_config()
     sched = C.setting(cfg, "schedule", "hourly")
     is_paused = C.setting(cfg, "paused", False)
     sync_txt = "PAUSED" if is_paused else ("YES" if state["syncing"] else "no")
@@ -1894,11 +1940,18 @@ def _tab_at(x, w):
     """which tab (0-based) a screen column belongs to, or None"""
     if not _TAB_HIT["items"]:
         return None
-    pos = _TAB_HIT["start"] + _TAB_HIT.get("pad", 0)
+    start = _TAB_HIT["start"]
+    pad = _TAB_HIT.get("pad", 0)
+    lo = _TAB_HIT["first"]
+    if pad and start <= x < start + pad:
+        return max(0, lo - 1)
+    pos = start + pad
     for off, p in enumerate(_TAB_HIT["items"]):
         if pos <= x < pos + len(p):
-            return _TAB_HIT["first"] + off
+            return lo + off
         pos += len(p) + 2
+    if _TAB_HIT.get("has_right") and pos <= x <= pos + 4:
+        return min(len(TABS) - 1, lo + len(_TAB_HIT["items"]))
     return None
 
 
@@ -1946,7 +1999,10 @@ def tab_bar(w=None, active=None):
             pad = 2
         if hi < len(items) - 1:
             text += " ›"
+    has_left = windowed and lo > 0
+    has_right = windowed and hi < len(items) - 1
     _TAB_HIT.update(items=shown, first=lo, pad=pad,
+                    has_left=has_left, has_right=has_right,
                     start=max(0, ((w - 1) - len(text)) // 2))
     return text
 
@@ -2093,7 +2149,7 @@ def draw_platforms(stdscr, h, w, G, R, dim):
     rows = []
     for name, ptype, on, ok, info, count in state["platforms"]:
         attr = (G if ok else R) if on else dim
-        rows.append(("%-14s %-9s %-4s %-5s repos=%-6s %s"
+        rows.append(("%-14.14s %-9.9s %-4s %-5s repos=%-6s %s"
                      % (name, ptype, "ON" if on else "off",
                         "OK" if ok else "FAIL", count, info), attr))
     if not rows:
@@ -2359,7 +2415,7 @@ def _run_route(name, dry_run=False):
 
     def worker():
         try:
-            cmd = ["python3", "-m", "gitsync", "sync", "--route", name]
+            cmd = [sys.executable, "-m", "gitsync", "sync", "--route", name]
             if dry_run:
                 cmd.append("--dry-run")
             p = subprocess.Popen(
@@ -2394,7 +2450,13 @@ def _edit_route_filters(stdscr, route):
     inc = ",".join(route.get("include") or [])
     exc = ",".join(route.get("exclude") or [])
     inc = prompt_line(stdscr, " include globs (blank = all): ", inc)
+    if inc is None:
+        flash("filter edit cancelled", 3)
+        return
     exc = prompt_line(stdscr, " exclude globs (blank = none): ", exc)
+    if exc is None:
+        flash("filter edit cancelled", 3)
+        return
     cfg = C.load_config()
     for r in cfg.get("routes", []):
         if r.get("name") == route.get("name"):
@@ -2463,6 +2525,9 @@ def _route_options_screen(stdscr, route):
         commit_screen(stdscr)
 
         ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
         if ch in (ord("b"), ord("B"), 27):
             return
         elif ch in (curses.KEY_UP, ord("k")):
@@ -2601,14 +2666,39 @@ def _add_route_screen(stdscr):
 
 def _remove_route_screen(stdscr, name):
     cfg = C.load_config()
-    routes = [r for r in cfg.get("routes", []) if r.get("name") != name]
-    if len(routes) == len(cfg.get("routes", [])):
+    target_route = next((r for r in cfg.get("routes", []) if r.get("name") == name), None)
+    if not target_route:
         flash("no such route: %s" % name, 5)
         return
-    cfg["routes"] = routes
-    C.save_config(cfg)
-    _reload_routes()
-    flash("route removed: %s" % name, 5)
+    while True:
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        safe_add(stdscr, 0, 0,
+                 (" REMOVE ROUTE %s " % name).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(4))
+        safe_add(stdscr, 2, 1,
+                 "This permanently deletes route '%s' from config." % name,
+                 curses.color_pair(3))
+        targets_str = ", ".join(target_route.get("targets", [])) or "(none)"
+        safe_add(stdscr, 3, 1,
+                 ("Source: %s  ->  Targets: %s" % (target_route.get("source"), targets_str))[:w - 4],
+                 curses.A_DIM)
+        modal_footer(stdscr, h, w,
+                     " Y=remove  N=keep it  (this cannot be undone) ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
+        if ch in (ord("n"), ord("N"), ord("b"), ord("B"), 27):
+            return
+        if ch in (ord("y"), ord("Y")):
+            routes = [r for r in cfg.get("routes", []) if r.get("name") != name]
+            cfg["routes"] = routes
+            C.save_config(cfg)
+            _reload_routes()
+            flash("route removed: %s" % name, 5)
+            return
 
 
 def routes_screen(stdscr):
@@ -2942,14 +3032,17 @@ def draw_log_tab(stdscr, h, w, R, G, dim=0):
 
 
 def draw_history_tab(stdscr, h, w):
-    recs = SYNC.last_records(40)
+    recs = _cached_last_records(40)
     durs = [r.get("elapsed_sec", 0) or 0 for r in recs[-30:]]
     spark = _sparkline(durs)
+    title = "RUN HISTORY"
     if spark:
-        safe_add(stdscr, 4, 1, "duration trend (last %d runs): %s"
-                 % (len(durs), spark), curses.A_BOLD)
-    row = 5
-    for r in reversed(recs[-(h - 8):]):
+        title += "  (duration trend: %s)" % spark
+    rows = []
+    avail = max(1, h - 7)
+    scroll = state.get("scroll", 0)
+    rev_recs = list(reversed(recs))
+    for r in rev_recs[scroll:scroll + avail]:
         if r.get("dry_run"):
             # a dry run records what it *would* change; showing it as
             # "N ok" made a preview look like a successful sync
@@ -2964,17 +3057,16 @@ def draw_history_tab(stdscr, h, w):
                        r.get("elapsed_sec")))
             attr = curses.color_pair(4) if r.get("failed") else \
                 curses.color_pair(2)
-        safe_add(stdscr, row, 1, line[:w - 2], attr)
-        row += 1
-    if not recs:
-        safe_add(stdscr, 4, 1, "no runs recorded yet", curses.A_DIM)
+        rows.append((line[:w - 8], attr))
+    if not rows:
+        rows.append(("no runs recorded yet", curses.A_DIM))
+    _panel_rows(stdscr, h, w, 3, rows, title)
+    safe_add(stdscr, h - 2, 2, "H = interactive history screen  |  up/dn = scroll", curses.A_DIM)
 
 
 def draw_settings(stdscr, h, w, dim):
-    # read the file rather than state["settings"]: that snapshot only moves
-    # when the platform refresh runs, so a change made in Options (or by
-    # hand) looked like it had not been saved
-    st = C.load_config().get("settings", {}) or {}
+    # read the cached config rather than reloading from disk on every frame
+    st = _cached_config().get("settings", {}) or {}
     notify = st.get("notify", {}) or {}
     rows = [
         ("Parallel workers   : %s" % st.get("workers", 4), 0),
@@ -2999,8 +3091,7 @@ def draw_settings(stdscr, h, w, dim):
          "W (wizard)", dim),
         ("notify test  : gitsync notify --test", dim),
     ]
-    for i, (text, attr) in enumerate(rows[:h - 6]):
-        safe_add(stdscr, 4 + i, 1, text[:w - 2], attr)
+    _panel_rows(stdscr, h, w, 3, rows[:h - 6], "SETTINGS & CONFIGURATION")
 
 
 HEALTH_TTL = 30          # seconds between health refreshes (network + disk walk)
@@ -3150,10 +3241,10 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
     # wiped by the clock's stdscr flush, so the dashboard rendered empty.
     top = 4
     plat_rows = []
-    shown_plats = state["platforms"][:6]
+    shown_plats = state["platforms"][:(3 if h <= 26 else 6)]
     for name, ptype, on, ok, info, count in shown_plats:
         attr = (G if ok else R) if on else dim
-        plat_rows.append(("%-14s %-9s %-4s %-5s repos=%-5s %s"
+        plat_rows.append(("%-14.14s %-9.9s %-4s %-5s repos=%-5s %s"
                           % (name, ptype, "ON" if on else "off",
                              "OK" if ok else "FAIL", count, info), attr))
     if not plat_rows:
@@ -3180,48 +3271,49 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
             ("3. run it:             S  (or: gitsync sync)", 0),
         ], "GETTING STARTED - no routes yet")
         top2 += 6
-
-    bits = []
-    for (n, s, t, _i, _e, direction, paused, route_on) in state["routes"]:
-        if direction == "mesh":
-            bits.append("%s: mesh %s" % (n, ", ".join([s] + t)))
-        else:
-            shown = [x + ("*" if x in paused else "") for x in t]
-            bits.append("%s: %s -> %s" % (n, s, ", ".join(shown) or "(none)"))
-        if not route_on:
-            bits[-1] += " [PAUSED]"
-    routes_txt = "  |  ".join(bits) or "(none)"
-    # one long line used to be truncated at the screen edge with no hint,
-    # so with several routes the dashboard silently hid the last ones
-    if len(routes_txt) > w - 10 and bits:
-        keep, used = [], 0
-        for b in bits:
-            if used + len(b) + 4 > w - 26:
-                break
-            keep.append(b)
-            used += len(b) + 4
-        hidden = len(bits) - len(keep)
-        routes_txt = "  |  ".join(keep)
-        if hidden > 0:
-            routes_txt += "  |  +%d more (3:Routes)" % hidden
-    st = state["settings"]
-    sched_txt = cached_status()
-    if len(sched_txt) > 34:
-        # a cron line is long; keep the useful head instead of letting the
-        # panel clip mid-word
-        sched_txt = sched_txt[:31].rstrip() + "…"
-    route_rows = [
-        (routes_txt[:w - 8], curses.A_BOLD),
-        ("workers=%s  mode=%s  forks=%s   scheduler: %s"
-         % (st.get("workers"), eff_mode_cached(), st.get("include_forks"),
-            sched_txt), dim),
-    ]
-    _panel_rows(stdscr, h, w, top2, route_rows, "ROUTES & SETTINGS")
+    else:
+        bits = []
+        for (n, s, t, _i, _e, direction, paused, route_on) in state["routes"]:
+            if direction == "mesh":
+                bits.append("%s: mesh %s" % (n, ", ".join([s] + t)))
+            else:
+                shown = [x + ("*" if x in paused else "") for x in t]
+                bits.append("%s: %s -> %s" % (n, s, ", ".join(shown) or "(none)"))
+            if not route_on:
+                bits[-1] += " [PAUSED]"
+        routes_txt = "  |  ".join(bits) or "(none)"
+        # one long line used to be truncated at the screen edge with no hint,
+        # so with several routes the dashboard silently hid the last ones
+        if len(routes_txt) > w - 10 and bits:
+            keep, used = [], 0
+            for b in bits:
+                if used + len(b) + 4 > w - 26:
+                    break
+                keep.append(b)
+                used += len(b) + 4
+            hidden = len(bits) - len(keep)
+            routes_txt = "  |  ".join(keep)
+            if hidden > 0:
+                routes_txt += "  |  +%d more (3:Routes)" % hidden
+        st = state["settings"]
+        sched_txt = cached_status()
+        if len(sched_txt) > 34:
+            # a cron line is long; keep the useful head instead of letting the
+            # panel clip mid-word
+            sched_txt = sched_txt[:31].rstrip() + "…"
+        route_rows = [
+            (routes_txt[:w - 8], curses.A_BOLD),
+            ("workers=%s  mode=%s  forks=%s   scheduler: %s"
+             % (st.get("workers"), eff_mode_cached(), st.get("include_forks"),
+                sched_txt), dim),
+        ]
+        _panel_rows(stdscr, h, w, top2, route_rows, "ROUTES & SETTINGS")
+        top2 += len(route_rows) + 2
 
     # ---- health strip: tokens, disk, webhooks ----
-    _health_strip(stdscr, top2 + len(route_rows) + 2, w, G, Y, R, dim)
+    _health_strip(stdscr, top2, w, G, Y, R, dim)
 
-    top3 = top2 + len(route_rows) + 3
+    top3 = top2 + 2
     if state["syncing"]:
         done, total, current, ok_n, fail_n, skip_n = sync_progress(detailed=True)
         pct = ("%d/%d" % (done, total)) if total else "starting..."
@@ -3238,8 +3330,12 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         top3 += 4
 
     lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
+    q = state["search"].lower()
+    if q:
+        lines = [l for l in lines if q in l.lower()]
     log_rows = []
-    for line in _log_window(lines, h - top3 - 3):
+    avail_log = max(3, h - top3 - 3)
+    for line in _log_window(lines, avail_log):
         attr = 0
         if re.search(r"\b(FAIL|failed|error)\b", line, re.I):
             attr = R
@@ -3249,9 +3345,14 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
             attr = curses.A_BOLD
         log_rows.append((line[:w - 8], attr))
     if not log_rows:
-        log_rows.append(("(no log lines yet)", dim))
+        if q:
+            log_rows.append(("(no line matches '%s' — Esc clears filter)" % state["search"], dim))
+        else:
+            log_rows.append(("(no log lines yet)", dim))
     title = "LOG (live tail - L for full log, H for history)"
-    if state.get("log_scroll"):
+    if q:
+        title = "LOG (filtered '%s': %d lines - Esc clears)" % (state["search"], len(lines))
+    elif state.get("log_scroll"):
         title = ("LOG (scrolled back %d - wheel down or Esc to follow)"
                  % state["log_scroll"])
     _panel_rows(stdscr, h, w, top3, log_rows, title)
@@ -3416,21 +3517,20 @@ def _wheel(delta):
     tab = state["tab"]
     if tab == 1:
         n = len(state["platforms"])
-        key, cur = "plat_scroll", state.get("plat_scroll", 0)
+        cur = state.get("plat_scroll", 0)
+        state["plat_scroll"] = max(0, min(max(0, n - 1), cur + delta))
     elif tab == 3:
-        n, key, cur = (len(STAR_STATE["rows"]), "star",
-                       STAR_STATE["scroll"])
+        n = len(STAR_STATE["rows"])
+        cur = STAR_STATE["scroll"]
+        STAR_STATE["scroll"] = max(0, min(max(0, n - 1), cur + delta))
+    elif tab in (5, 6):
+        cur = state.get("scroll", 0)
+        state["scroll"] = max(0, cur + delta)
     else:
         n = len(state["sync_lines"] if state["syncing"]
                 else state["log_tail"])
-        key, cur = "log_scroll", state.get("log_scroll", 0)
-    nxt = max(0, min(max(0, n - 1), cur - delta))
-    if key == "star":
-        STAR_STATE["scroll"] = nxt
-    elif key == "plat_scroll":
-        state["plat_scroll"] = nxt
-    else:
-        state["log_scroll"] = nxt
+        cur = state.get("log_scroll", 0)
+        state["log_scroll"] = max(0, min(max(0, n - 1), cur - delta))
     state["dirty"] = True
 
 
@@ -3563,6 +3663,21 @@ def _run(stdscr):
             state["scroll"] = 0
             STAR_STATE["scroll"] = 0
             state["plat_scroll"] = 0
+            state["log_scroll"] = 0
+        elif ch in (curses.KEY_LEFT, ord("[")):
+            state["tab"] = (state["tab"] - 1) % len(TABS)
+            state["scroll"] = 0
+            STAR_STATE["scroll"] = 0
+            state["plat_scroll"] = 0
+            state["log_scroll"] = 0
+            state["dirty"] = True
+        elif ch in (curses.KEY_RIGHT, ord("]")):
+            state["tab"] = (state["tab"] + 1) % len(TABS)
+            state["scroll"] = 0
+            STAR_STATE["scroll"] = 0
+            state["plat_scroll"] = 0
+            state["log_scroll"] = 0
+            state["dirty"] = True
         elif ch in (ord("s"), ord("S")) and state["tab"] == 3:
             stars_screen(stdscr)
         elif ch in (ord("s"), ord("S")):
@@ -3602,6 +3717,49 @@ def _run(stdscr):
         elif state["tab"] == 2 and ch in (ord("p"), ord("P"), 10, 13,
                                           curses.KEY_ENTER):
             routes_screen(stdscr)
+        elif state["tab"] in (0, 4) and ch in (curses.KEY_UP, curses.KEY_DOWN,
+                                              curses.KEY_PPAGE, curses.KEY_NPAGE,
+                                              curses.KEY_HOME, curses.KEY_END,
+                                              ord("k"), ord("j"), ord("g"),
+                                              ord("G")):
+            lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
+            q = state["search"].lower()
+            if q:
+                lines = [l for l in lines if q in l.lower()]
+            max_s = max(0, len(lines) - 3)
+            cur_s = state.get("log_scroll", 0)
+            if ch in (curses.KEY_UP, ord("k")):
+                state["log_scroll"] = min(max_s, cur_s + 1)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                state["log_scroll"] = max(0, cur_s - 1)
+            elif ch == curses.KEY_PPAGE:
+                state["log_scroll"] = min(max_s, cur_s + 8)
+            elif ch == curses.KEY_NPAGE:
+                state["log_scroll"] = max(0, cur_s - 8)
+            elif ch in (curses.KEY_HOME, ord("G")):
+                state["log_scroll"] = max_s
+            elif ch in (curses.KEY_END, ord("g")):
+                state["log_scroll"] = 0
+            state["dirty"] = True
+        elif state["tab"] == 5 and ch in (curses.KEY_UP, curses.KEY_DOWN,
+                                          curses.KEY_PPAGE, curses.KEY_NPAGE,
+                                          curses.KEY_HOME, curses.KEY_END,
+                                          ord("k"), ord("j")):
+            recs_len = len(_cached_last_records(40))
+            cur_s = state.get("scroll", 0)
+            if ch in (curses.KEY_UP, ord("k")):
+                state["scroll"] = max(0, cur_s - 1)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                state["scroll"] = min(max(0, recs_len - 1), cur_s + 1)
+            elif ch == curses.KEY_PPAGE:
+                state["scroll"] = max(0, cur_s - 8)
+            elif ch == curses.KEY_NPAGE:
+                state["scroll"] = min(max(0, recs_len - 1), cur_s + 8)
+            elif ch == curses.KEY_HOME:
+                state["scroll"] = 0
+            elif ch == curses.KEY_END:
+                state["scroll"] = max(0, recs_len - 1)
+            state["dirty"] = True
         elif state["tab"] == 1 and ch in (curses.KEY_UP, curses.KEY_DOWN,
                                           curses.KEY_PPAGE, curses.KEY_NPAGE,
                                           curses.KEY_HOME, curses.KEY_END,
@@ -3781,33 +3939,33 @@ def _tools_screen(stdscr):
         if not name:
             return
         _run_bg("MIRROR %s" % name,
-                ["python3", "-m", "gitsync", "mirror", name])
+                [sys.executable, "-m", "gitsync", "mirror", name])
 
     items = [
         ("Disk usage + orphans", "hub size, what can be reclaimed",
-         lambda: bg("DISK", ["python3", "-m", "gitsync", "disk",
+         lambda: bg("DISK", [sys.executable, "-m", "gitsync", "disk",
                              "--orphans"])),
         ("Doctor", "health check: tokens, routes, storage",
-         lambda: bg("DOCTOR", ["python3", "-m", "gitsync", "doctor"])),
+         lambda: bg("DOCTOR", [sys.executable, "-m", "gitsync", "doctor"])),
         ("Compare sites", "which repos differ across a route",
-         lambda: bg("COMPARE", ["python3", "-m", "gitsync", "compare"])),
+         lambda: bg("COMPARE", [sys.executable, "-m", "gitsync", "compare"])),
         ("Mirror one repo", "sync a single repo now", ask_repo),
         ("Fix drift (preview)", "see which repos disagree, change nothing",
-         lambda: bg("FIX DRIFT", ["python3", "-m", "gitsync", "fix",
+         lambda: bg("FIX DRIFT", [sys.executable, "-m", "gitsync", "fix",
                                   "--dry-run"])),
         ("Fix drift (run it)", "re-sync every repo whose sites disagree",
          lambda: _confirm_bg(stdscr, "FIX DRIFT",
-                             ["python3", "-m", "gitsync", "fix"],
+                             [sys.executable, "-m", "gitsync", "fix"],
                              "This re-pushes every mismatched repo to all "
                              "of its targets.")),
         ("Retry failed repos", "re-sync only repos that failed in last run",
-         lambda: bg("RETRY FAILED", ["python3", "-m", "gitsync", "sync",
+         lambda: bg("RETRY FAILED", [sys.executable, "-m", "gitsync", "sync",
                                      "--retry-failed"])),
         ("Update gitsync", "pull the newest release and reinstall",
-         lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
+         lambda: _suspend_run(stdscr, [sys.executable, "-m", "gitsync",
                                        "update"])),
         ("Uninstall", "remove the scheduler and the command",
-         lambda: _suspend_run(stdscr, ["python3", "-m", "gitsync",
+         lambda: _suspend_run(stdscr, [sys.executable, "-m", "gitsync",
                                        "uninstall", "--yes"])),
     ]
     menu(stdscr, "TOOLS", items,
@@ -3817,5 +3975,5 @@ def _tools_screen(stdscr):
 
 def launch_wizard(stdscr):
     """suspend curses, run the setup wizard, resume"""
-    _suspend_run(stdscr, ["python3", "-m", "gitsync", "setup"])
+    _suspend_run(stdscr, [sys.executable, "-m", "gitsync", "setup"])
     threading.Thread(target=refresh_platforms, daemon=True).start()

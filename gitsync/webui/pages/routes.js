@@ -15,6 +15,12 @@
     if (r.direction === "mesh" && r.mesh_conflict) {
       c.push('<span class="chip">conflict: ' + G.esc(r.mesh_conflict) + "</span>");
     }
+    if (r.last_result && r.last_result.status) {
+      var st = r.last_result.status;
+      var cls = st === "ok" ? "ok" : (st === "partial" ? "warn" : "bad");
+      var title = "Last run: " + st + " (" + (r.last_result.ok || 0) + " ok, " + (r.last_result.failed || 0) + " failed)";
+      c.push('<span class="chip ' + cls + '" title="' + G.esc(title) + '">last: ' + G.esc(st) + "</span>");
+    }
     if (!r.enabled) c.push('<span class="chip paused">paused</span>');
     return c.join("");
   }

@@ -142,7 +142,7 @@ def cmd_sync(args):
         if not any(r.get("targets") for r in routes):
             print("no route targets '%s'" % args.to)
             return 2
-    only = [r for r in (args.repos or "").split(",") if r.strip()]
+    only = [r.strip() for r in (args.repos or "").split(",") if r.strip()]
     only_map = None
     if getattr(args, "retry_failed", False):
         recs = SYNC.last_records(1)
@@ -267,12 +267,6 @@ def cmd_status(args):
     nxt = S.next_run()
     if nxt:
         print("next run : %s" % nxt)
-    recs = SYNC.last_records(1)
-    if recs:
-        r = recs[-1]
-        print("last run : %s | %d ok, %d failed of %d in %ss"
-              % (r.get("finished_at"), r.get("ok", 0), r.get("failed", 0),
-                 r.get("repos", 0), r.get("elapsed_sec")))
     return 0
 
 
@@ -380,16 +374,21 @@ def cmd_install(args):
         key = C.setting(cfg, "schedule", "hourly")
     if args.schedule:
         C.set_setting(cfg, "schedule", key)
-    if not key:
-        S.uninstall_systemd(system=args.system)
-        S.uninstall_systemd()
-        print("scheduler disabled (every route is off)")
+    if not key or key == "off":
+        if sys.platform == "win32":
+            S.uninstall_windows_task()
+        else:
+            S.uninstall_systemd(system=args.system)
+            S.uninstall_systemd()
+        print("scheduler disabled (%s)" % ("every route is off" if not key else "manual runs only"))
         return 0
-    if key == "off":
-        S.uninstall_systemd(system=args.system)
-        S.uninstall_systemd()
-        print("scheduler disabled (manual runs only)")
-        return 0
+    if sys.platform == "win32":
+        if S.install_windows_task(key):
+            print("Windows Task Scheduler installed: %s" % C.SCHEDULES[key]["label"])
+            print("status: %s" % S.status())
+            return 0
+        print("Windows Task Scheduler install failed")
+        return 1
     if args.cron or not S.have_systemd():
         S.install_cron(key)
         print("cron installed: %s" % C.SCHEDULES[key]["label"])
@@ -1589,21 +1588,34 @@ def cmd_doctor(args):
               % (r.get("name"), r.get("source"), shown or "(none)", state))
     print("\nstorage:")
     try:
-        n_mirrors = len([d for d in os.listdir(C.MIRROR_DIR)
-                         if d.endswith(".git")])
-    except OSError:
+        from . import diskutil as D
+        n_mirrors = len(D.mirrors())
+    except Exception:
         n_mirrors = 0
     print("  mirror hub    : %d mirrors (%s)" % (n_mirrors, C.MIRROR_DIR))
-    rc, out, _ = sh(["df", "-h", C.DATA_DIR],
-                    timeout=30)
-    # no shell, so skip the header line ourselves
-    lines = [l for l in (out or "").splitlines() if l.strip()]
-    parts = (lines[-1].split() if lines else [])
-    if len(parts) > 4:
-        print("  disk          : %s free of %s (%s used)"
-              % (parts[3], parts[1], parts[4]))
+    free, fstot = None, None
+    try:
+        from . import diskutil as D
+        free, fstot = D.fs_free(C.DATA_DIR)
+    except Exception:
+        pass
+    if free is not None and fstot:
+        used = fstot - free
+        pct = (used / fstot * 100) if fstot else 0
+        from . import diskutil as D
+        print("  disk          : %s free of %s (%.0f%% used)"
+              % (D.human(free), D.human(fstot), pct))
     else:
-        print("  disk          : (df unavailable)")
+        rc, out, _ = sh(["df", "-h", C.DATA_DIR],
+                        timeout=30)
+        # no shell, so skip the header line ourselves
+        lines = [l for l in (out or "").splitlines() if l.strip()]
+        parts = (lines[-1].split() if lines else [])
+        if len(parts) > 4:
+            print("  disk          : %s free of %s (%s used)"
+                  % (parts[3], parts[1], parts[4]))
+        else:
+            print("  disk          : (disk info unavailable)")
     print("\nscheduler      : %s" % S.status())
     if "not scheduled" in S.status() and C.setting(cfg, "schedule") != "off":
         problems.append("scheduler not installed (run: gitsync install)")
@@ -1676,14 +1688,12 @@ def _doctor_hints(cfg, problems):
 def _doctor_fix():
     """remove broken mirror shells so the next sync re-clones them"""
     import shutil
+    from . import diskutil as D
     fixed = []
     hub = C.MIRROR_DIR
     if not os.path.isdir(hub):
         return fixed
-    for entry in sorted(os.listdir(hub)):
-        if not entry.endswith(".git"):
-            continue
-        path = os.path.join(hub, entry)
+    for name, path, size, _ in D.mirrors():
         # a bare mirror with no refs is a failed clone -> remove it. An
         # empty-but-valid repo (HEAD file, zero refs) is a real empty repo,
         # not a failure - keep it.
@@ -1692,9 +1702,9 @@ def _doctor_fix():
         if rc != 0:
             try:
                 shutil.rmtree(path)
-                fixed.append("removed broken mirror: %s" % entry)
+                fixed.append("removed broken mirror: %s" % name)
             except OSError as e:
-                fixed.append("could not remove %s: %s" % (entry, e))
+                fixed.append("could not remove %s: %s" % (name, e))
     # Never unlink sync.lock: a live sync holds an flock on that inode, so
     # deleting it lets the next sync lock a fresh file and two syncs push
     # the same repo. A dead holder is detected by trying the lock, not by
@@ -1705,6 +1715,10 @@ def _doctor_fix():
             import fcntl
         except ImportError:
             fcntl = None
+        try:
+            import msvcrt
+        except ImportError:
+            msvcrt = None
         if fcntl:
             try:
                 fh = open(lock, "w")
@@ -1713,6 +1727,17 @@ def _doctor_fix():
                     fcntl.flock(fh, fcntl.LOCK_UN)
                     fixed.append("sync lock was stale (no live sync)")
                 except OSError:
+                    fixed.append("a sync is running - lock left alone")
+            except OSError:
+                pass
+        elif msvcrt:
+            try:
+                fh = open(lock, "r+")
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                    fixed.append("sync lock was stale (no live sync)")
+                except (OSError, IOError):
                     fixed.append("a sync is running - lock left alone")
             except OSError:
                 pass
@@ -2017,7 +2042,7 @@ def cmd_ci(args):
                      ["platforms", "--help"], ["routes", "--help"],
                      ["stars", "--help"], ["doctor", "--help"],
                      ["verify", "--help"], ["config", "export"]):
-            p = subprocess.run(["python3", "-m", "gitsync"] + argv,
+            p = subprocess.run([sys.executable, "-m", "gitsync"] + argv,
                                capture_output=True, text=True, env=env,
                                timeout=60)
             if p.returncode != 0:
@@ -2087,7 +2112,7 @@ def cmd_ci(args):
             cfg["settings"]["mode"] = "full"
             with open(os.path.join(cfgdir, "config.json"), "w") as f:
                 _json.dump(cfg, f)
-            p = subprocess.run(["python3", "-m", "gitsync", "sync",
+            p = subprocess.run([sys.executable, "-m", "gitsync", "sync",
                                 "--dry-run"], capture_output=True, text=True,
                                env=e2, timeout=120)
             if p.returncode != 0:
@@ -2099,7 +2124,7 @@ def cmd_ci(args):
             cfg["settings"]["mode"] = "safe"
             with open(os.path.join(cfgdir, "config.json"), "w") as f:
                 _json.dump(cfg, f)
-            p = subprocess.run(["python3", "-m", "gitsync", "sync",
+            p = subprocess.run([sys.executable, "-m", "gitsync", "sync",
                                 "--dry-run"], capture_output=True, text=True,
                                env=e2, timeout=120)
             if "WOULD DELETE" in (p.stdout or ""):
@@ -2117,7 +2142,7 @@ def cmd_ci(args):
             cfg["settings"]["mode"] = "safe"
             with open(os.path.join(cfgdir, "config.json"), "w") as f:
                 _json.dump(cfg, f)
-            subprocess.run(["python3", "-m", "gitsync", "sync"],
+            subprocess.run([sys.executable, "-m", "gitsync", "sync"],
                            capture_output=True, text=True, env=e2,
                            timeout=120)
             if "only-on-target" not in dest_refs():
@@ -2126,7 +2151,7 @@ def cmd_ci(args):
             cfg["settings"]["mode"] = "full"
             with open(os.path.join(cfgdir, "config.json"), "w") as f:
                 _json.dump(cfg, f)
-            subprocess.run(["python3", "-m", "gitsync", "sync"],
+            subprocess.run([sys.executable, "-m", "gitsync", "sync"],
                            capture_output=True, text=True, env=e2,
                            timeout=120)
             if "only-on-target" in dest_refs():
@@ -2134,7 +2159,7 @@ def cmd_ci(args):
 
             for argv in (["status"], ["routes"],
                          ["stars", "list", "src"]):
-                p = subprocess.run(["python3", "-m", "gitsync"] + argv,
+                p = subprocess.run([sys.executable, "-m", "gitsync"] + argv,
                                    capture_output=True, text=True, env=e2,
                                    timeout=120)
                 if p.returncode != 0:
@@ -2342,7 +2367,7 @@ def cmd_fix(args):
         mesh = route.get("direction") == "mesh"
         conflict = route.get("mesh_conflict") or \
             C.setting(cfg, "mesh_conflict", "newest")
-        peers = SYNC.route_peers(cfg, route) if mesh else {}
+        peers = {n: P.make(n, p) for n, p in SYNC.route_peers(cfg, route).items()} if mesh else {}
         for repo in repos:
             checked += 1
             try:
@@ -2447,7 +2472,11 @@ def cmd_uninstall(args):
         if not ans.startswith("y"):
             print("cancelled")
             return 1
-    if S.systemd_installed():
+    if sys.platform == "win32":
+        if S.windows_task_installed():
+            S.uninstall_windows_task()
+            print("windows scheduled task removed")
+    elif S.systemd_installed():
         S.uninstall_systemd()
         print("systemd timer removed")
     S.install_cron("off")

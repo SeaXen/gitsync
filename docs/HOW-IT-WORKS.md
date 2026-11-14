@@ -62,9 +62,10 @@ gitsync                        <- bare command opens the TUI
       |                 + progress bar while syncing
       +-> 2 Platforms   every account + connection test + repo count
       +-> 3 Routes      source -> targets, filters
-      +-> 4 Log         recent lines   (/ to filter)
-      +-> 5 History     past runs + duration sparkline
-      +-> 6 Settings    workers/mode/schedule/notify + paths
+      +-> 4 Stars       starred repos, copy stars across accounts
+      +-> 5 Log         recent lines   (/ to filter)
+      +-> 6 History     past runs + duration sparkline
+      +-> 7 Settings    workers/mode/schedule/notify + paths
       |
       +-> S sync now (live progress)      L full log (scroll+search)
       +-> C schedule menu                O options

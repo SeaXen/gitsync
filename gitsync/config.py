@@ -141,7 +141,7 @@ def is_platform_ready(pcfg):
     ptype = pcfg.get("type")
     if ptype == "local":
         return bool(pcfg.get("path"))
-    return bool(pcfg.get("token") or pcfg.get("auth") == "gh")
+    return bool(pcfg.get("token") or pcfg.get("auth") in ("gh", "glab", "oauth"))
 
 
 def is_route_runnable(route, platforms):
@@ -237,6 +237,10 @@ def update(fn):
         import fcntl
     except ImportError:
         fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
     ensure_dirs()
     lock_path = os.path.join(DATA_DIR, "config.lock")
     with _save_lock:
@@ -244,6 +248,16 @@ def update(fn):
         try:
             if fcntl:
                 fcntl.flock(fh, fcntl.LOCK_EX)
+            elif msvcrt:
+                try:
+                    fh.seek(0, os.SEEK_END)
+                    if fh.tell() == 0:
+                        fh.write(" ")
+                        fh.flush()
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+                except (OSError, IOError):
+                    pass
             cfg = load_config()
             result = fn(cfg)
             save_config(cfg)
@@ -253,6 +267,12 @@ def update(fn):
                 try:
                     fcntl.flock(fh, fcntl.LOCK_UN)
                 except OSError:
+                    pass
+            elif msvcrt:
+                try:
+                    fh.seek(0)
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                except (OSError, IOError):
                     pass
             try:
                 fh.close()
@@ -509,7 +529,7 @@ def import_config(path, cfg=None, replace=False):
                     plat[key] = old[key]
                     kept.append("%s.%s" % (name, key))
         if plat.get("type") != "local" and not any(
-                plat.get(k) for k in _PLATFORM_SECRETS):
+                plat.get(k) for k in _PLATFORM_SECRETS) and plat.get("auth") not in ("gh", "glab"):
             needs_token.append(name)
     notify = (merged.setdefault("settings", {}).setdefault("notify", {}))
     old_notify = (current.get("settings") or {}).get("notify") or {}

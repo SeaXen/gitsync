@@ -415,6 +415,34 @@ class TestGitsyncWebappPlaywright(unittest.TestCase):
         self.assertEqual(violations_found, [],
                          f"Accessibility violations found: {json.dumps(violations_found, indent=2)}")
 
+    def test_08_route_last_result_chip_rendered(self):
+        """Verify per-route last run status chips (last: ok, last: failed) render in browser."""
+        # Seed route_state.json in test data directory
+        route_state_path = os.path.join(C.DATA_DIR, "route_state.json")
+        with open(route_state_path, "w", encoding="utf-8") as f:
+            json.dump({
+                "primary": {"at": time.time(), "status": "ok", "ok": 4, "failed": 0, "partial": 0},
+                "cloud_backup": {"at": time.time(), "status": "failed", "ok": 1, "failed": 2, "partial": 0}
+            }, f)
+
+        self._login()
+        self.page.goto(f"{self.base_url}/routes.html")
+        self.page.wait_for_load_state("networkidle")
+
+        # Verify chips render with appropriate status classes and titles
+        primary_chip = self.page.locator('.card[data-route="primary"] .chip.ok')
+        expect(primary_chip).to_be_visible()
+        expect(primary_chip).to_contain_text("last: ok")
+        self.assertIn("4 ok, 0 failed", primary_chip.get_attribute("title") or "")
+
+        backup_chip = self.page.locator('.card[data-route="cloud_backup"] .chip.bad')
+        expect(backup_chip).to_be_visible()
+        expect(backup_chip).to_contain_text("last: failed")
+        self.assertIn("1 ok, 2 failed", backup_chip.get_attribute("title") or "")
+
+        # Screenshot the routes page with the live chips
+        self.page.screenshot(path=os.path.join(ARTIFACT_DIR, "16_routes_last_result_chips.png"))
+
 
 if __name__ == "__main__":
     unittest.main()

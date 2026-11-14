@@ -2,7 +2,9 @@
 with a cron fallback."""
 
 import os
+import shutil
 import subprocess
+import sys
 
 from . import config as C
 
@@ -71,6 +73,8 @@ def have_systemd():
 
 def gitsync_bin():
     # prefer the installed command, fall back to this checkout's entry
+    if sys.platform == "win32":
+        return '"%s" -m gitsync' % sys.executable
     for p in ("/usr/local/bin/gitsync", "/usr/bin/gitsync"):
         if os.path.exists(p):
             return p
@@ -258,7 +262,7 @@ def cron_next(expr, now=None):
 
 
 def next_run():
-    """when the scheduler will next fire, systemd or cron.
+    """when the scheduler will next fire, systemd, windows task, or cron.
 
     Before this returned None unless a systemd timer was installed, so
     every cron install showed "next run —" in the TUI, the web dashboard
@@ -270,6 +274,12 @@ def next_run():
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
         return None
+    if windows_task_installed():
+        r = _sh(["schtasks", "/Query", "/TN", "gitsync", "/FO", "CSV", "/NH"])
+        if getattr(r, "returncode", 1) == 0 and r.stdout.strip():
+            parts = [p.strip().strip('"') for p in r.stdout.strip().split(",")]
+            if len(parts) >= 2 and parts[1]:
+                return parts[1]
     line = [l for l in _crontab().splitlines()
             if "gitsync" in l and " sync" in l]
     if not line:
@@ -304,8 +314,63 @@ def install_cron(schedule_key=None):
     if expr:
         lines.append("%s %s sync --scheduled --quiet >/dev/null 2>&1"
                      % (expr, gitsync_bin()))
-    _sh(["crontab", "-"], stdin_text="\n".join(lines) + "\n")
-    return True
+    r = _sh(["crontab", "-"], stdin_text="\n".join(lines) + "\n")
+    return getattr(r, "returncode", 1) == 0
+
+
+# ---- Windows Task Scheduler ----
+
+def have_task_scheduler():
+    return sys.platform == "win32" and shutil.which("schtasks") is not None
+
+
+def windows_task_installed():
+    if not have_task_scheduler():
+        return False
+    r = _sh(["schtasks", "/Query", "/TN", "gitsync"])
+    return getattr(r, "returncode", 1) == 0
+
+
+def windows_task_status():
+    if not windows_task_installed():
+        return None
+    r = _sh(["schtasks", "/Query", "/TN", "gitsync", "/FO", "CSV", "/NH"])
+    if getattr(r, "returncode", 1) == 0 and r.stdout.strip():
+        parts = [p.strip().strip('"') for p in r.stdout.strip().split(",")]
+        if len(parts) >= 3:
+            return "next: %s (%s)" % (parts[1], parts[2])
+    return "installed"
+
+
+def install_windows_task(schedule_key=None):
+    if not have_task_scheduler():
+        return False
+    cfg = C.load_config()
+    key = schedule_key or C.finest_schedule(cfg)
+    if key is None and not C.routes(cfg):
+        key = C.setting(cfg, "schedule", "hourly")
+    if key in (None, "off"):
+        return uninstall_windows_task()
+    C.set_setting(cfg, "schedule", key)
+    cmd = '%s sync --scheduled --quiet' % gitsync_bin()
+    sc_args = ["/SC", "HOURLY"]
+    if key == "6h":
+        sc_args = ["/SC", "HOURLY", "/MO", "6"]
+    elif key == "12h":
+        sc_args = ["/SC", "HOURLY", "/MO", "12"]
+    elif key == "daily":
+        sc_args = ["/SC", "DAILY"]
+    elif key == "weekly":
+        sc_args = ["/SC", "WEEKLY"]
+    r = _sh(["schtasks", "/Create", "/TN", "gitsync", "/TR", cmd, "/F"] + sc_args)
+    return getattr(r, "returncode", 1) == 0
+
+
+def uninstall_windows_task():
+    if not have_task_scheduler():
+        return True
+    r = _sh(["schtasks", "/Delete", "/TN", "gitsync", "/F"])
+    return getattr(r, "returncode", 1) == 0
 
 
 
@@ -479,6 +544,8 @@ def status():
     """human-readable scheduler status"""
     if systemd_installed():
         return "systemd timer: %s" % (timer_status() or "active")
+    if windows_task_installed():
+        return "windows task: %s" % (windows_task_status() or "active")
     line = [l for l in _crontab().splitlines() if "gitsync" in l]
     if line:
         return "cron: %s" % line[0]

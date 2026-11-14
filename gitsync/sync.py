@@ -126,15 +126,29 @@ def engine_busy():
     try:
         import fcntl
     except ImportError:
-        return False
+        fcntl = None
+    try:
+        import msvcrt
+    except ImportError:
+        msvcrt = None
     path = os.path.join(C.DATA_DIR, SYNC_LOCK)
     try:
         fh = open(path, "a+")
     except OSError:
         return False
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        fcntl.flock(fh, fcntl.LOCK_UN)
+        if fcntl:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            return False
+        if msvcrt:
+            try:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+                return False
+            except (OSError, IOError):
+                return True
         return False
     except OSError:
         return True
@@ -620,9 +634,9 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
 
     # 4. push the merged hub back to every peer
     refspecs = None
-    if skipped:
-        # a skipped ref is left exactly as it is on every peer, so it must
-        # not travel in the push either
+    if chosen_heads or chosen_tags:
+        # explicit refspecs with + prefix converge diverged peers (force-push)
+        # under conflict=newest, and omit skipped refs under conflict=skip
         refspecs = (["+refs/heads/%s:refs/heads/%s" % (b, b)
                      for b in chosen_heads]
                     + ["+refs/tags/%s:refs/tags/%s" % (t, t)
@@ -718,6 +732,8 @@ def mesh_plan_repo(repo, peers, conflict=None, hub=None):
     if conflict is None:
         conflict = C.DEFAULT_MESH_CONFLICT
     heads = {}
+    peer_refs = {}
+    all_refs = set()
     for pname, plat in peers.items():
         try:
             url = plat.repo_url(repo)
@@ -726,15 +742,44 @@ def mesh_plan_repo(repo, peers, conflict=None, hub=None):
         refs = _ls_remote_map(url)
         if refs is None:
             continue
+        peer_refs[pname] = refs
         heads[pname] = refs.get("HEAD") or next(iter(sorted(refs.values())),
                                                 "none")
-    if not heads:
+        for r in refs:
+            if r.startswith(("refs/heads/", "refs/tags/")):
+                all_refs.add(r)
+    if not heads or not peer_refs:
         return ["no peer has this repo"], "error"
     distinct = set(heads.values())
-    if len(distinct) == 1 and len(heads) == len(peers):
+
+    # Compare all branches and tags across all peers
+    differing_refs = []
+    if len(peer_refs) != len(peers):
+        differing_refs = list(all_refs) or ["HEAD"]
+    else:
+        for r in sorted(all_refs):
+            shas = {peer_refs[p].get(r) for p in peer_refs}
+            if len(shas) > 1 or None in shas:
+                differing_refs.append(r)
+
+    if not differing_refs and len(distinct) == 1 and len(heads) == len(peers):
         return ["all %d peers agree (%s)" % (len(heads),
                                              next(iter(distinct))[:8])], "ok"
+
     detail = ", ".join("%s %s" % (p, h[:8]) for p, h in heads.items())
+    diff_desc = []
+    if differing_refs:
+        b_diff = [r.split("/")[-1] for r in differing_refs if r.startswith("refs/heads/")]
+        t_diff = [r.split("/")[-1] for r in differing_refs if r.startswith("refs/tags/")]
+        parts = []
+        if b_diff:
+            parts.append("%d branch(es)" % len(b_diff))
+        if t_diff:
+            parts.append("%d tag(s)" % len(t_diff))
+        if parts:
+            diff_desc.append("(%s differ)" % " + ".join(parts))
+    diff_suffix = (" " + " ".join(diff_desc)) if diff_desc else ""
+
     if conflict == "skip":
         winner = None
         if hub and os.path.isdir(hub):
@@ -753,11 +798,11 @@ def mesh_plan_repo(repo, peers, conflict=None, hub=None):
                     winner = cand_sha
                     break
         if winner:
-            return ["peers differ but fast-forward possible (%s ahead) — would merge: %s"
-                    % (winner[:8], detail)], "update"
-        return ["peers diverged — would SKIP (newest wins is off): %s"
-                % detail], "update"
-    return ["would merge: %s" % detail], "update"
+            return ["peers differ but fast-forward possible (%s ahead) — would merge: %s%s"
+                    % (winner[:8], detail, diff_suffix)], "update"
+        return ["peers diverged — would SKIP (newest wins is off): %s%s"
+                % (detail, diff_suffix)], "update"
+    return ["would merge: %s%s" % (detail, diff_suffix)], "update"
 
 
 def active_targets(cfg, route):
@@ -1078,7 +1123,8 @@ def route_due(route, cfg, now=None):
     hours = C.SCHEDULE_HOURS.get(key)
     if hours is None:            # "off" — timer never runs it
         return False, "schedule is off"
-    last = _load_route_state().get(route.get("name"))
+    val = _load_route_state().get(route.get("name"))
+    last = val.get("at") if isinstance(val, dict) else val
     if not last:
         return True, "never run"
     elapsed_h = (now - last) / 3600.0
@@ -1089,13 +1135,31 @@ def route_due(route, cfg, now=None):
 
 def last_route_run(name):
     """unix time this route last ran, or None"""
-    return _load_route_state().get(name)
+    val = _load_route_state().get(name)
+    return val.get("at") if isinstance(val, dict) else val
 
 
-def mark_route_run(route, now=None):
+def last_route_result(name):
+    """detailed result dict for a route: status, at, ok, partial, failed, or None"""
+    val = _load_route_state().get(name)
+    if isinstance(val, dict):
+        return val
+    if isinstance(val, (int, float)):
+        return {"at": val, "status": "ok", "ok": 0, "partial": 0, "failed": 0}
+    return None
+
+
+def mark_route_run(route, now=None, status="ok", ok_count=0, failed_count=0, partial_count=0):
     import time as _t
     st = _load_route_state()
-    st[route.get("name")] = now or _t.time()
+    rname = route.get("name") if isinstance(route, dict) else str(route)
+    st[rname] = {
+        "at": now or _t.time(),
+        "status": status,
+        "ok": ok_count,
+        "failed": failed_count,
+        "partial": partial_count,
+    }
     _save_route_state(st)
 
 
@@ -1107,7 +1171,8 @@ def next_due_text(route, cfg, now=None):
     hours = C.SCHEDULE_HOURS.get(key)
     if hours is None:
         return "off"
-    last = _load_route_state().get(route.get("name"))
+    val = _load_route_state().get(route.get("name"))
+    last = val.get("at") if isinstance(val, dict) else val
     if not last:
         return "on next timer run"
     due_at = last + hours * 3600
@@ -1501,11 +1566,18 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
 
         # per-route counters: notifications and the UI both need to know
         # WHICH route failed, not just how many repos did
+        r_ok = totals["ok"] - _rt_before[0]
+        r_part = totals["partial"] - _rt_before[1]
+        r_fail = totals["failed"] - _rt_before[2]
         totals.setdefault("per_route", {})[rname] = {
-            "ok": totals["ok"] - _rt_before[0],
-            "partial": totals["partial"] - _rt_before[1],
-            "failed": totals["failed"] - _rt_before[2],
+            "ok": r_ok,
+            "partial": r_part,
+            "failed": r_fail,
         }
+        if not dry_run:
+            st_label = "failed" if r_fail > 0 else ("partial" if r_part > 0 else "ok")
+            mark_route_run(route, status=st_label, ok_count=r_ok,
+                           failed_count=r_fail, partial_count=r_part)
 
     elapsed = round(time.time() - _start, 1)
     totals["elapsed_sec"] = elapsed

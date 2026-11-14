@@ -35,7 +35,7 @@ Route kinds (`config.json` → `routes[]`):
 ```bash
 export PYTHONPATH=$PWD                 # run from the repo without installing
 python3 -m gitsync <cmd>               # bare `gitsync` opens the TUI
-python3 -m gitsync ci                  # the 4 checks CI runs (run before every push)
+python3 -m gitsync ci                  # the 6 checks CI runs (run before every push)
 ```
 
 Isolate the real config — never point a test at the live one:

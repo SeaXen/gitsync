@@ -11,11 +11,13 @@ no account, no runner, no verification:
 
 ```bash
 gitsync ci
-#   python syntax (gitsync/*.py)    PASS
-#   shell syntax (installers)       PASS
-#   CLI smoke tests                 PASS
-#   unit checks (tests.test_logic)  PASS
-# CI: all 4 checks passed
+#   python syntax (gitsync/*.py)         PASS
+#   shell syntax (installers)            PASS
+#   release checksums (SHA256SUMS)       PASS
+#   packaging (installer + Docker docs)  PASS
+#   CLI smoke tests                      PASS
+#   unit checks (tests.test_logic)       PASS
+# CI: all 6 checks passed
 ```
 
 The same checks are also in `.github/workflows/ci.yml`,

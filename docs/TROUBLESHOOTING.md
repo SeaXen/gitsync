@@ -51,7 +51,7 @@ one-time GitHub importer but don't update afterwards.
 Yes — use a **mesh** route: `gitsync routes add all github,gitlab,forgejo`.
 Every peer is both source and target, and the newest commit wins per branch,
 so a change made on any platform reaches all the others. See
-[Two-way sync](#two-way-sync-mesh). One-way routes still exist for the
+[Two-way sync](ROUTES-AND-MODES.md#two-way-sync-mesh). One-way routes still exist for the
 simpler case where one platform owns the truth.
 
 **Is it safe for private repos?**

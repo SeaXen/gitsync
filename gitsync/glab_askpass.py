@@ -8,6 +8,7 @@ remote URL, a hub config file, or a log line.
 Used only when a platform sets `"auth": "glab"`.
 """
 
+import os
 import subprocess
 import sys
 
@@ -18,7 +19,7 @@ def _token(host):
             r = subprocess.run(["glab"] + args, capture_output=True,
                                text=True, timeout=20,
                                env={"GLAB_HOST": host,
-                                    "PATH": "/usr/bin:/bin"})
+                                    "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
         except Exception:
             continue
         out = (r.stdout or "").strip()

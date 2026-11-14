@@ -4,7 +4,49 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.7] - 2026-11-14
+
+### Core Sync & CLI Polish
+- Fixed `cmd_fix` mesh route recovery crash by instantiating platform objects (`P.make`) before invoking `mesh_sync_repo`.
+- Scoped mirror safety: updated `diskutil.orphans()` to parse base repo names, preventing false-positive orphan deletion of `owner__repo` bare mirrors.
+- Cross-platform storage diagnostics: modernized `cmd_doctor` and `_doctor_fix()` to inspect nested mirror directories and utilize standard library `diskutil.fs_free()` on Windows and POSIX without failing on missing `df`.
+- Cleaned duplicate `cmd_status` output and eliminated conflicting `last run` print statements.
+- Whitespace stripping on comma-separated `--repos` arguments in `cmd_sync`.
+- Thread pool exception tracking: preserved repository identity on unhandled worker exceptions in `run_sync`.
+- Cross-platform file locking: integrated `msvcrt` fallback for atomic locking on Windows in `config.py` and `_doctor_fix()`.
+
+### TUI & UX Polish
+- Route deletion confirmation modal: added safeguard dialog (`_remove_route_screen`) to prevent accidental deletion of routes.
+- Token secret masking: sensitive credential fields in `_form` and `prompt_line` now mask input characters with asterisks (`*`).
+- Mouse wheel scroll direction fix: corrected inverted scroll math in `_wheel` for Platforms and Stars tabs.
+- Full keyboard log navigation: added Up/Down/PgUp/PgDn/Home/End and vim keys `j`/`k`/`g`/`G` on Dashboard (Tab 0) and Log (Tab 4).
+- Dashboard search filtering: applied live search query (`/`) to the Dashboard log panel.
+- Visual consistency across all 7 tabs: styled History (Tab 5) and Settings (Tab 6) inside bordered panels via `_panel_rows` with interactive scrolling.
+- 80x24 terminal adaptability: streamlined dashboard layout to preserve live log tail on compact terminals.
+- Adaptive column widths: dynamically sized repository name column in repo browser and bounded platform names (`%-14.14s`) to prevent column misalignment.
+- Keyboard tab cycling: added `[` / `]` and Left / Right arrow navigation to quickly switch tabs.
+- Subprocess portability: standardized all subprocess invocations in `tui.py` and `cmd_ci` to `sys.executable`.
+
+### Windows Task Scheduler Integration
+- Automated background synchronization on Windows via native Windows Task Scheduler (`schtasks.exe`): `gitsync install` now registers a persistent background task on Windows without requiring WSL or manual setup.
+- `gitsync status`, `gitsync schedule status`, and the Web UI accurately reflect Windows Task Scheduler status and next scheduled run time.
+- `gitsync uninstall` cleanly deletes the Windows scheduled task.
+- Fixed `install_cron` to honestly check return codes from `crontab -` rather than returning True unconditionally on platforms lacking cron.
+
+### Cloud-Native Token Overrides (12-Factor / Container Ready)
+- Any configured platform named `<name>` can receive its access token via the `GITSYNC_<NAME>_TOKEN` environment variable (e.g. `GITSYNC_WORK_GH_TOKEN`), allowing secret injection without writing tokens to disk in container and Kubernetes deployments.
+- Unified provider environment fallbacks across GitHub, GitLab, Forgejo, Gitea, Bitbucket, and Generic platforms.
+
+### Route Observability and Web UI Polish
+- Per-route last run status (`ok`, `partial`, `failed`) and repository counts are persisted in `route_state.json`.
+- Routes page in the Web UI renders live result status chips (`last: ok`, `last: partial`, `last: bad`) with hover details showing exact success and failure counts.
+
+### Packaging & Documentation
+- Added Homebrew formula template under `packaging/homebrew/gitsync.rb`.
+- Updated `docs/SCHEDULING.md` with complete Windows Task Scheduler operational documentation.
+- Documented environment variable credential overrides in `docs/SECURITY-MODEL.md` and `SECURITY.md`.
+- Updated test documentation in `PRODUCT.md` reflecting 301+ automated tests.
+- Reconciled CI check count documentation to all 6 checks across `docs/DEVELOPING.md`, `AGENTS.md`, and `.gitlab-ci.yml`.
 
 ## [2.1.6] - 2026-11-14
 

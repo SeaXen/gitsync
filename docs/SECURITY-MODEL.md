@@ -21,6 +21,13 @@ no webhooks. Your own accounts, folders and directions are supplied during
 
 The tool is generic by design: **any account, any folder, any direction.**
 
+### Environment variable token injection (12-factor / Containers)
+
+For container, CI, or secret-manager workflows where you prefer not to write tokens to disk:
+- `GITSYNC_<NAME>_TOKEN`: overrides the token for any platform named `<name>` (e.g. `GITSYNC_MY_GH_TOKEN`)
+- Provider fallbacks: `GITHUB_TOKEN`, `GITLAB_TOKEN`, `FORGEJO_TOKEN`, `GITEA_TOKEN`, `BITBUCKET_TOKEN`
+When set, the environment variable is used automatically without requiring credentials in `config.json`.
+
 ---
 
 [← back to the README](../README.md)

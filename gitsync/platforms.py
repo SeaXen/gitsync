@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 TIMEOUT = 60
@@ -245,6 +246,17 @@ def github_device_flow_poll(device_code, client_id=None):
         return {"status": "error", "error": data.get("error_description", err or "unknown error")}
 
 
+def _env_token(name, *defaults):
+    """Retrieve token from GITSYNC_<NAME>_TOKEN or provider default env vars."""
+    safe = re.sub(r'[^A-Za-z0-9]', '_', name).upper()
+    keys = ["GITSYNC_%s_TOKEN" % safe] + list(defaults)
+    for k in keys:
+        val = os.environ.get(k)
+        if val:
+            return val
+    return ""
+
+
 class GitHubPlatform:
     ptype = "github"
     _rate_limits = {}
@@ -254,7 +266,7 @@ class GitHubPlatform:
         self.cfg = cfg
         self.url = (cfg.get("url") or "https://github.com").rstrip("/")
         self.owner = cfg.get("owner") or ""
-        self.token = cfg.get("token") or os.environ.get("GITHUB_TOKEN", "")
+        self.token = cfg.get("token") or _env_token(name, "GITHUB_TOKEN")
         self.auth = cfg.get("auth") or "gh"   # "gh" = use gh CLI
 
     @classmethod
@@ -535,7 +547,7 @@ class GitLabPlatform:
         self.cfg = cfg
         self.url = (cfg.get("url") or "https://gitlab.com").rstrip("/")
         self.owner = cfg.get("owner") or ""
-        self.token = cfg.get("token") or os.environ.get("GITLAB_TOKEN", "")
+        self.token = cfg.get("token") or _env_token(name, "GITLAB_TOKEN")
         self.ns_id = cfg.get("ns_id") or ""
         # auth: "glab" uses the CLI for the API and a GIT_ASKPASS helper for
         # git, so the token never lands in a remote URL
@@ -691,14 +703,14 @@ class GitLabPlatform:
         path = gitlab_path(repo["name"])
         owner = self.owner
         if owner:
-            return urllib.request.quote("%s/%s" % (owner, path), safe="")
+            return urllib.parse.quote("%s/%s" % (owner, path), safe="")
         return None
 
     def delete_repo(self, repo):
         """permanently delete a project. Opt-in only (see sync.prune_repos)."""
         path = gitlab_path(repo["name"])
         proj = "%s/%s" % (self.owner, path) if self.owner else path
-        rc, out = self._api("/projects/%s" % urllib.request.quote(proj,
+        rc, out = self._api("/projects/%s" % urllib.parse.quote(proj,
                                                                   safe=""),
                             "DELETE")
         if rc in (202, 204, 200):
@@ -764,7 +776,7 @@ class GitLabPlatform:
             return self._url_with_token(out["http_url_to_repo"])
         # maybe created under a sanitized path — search for it
         rc, out = self._api("/projects?search=%s&membership=true"
-                               % urllib.request.quote(name))
+                               % urllib.parse.quote(name))
         if isinstance(out, list):
             for p in out:
                 if _norm(p["name"]) == _norm(name):
@@ -785,8 +797,7 @@ class ForgejoPlatform:
         self.url = (cfg.get("url") or "http://localhost:3000").rstrip("/")
         self.owner = cfg.get("owner") or ""
         self.token = (cfg.get("token") or
-                      os.environ.get("FORGEJO_TOKEN",
-                                     os.environ.get("GITEA_TOKEN", "")))
+                      _env_token(name, "FORGEJO_TOKEN", "GITEA_TOKEN"))
         self._login_cache = None
 
     def _api(self, path, method="GET", payload=None):
@@ -1060,7 +1071,7 @@ class BitbucketPlatform:
         self.cfg = cfg
         self.url = (cfg.get("url") or "https://api.bitbucket.org").rstrip("/")
         self.owner = cfg.get("owner") or ""      # workspace
-        self.token = cfg.get("token") or os.environ.get("BITBUCKET_TOKEN", "")
+        self.token = cfg.get("token") or _env_token(name, "BITBUCKET_TOKEN")
 
     def _api(self, path, method="GET", payload=None):
         return _http(method, self.url + "/2.0" + path, token=self.token,
@@ -1177,7 +1188,7 @@ class GenericPlatform:
         self.cfg = cfg
         self.template = cfg.get("url_template") or ""
         self.owner = cfg.get("owner") or ""
-        self.token = cfg.get("token") or ""
+        self.token = cfg.get("token") or _env_token(name)
         self.git_user = cfg.get("user") or "git"
 
     def user(self):
