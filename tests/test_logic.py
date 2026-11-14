@@ -5105,5 +5105,19 @@ class TestTUIHelpers(unittest.TestCase):
         self.assertIs(cfg1, cfg2)
 
 
+    def test_truncate_ellipsis(self):
+        """P2-4: TUI log lines exceeding width show ellipsis (…) rather than abrupt cut."""
+        # Under limit: unchanged
+        self.assertEqual(tui._truncate_ellipsis("hello", 10), "hello")
+        self.assertEqual(tui._truncate_ellipsis("hello", 5), "hello")
+        # Over limit: trimmed and ending in …
+        truncated = tui._truncate_ellipsis("hello world from gitsync", 12)
+        self.assertEqual(len(truncated), 12)
+        self.assertTrue(truncated.endswith("…"))
+        # Boundary cases: max_len <= 0, 1
+        self.assertEqual(tui._truncate_ellipsis("hello", 0), "")
+        self.assertEqual(tui._truncate_ellipsis("hello", 1), "…")
+
+
 if __name__ == '__main__':
     unittest.main()

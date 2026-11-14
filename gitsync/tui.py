@@ -1758,6 +1758,17 @@ def log_view(stdscr):
                  start=max(0, len(lines) - 100))
 
 
+def _truncate_ellipsis(text, max_len):
+    """truncate text to max_len, appending … if truncated"""
+    if max_len <= 0:
+        return ""
+    if len(text) <= max_len:
+        return text
+    if max_len == 1:
+        return "…"
+    return text[:max_len - 1].rstrip() + "…"
+
+
 def modal_footer(stdscr, h, w, hint):
     """footer for modal screens: a fresh flash() message wins over the hint.
 
@@ -1814,7 +1825,7 @@ def _scroll_view(stdscr, title, lines, start=0):
                 attr = curses.color_pair(4)
             elif " OK " in line:
                 attr = curses.color_pair(2)
-            safe_add(stdscr, 1 + i, 0, line[:w - 1], attr)
+            safe_add(stdscr, 1 + i, 0, _truncate_ellipsis(line, max(0, w - 1)), attr)
         if not view:
             safe_add(stdscr, 1, 0, " (no matching lines)", curses.A_DIM)
         modal_footer(stdscr, h, w,
@@ -3013,7 +3024,7 @@ def draw_log_tab(stdscr, h, w, R, G, dim=0):
             attr = R
         elif " OK " in line:
             attr = G
-        rows.append((line[:w - 8], attr))
+        rows.append((_truncate_ellipsis(line, max(0, w - 8)), attr))
     if not rows:
         if total:
             rows.append(("(no line matches '%s' — Esc clears the filter)"
@@ -3057,7 +3068,7 @@ def draw_history_tab(stdscr, h, w):
                        r.get("elapsed_sec")))
             attr = curses.color_pair(4) if r.get("failed") else \
                 curses.color_pair(2)
-        rows.append((line[:w - 8], attr))
+        rows.append((_truncate_ellipsis(line, max(0, w - 8)), attr))
     if not rows:
         rows.append(("no runs recorded yet", curses.A_DIM))
     _panel_rows(stdscr, h, w, 3, rows, title)
@@ -3343,7 +3354,7 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
             attr = G
         elif "===" in line:
             attr = curses.A_BOLD
-        log_rows.append((line[:w - 8], attr))
+        log_rows.append((_truncate_ellipsis(line, max(0, w - 8)), attr))
     if not log_rows:
         if q:
             log_rows.append(("(no line matches '%s' — Esc clears filter)" % state["search"], dim))
