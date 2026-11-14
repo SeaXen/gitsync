@@ -9,7 +9,7 @@ The TUI and every subprocess it starts run the *installed* copy in
 ## The TUI
 
 ```
- gitsync 2.1.7 — repository sync control
+ gitsync X.Y.Z — repository sync control
  2026-11-14 09:14:22  syncing: no  schedule: Every hour  counts: 3s old
 ┌ PLATFORMS ────────────────────────────────────────────────────────────┐
 │ github      github    ON   OK    repos=53    gh CLI authenticated    │

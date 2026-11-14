@@ -151,7 +151,7 @@ Prometheus text format, same authentication as every other endpoint:
 
 ```
 gitsync_up 1
-gitsync_info{version="2.1.4"} 1
+gitsync_info{version="X.Y.Z"} 1
 gitsync_paused 0
 gitsync_syncing 0
 gitsync_stale 0

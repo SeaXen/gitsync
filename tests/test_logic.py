@@ -5007,6 +5007,25 @@ class TestM1PolishFixes(unittest.TestCase):
         self.assertIn("scheduler:", out)
 
 
+    def test_docs_contain_no_hardcoded_stale_versions(self):
+        """P2-3: active documentation files must not contain hard-coded old versions."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        doc_dir = os.path.join(repo_root, "docs")
+        found = []
+        if os.path.isdir(doc_dir):
+            for dp, _, fns in os.walk(doc_dir):
+                if "archive" in dp.replace("\\", "/").split("/"):
+                    continue
+                for fn in fns:
+                    if fn.endswith(".md"):
+                        p = os.path.join(dp, fn)
+                        with open(p, encoding="utf-8", errors="ignore") as f:
+                            for idx, line in enumerate(f, 1):
+                                if 'version="2.1.' in line:
+                                    found.append("%s:%d: %s" % (fn, idx, line.strip()))
+        self.assertEqual(found, [], "stale hardcoded versions found in docs: %s" % found)
+
+
 class TestTUIHelpers(unittest.TestCase):
     """Headless unit tests for TUI helper functions, wheel math, tab navigation, and formatting."""
 

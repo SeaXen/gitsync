@@ -2259,6 +2259,19 @@ def cmd_ci(args):
             inst = f.read()
         if '"$SRC_DIR/docs"' not in inst:
             raise RuntimeError("install.sh no longer copies docs/")
+        # check docs for hard-coded stale version strings
+        doc_dir = os.path.join(root_for_sums, "docs")
+        if os.path.isdir(doc_dir):
+            for dp, _, fns in os.walk(doc_dir):
+                if "archive" in dp.replace("\\", "/").split("/"):
+                    continue
+                for fn in fns:
+                    if fn.endswith(".md"):
+                        with open(os.path.join(dp, fn), encoding="utf-8", errors="ignore") as df:
+                            for idx, line in enumerate(df, 1):
+                                if 'version="2.1.' in line:
+                                    raise RuntimeError("%s:%d has hard-coded old version: %s"
+                                                       % (fn, idx, line.strip()))
 
     check("python syntax (gitsync/*.py)", c_syntax)
     check("shell syntax (installers)", c_shell)
