@@ -4993,6 +4993,20 @@ class TestM1PolishFixes(unittest.TestCase):
         self.assertEqual(cleaned, ["foo", "bar", "baz"])
 
 
+    def test_cmd_schedule_status(self):
+        """P2-1: gitsync schedule status prints status without error."""
+        import io
+        from unittest.mock import patch
+        import argparse
+        args = argparse.Namespace(action="status")
+        buf = io.StringIO()
+        with patch("sys.stdout", buf):
+            rc = M.cmd_schedule(args)
+        self.assertEqual(rc, 0)
+        out = buf.getvalue()
+        self.assertIn("scheduler:", out)
+
+
 class TestTUIHelpers(unittest.TestCase):
     """Headless unit tests for TUI helper functions, wheel math, tab navigation, and formatting."""
 

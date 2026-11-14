@@ -403,6 +403,37 @@ def cmd_install(args):
     S.install_cron(key)
     return 0
 
+def cmd_schedule(args):
+    """scheduler status, install, or removal"""
+    action = getattr(args, "action", "status") or "status"
+    if action == "status":
+        print("scheduler: %s" % S.status())
+        nxt = S.next_run()
+        if nxt:
+            print("next run : %s" % nxt)
+        return 0
+    elif action == "install":
+        return cmd_install(args)
+    elif action in ("remove", "uninstall"):
+        if not getattr(args, "yes", False):
+            ans = input("remove gitsync scheduler? (y/N) ").strip().lower()
+            if not ans.startswith("y"):
+                print("cancelled")
+                return 1
+        if sys.platform == "win32":
+            if S.windows_task_installed():
+                S.uninstall_windows_task()
+                print("windows scheduled task removed")
+        elif S.systemd_installed():
+            S.uninstall_systemd(system=getattr(args, "system", False))
+            S.uninstall_systemd()
+            print("systemd timer removed")
+        S.install_cron("off")
+        print("scheduler removed")
+        return 0
+    return 0
+
+
 
 def cmd_platforms(args):
     """list / add / remove / edit / test platforms (accounts)"""
@@ -2055,7 +2086,7 @@ def cmd_ci(args):
         for argv in (["--version"], ["--help"], ["scopes"],
                      ["platforms", "--help"], ["routes", "--help"],
                      ["stars", "--help"], ["doctor", "--help"],
-                     ["verify", "--help"], ["config", "export"]):
+                     ["verify", "--help"], ["schedule", "--help"], ["config", "export"]):
             p = subprocess.run([sys.executable, "-m", "gitsync"] + argv,
                                capture_output=True, text=True, env=env,
                                timeout=60)
@@ -2610,6 +2641,20 @@ def main(argv=None):
     sp.add_argument("--yes", action="store_true",
                     help="no prompts (idempotent)")
     sp.set_defaults(func=cmd_install)
+
+    sp = sub.add_parser("schedule", help="scheduler status, install, remove")
+    sp.add_argument("action", nargs="?", default="status",
+                    choices=["status", "install", "remove", "uninstall"],
+                    help="action to perform (default: status)")
+    sp.add_argument("--schedule", choices=sorted(C.SCHEDULES),
+                    help="how often to sync (for install)")
+    sp.add_argument("--cron", action="store_true",
+                    help="force cron instead of systemd")
+    sp.add_argument("--system", action="store_true",
+                    help="install a root system unit instead of a user unit")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="skip confirmation on remove/uninstall")
+    sp.set_defaults(func=cmd_schedule)
 
     sp = sub.add_parser("platforms", help="manage accounts: add/remove/edit/test")
     sp.add_argument("action", nargs="?", default="list",
