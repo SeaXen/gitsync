@@ -1957,7 +1957,8 @@ def compute_sums(root):
     lines = []
     for rel in shipped_files(root):
         with open(os.path.join(root, rel), "rb") as f:
-            digest = hashlib.sha256(f.read()).hexdigest()
+            content = f.read().replace(b"\r\n", b"\n")
+            digest = hashlib.sha256(content).hexdigest()
         lines.append("%s  %s" % (digest, rel))
     return "\n".join(lines) + "\n"
 
