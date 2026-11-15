@@ -480,6 +480,23 @@ def _newest(cands):
     return best
 
 
+def _drop_peer_refs(hub, peer):
+    """delete the mesh namespace refs fetched from one peer.
+
+    They survive a failed `git fetch --prune` (nothing pruned), so a peer
+    that timed out still has last run's shas sitting in the namespace. Step 2
+    would then pick from them and step 4 force-pushes the result back to that
+    peer — overwriting a commit it never got to tell us about.
+    """
+    prefix = "%s/%s/" % (MESH_NS, peer)
+    rc, out, _ = P.run(["git", "for-each-ref", "--format=%(refname)", prefix],
+                       cwd=hub, timeout=120)
+    if rc != 0:
+        return
+    for ref in out.split():
+        P.run(["git", "update-ref", "-d", ref], cwd=hub, timeout=60)
+
+
 def _peer_refs(hub, peer):
     """({branch: (date, sha)}, {tag: (date, sha)}) fetched from one peer"""
     heads, tags = {}, {}
@@ -560,7 +577,10 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
         except Exception as e:
             errors.append("%s: %s" % (pname, str(e)[:100]))
             continue
-        refs = _ls_remote_map(url)
+        # auth="gh"/"glab" peers hand git a token through askpass; without
+        # it a private repo looked "not created there yet" and was skipped
+        penv = plat.git_env() if hasattr(plat, "git_env") else None
+        refs = _ls_remote_map(url, env=penv)
         if refs is None:
             continue                      # repo not created there yet
         reachable[pname] = (url, refs)
@@ -583,6 +603,7 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
         _secure_hub_config(hub)
 
     # 1. fetch every reachable peer into the private namespace
+    dead = set()                       # peers we could not read this run
     for pname, (url, _refs) in reachable.items():
         plat = peers[pname]
         clean_url, user, token = split_url_auth(url)
@@ -597,6 +618,8 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
         if rc != 0:
             errors.append("%s: fetch failed: %s" % (pname,
                                                     _short_error(err)))
+            dead.add(pname)
+            _drop_peer_refs(hub, pname)
 
     # 2. newest commit wins, per branch and per tag
     cand_heads, cand_tags = {}, {}
@@ -643,6 +666,13 @@ def mesh_sync_repo(repo, peers, conflict="newest", claimants=None,
                        for t in chosen_tags])
     pushed = []
     for pname, plat in peers.items():
+        if pname in dead:
+            # we never read this peer, so we have no right to write to it:
+            # its refs are an unknown newer state, and a force-push here is
+            # how a mesh silently loses a commit
+            errors.append("%s: not pushed (fetch failed — its refs are unknown)"
+                          % pname)
+            continue
         err = _push_target(pname, plat, repo, hub, "safe", refspecs,
                            relax=relax)
         if err:
@@ -739,7 +769,8 @@ def mesh_plan_repo(repo, peers, conflict=None, hub=None):
             url = plat.repo_url(repo)
         except Exception as e:
             return ["%s: %s" % (pname, str(e)[:80])], "error"
-        refs = _ls_remote_map(url)
+        penv = plat.git_env() if hasattr(plat, "git_env") else None
+        refs = _ls_remote_map(url, env=penv)
         if refs is None:
             continue
         peer_refs[pname] = refs
@@ -1108,9 +1139,11 @@ def _load_route_state():
 
 
 def _save_route_state(state):
+    """atomic: next_due_text() reads this on every TUI frame, and a kill
+    mid-write used to leave an empty file that dropped every route's
+    last-run time."""
     try:
-        with open(_route_state_path(), "w") as f:
-            json.dump(state, f)
+        C.atomic_write_text(_route_state_path(), json.dumps(state), 0o600)
     except OSError:
         pass
 
@@ -1433,7 +1466,10 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                                        "repo": "-", "error": str(e)[:200]})
             continue
         if not dry_run:
-            mark_route_run(route)
+            # mark it as *running*: if the timer kills us mid-route (timeout,
+            # reboot, OOM) the recorded result must not read "ok, 0 repos" —
+            # that is a green dashboard for a backup that never happened
+            mark_route_run(route, status="running")
         repos = _filter_repos(repos, route, want)
         # legacy-collision guard: two repos whose short names are equal would
         # both claim mirrors/{name}.git and mix two histories into one mirror

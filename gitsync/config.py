@@ -7,6 +7,7 @@ Runtime data (mirror hub, logs, run records) lives at ~/.local/share/gitsync
 
 import json
 import os
+import tempfile
 import threading
 import time
 
@@ -176,50 +177,91 @@ def ensure_dirs():
         os.makedirs(d, exist_ok=True)
 
 
+def _read_json_once(path):
+    """(obj, ok). ok=False means "could not read it now, try again"."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f), True
+    except ValueError:
+        raise                       # genuinely corrupt, not transient
+    except OSError:
+        return None, False
+
+
 def load_config():
     ensure_dirs()
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))  # deep copy
-    if os.path.exists(CONFIG_FILE):
+    if not os.path.exists(CONFIG_FILE):
+        return cfg
+    saved = None
+    for attempt in (0, 1):
         try:
-            with open(CONFIG_FILE) as f:
-                saved = json.load(f)
-            # shallow-merge top level keys
-            for k, v in saved.items():
-                if k == "settings" and isinstance(v, dict):
-                    cfg["settings"].update(v)
-                else:
-                    cfg[k] = v
-        except (OSError, ValueError):
+            saved, ok = _read_json_once(CONFIG_FILE)
+        except ValueError:
+            # unreadable JSON: keep a copy for the user and fall back to the
+            # defaults, so the next save starts from a config we understand
             backup = CONFIG_FILE + ".broken"
             try:
                 os.replace(CONFIG_FILE, backup)
             except OSError:
                 pass
+            saved = None
+            break
+        if ok:
+            break
+        # A transient OSError (a Windows share, a brief EACCES, another
+        # writer mid-replace) used to be treated as "corrupt" and renamed
+        # the live config away — losing every platform, route and token.
+        # Retry instead, and never move the file on this path.
+        if attempt == 0:
+            time.sleep(0.05)
+        else:
+            saved = None
+    if isinstance(saved, dict):
+        # shallow-merge top level keys
+        for k, v in saved.items():
+            if k == "settings" and isinstance(v, dict):
+                cfg["settings"].update(v)
+            else:
+                cfg[k] = v
     return cfg
+
+
+def atomic_write_text(path, text, mode=0o600):
+    """write text to path in one step: unique temp, fsync, os.replace.
+
+    The temp name must be unique per writer. `<path>.tmp` was shared, so the
+    web UI and a TUI (four gitsync processes on one box is normal) could
+    truncate each other's half-written file and install the mixture; the
+    result did not always parse, and a config that does not parse is a
+    config that quietly falls back to defaults.
+    """
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".",
+                               suffix=".tmp", dir=d)
+    try:
+        # mkstemp already gives 0600; the config holds every platform token
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        try:
+            os.chmod(tmp, mode)
+        except OSError:
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def save_config(cfg):
     ensure_dirs()
-    tmp = CONFIG_FILE + ".tmp"
-    # the temp file holds every platform token, so create it 0600 from the
-    # start — the process umask would otherwise leave it 0644 until the
-    # chmod below, exposing secrets in that window (the web UI saves often)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(cfg, f, indent=2)
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
-    os.replace(tmp, CONFIG_FILE)
-    try:
-        os.chmod(CONFIG_FILE, 0o600)
-    except OSError:
-        pass
+    atomic_write_text(CONFIG_FILE, json.dumps(cfg, indent=2) + "\n", 0o600)
 
 
 _save_lock = threading.Lock()
@@ -471,19 +513,8 @@ def export_config(path=None):
     clean, removed = strip_secrets(cfg)
     text = json.dumps(clean, indent=2, sort_keys=True) + "\n"
     if path:
-        tmp = path + ".tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        fd = os.open(tmp, flags, 0o600)      # it can still name internal hosts
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-            os.replace(tmp, path)
-        except BaseException:
-            try:
-                os.remove(tmp)
-            except OSError:
-                pass
-            raise
+        # it can still name internal hosts, so keep it 0600
+        atomic_write_text(path, text, 0o600)
     return text, removed
 
 

@@ -1358,6 +1358,39 @@ class TestScheduler(unittest.TestCase):
              patch.object(S, "_crontab", return_value=""):
             self.assertIsNone(S.next_run())
 
+    def test_timer_status_is_readable_not_a_table_row(self):
+        # `systemctl list-timers` is a fixed-width table: without a tty the
+        # NEXT/LEFT/LAST/PASSED columns come back glued together, and the
+        # status line used to print that whole blob. `show` must be used.
+        calls = []
+
+        def fake_sh(cmd, stdin_text=None, timeout=20):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 0,
+                "ActiveState=active\n"
+                "NextElapseUSecRealtime=Mon 2026-11-16 03:00:00 +06\n"
+                "Result=success\n", "")
+
+        with patch.object(S, "systemd_installed", return_value=True), \
+             patch.object(S, "user_systemd_installed", return_value=True), \
+             patch.object(S.os.path, "exists", return_value=False), \
+             patch.object(S, "_sh", side_effect=fake_sh):
+            out = S.timer_status()
+        self.assertIn("show", calls[0])
+        self.assertNotIn("list-timers", calls[0])
+        self.assertEqual(out, "active, next Mon 2026-11-16 03:00:00 +06")
+
+    def test_timer_status_survives_a_failed_show(self):
+        with patch.object(S, "systemd_installed", return_value=True), \
+             patch.object(S, "user_systemd_installed", return_value=True), \
+             patch.object(S.os.path, "exists", return_value=False), \
+             patch.object(S, "_sh",
+                          return_value=subprocess.CompletedProcess([], 1,
+                                                                   "", "no")):
+            self.assertEqual(S.timer_status(),
+                             "installed (status unavailable)")
+
     def test_route_mode_defaults_match_the_fresh_config(self):
         # the engine defaulted to "full" (prunes!) while the template and
         # restore said "safe", so a config without settings["mode"] was
@@ -1436,6 +1469,42 @@ class TestWizardRepoPicker(unittest.TestCase):
                 W._pick_repos({"platforms": {"gh": {"enabled": True}}}, "gh"),
                 [])
 
+    def test_wizard_survives_having_no_enabled_platforms(self):
+        """Declining every platform used to die on enabled[0] after the
+        tokens were already typed — a traceback instead of a message."""
+        from unittest import mock
+        import gitsync.wizard as W
+        with tempfile.TemporaryDirectory() as td:
+            old_f, old_d = C.CONFIG_FILE, C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            try:
+                C.save_config({"version": 1, "platforms": {}, "routes": [],
+                               "settings": {}})
+                with mock.patch.object(W, "ask", return_value=""), \
+                        mock.patch.object(W, "ask_yes", return_value=True), \
+                        mock.patch.object(W, "ask_secret", return_value=""):
+                    self.assertIsNone(W.run_wizard())
+                # nothing was written over the existing config
+                self.assertTrue(os.path.exists(C.CONFIG_FILE))
+                with open(C.CONFIG_FILE, encoding="utf-8") as f:
+                    self.assertEqual(json.load(f)["platforms"], {})
+            finally:
+                C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+
+    def test_wizard_parses_a_bad_worker_count(self):
+        """A typo at the workers prompt must not throw the session away."""
+        import inspect
+        import gitsync.wizard as W
+        src = inspect.getsource(W.run_wizard)
+        self.assertIn("except (TypeError, ValueError)", src)
+
+    def test_wizard_imports_time_for_the_device_flow(self):
+        """The GitHub browser login called time.time() with no import, so
+        the default (choice 1) path always failed and asked for a PAT."""
+        import gitsync.wizard as W
+        self.assertTrue(hasattr(W, "time"))
+
 
 class TestGlabAuth(unittest.TestCase):
     """F3: auth=glab is a real path, and it never puts a token in a URL."""
@@ -1461,6 +1530,56 @@ class TestGlabAuth(unittest.TestCase):
         self.assertIsNone(p2.git_env())
         self.assertIn("glpat-x", p2._url_with_token(
             "https://gitlab.com/me/r.git"))
+
+    def test_github_gh_auth_provides_an_askpass_helper(self):
+        """auth="gh" used to hand git a credential-less URL: private repos
+        failed with "could not read Username" unless the user happened to
+        have run `gh auth setup-git` themselves."""
+        old = os.environ.pop("GITHUB_TOKEN", None)
+        try:
+            p = P.make("gh1", {"type": "github", "auth": "gh",
+                               "url": "https://github.com"})
+            env = p.git_env()
+            self.assertIsNotNone(env)
+            self.assertTrue(env["GIT_ASKPASS"].endswith("askpass.py"))
+            self.assertEqual(env["GITSYNC_ASKPASS_PROVIDER"], "gh")
+            self.assertEqual(env["GIT_TERMINAL_PROMPT"], "0")
+            # a token platform embeds the token in the URL instead
+            p2 = P.make("gh2", {"type": "github", "auth": "token",
+                                "token": "ghp_x"})
+            self.assertIsNone(p2.git_env())
+        finally:
+            if old is not None:
+                os.environ["GITHUB_TOKEN"] = old
+
+    def test_askpass_prefers_gh_when_the_provider_says_so(self):
+        import contextlib
+        import io
+        import gitsync.askpass as AP
+        old = os.environ.copy()
+        os.environ["GITSYNC_ASKPASS_PROVIDER"] = "gh"
+        os.environ.pop("GITSYNC_ASKPASS_TOKEN", None)
+        calls = []
+        real = AP.subprocess.run
+
+        def fake(cmd, **kw):
+            calls.append(cmd)
+            if cmd[0] == "gh":
+                return subprocess.CompletedProcess(cmd, 0, "ghp_from_gh\n", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+
+        AP.subprocess.run = fake
+        try:
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                AP.main(["askpass.py",
+                         "Password for 'https://github.com':"])
+        finally:
+            AP.subprocess.run = real
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertEqual(buf.getvalue().strip(), "ghp_from_gh")
+        self.assertEqual(calls[0][0], "gh")        # gh first, not glab
 
     def test_askpass_helper_answers_username_without_a_token(self):
         import gitsync.glab_askpass as GA
@@ -2575,6 +2694,116 @@ class TestWeb(unittest.TestCase):
                                      "0o600")
             finally:
                 C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+
+    def test_concurrent_config_writers_never_leave_invalid_json(self):
+        """Two gitsync processes saving at once must not corrupt the config.
+
+        The old writer used the shared "<path>.tmp" name, so a second writer
+        truncated the first one's half-written file and os.replace installed
+        the mixture. Each writer now gets its own temp file.
+        """
+        import threading as _t
+        with tempfile.TemporaryDirectory() as td:
+            old_f, old_d = C.CONFIG_FILE, C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            try:
+                payloads = [{"platforms": {"p%d" % i: {"type": "local"}},
+                             "routes": [], "settings": {"workers": 4},
+                             "pad": "x" * 40000} for i in range(6)]
+                errors = []
+
+                def writer(cfg):
+                    try:
+                        for _ in range(15):
+                            C.save_config(cfg)
+                    except Exception as e:            # pragma: no cover
+                        errors.append(e)
+
+                ts = [_t.Thread(target=writer, args=(p,)) for p in payloads]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+                self.assertEqual(errors, [])
+                with open(C.CONFIG_FILE, encoding="utf-8") as f:
+                    final = json.load(f)              # must always parse
+                self.assertIn(final["pad"], [p["pad"] for p in payloads])
+                # no stray temp files left behind
+                self.assertEqual(
+                    [n for n in os.listdir(td) if n.endswith(".tmp")], [])
+            finally:
+                C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+
+    def test_each_config_writer_gets_its_own_temp_file(self):
+        """The temp path must be unique per write, not shared and truncated."""
+        with tempfile.TemporaryDirectory() as td:
+            old_f, old_d = C.CONFIG_FILE, C.CONFIG_DIR
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            seen = []
+            orig = C.tempfile.mkstemp
+
+            def spy(*a, **kw):
+                fd, p = orig(*a, **kw)
+                seen.append(p)
+                return fd, p
+
+            C.tempfile.mkstemp = spy
+            try:
+                C.save_config({"platforms": {}, "routes": [], "settings": {}})
+                C.save_config({"platforms": {}, "routes": [], "settings": {}})
+            finally:
+                C.tempfile.mkstemp = orig
+                C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+            self.assertEqual(len(seen), 2)
+            self.assertNotEqual(seen[0], seen[1])
+            # the temp file must sit next to the config, or os.replace is a
+            # cross-device move (not atomic)
+            for p in seen:
+                self.assertEqual(os.path.dirname(p), os.path.abspath(td))
+
+    def test_transient_read_error_does_not_quarantine_the_config(self):
+        """An OSError is not corruption: never move the live config away.
+
+        A locked file on a network share (or a reader racing a writer) used
+        to be renamed to config.json.broken, and the defaults were saved
+        back — every platform, route and token gone.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            old_f, old_d = C.CONFIG_FILE, C.CONFIG_DIR
+            old_dd = C.DATA_DIR
+            C.CONFIG_DIR = td
+            C.DATA_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            try:
+                cfg = {"version": 1, "platforms": {"github": {"type": "github",
+                                                              "enabled": True}},
+                       "routes": [{"name": "main", "source": "github",
+                                   "targets": ["local"]}],
+                       "settings": {"workers": 2}}
+                C.save_config(cfg)
+                real_open = open
+
+                def denied(path, *a, **kw):
+                    if os.path.abspath(str(path)) == \
+                            os.path.abspath(C.CONFIG_FILE):
+                        raise PermissionError(13, "in use", str(path))
+                    return real_open(path, *a, **kw)
+
+                builtins = __import__("builtins")
+                builtins.open = denied
+                try:
+                    got = C.load_config()
+                finally:
+                    builtins.open = real_open
+                self.assertTrue(os.path.exists(C.CONFIG_FILE))
+                self.assertFalse(os.path.exists(C.CONFIG_FILE + ".broken"))
+                # falls back to defaults for this read, but keeps the file
+                self.assertEqual(got["platforms"], C.DEFAULT_CONFIG["platforms"])
+            finally:
+                C.CONFIG_FILE, C.CONFIG_DIR = old_f, old_d
+                C.DATA_DIR = old_dd
 
 
     def test_parse_progress_line(self):
@@ -4615,6 +4844,69 @@ class TestMeshSync(unittest.TestCase):
             self.assertIn(sha_a[:7], err_msg)
             self.assertIn(sha_b[:7], err_msg)
 
+    def test_mesh_never_pushes_a_peer_it_could_not_read(self):
+        """A failed fetch must not be followed by a force-push.
+
+        The mesh namespace keeps the refs from the previous run (a failed
+        `git fetch --prune` prunes nothing), so the hub would happily pick
+        last run's shas as "newest" and force-push the result back to the
+        peer it just failed to read — destroying a commit it never saw.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            p1 = os.path.join(td, "p1")
+            p2 = os.path.join(td, "p2")
+            os.makedirs(p1, exist_ok=True)
+            os.makedirs(p2, exist_ok=True)
+            c1 = self._init_repo(p1, "r", "c1")
+            b1 = os.path.join(p1, "r.git")
+            b2 = os.path.join(p2, "r.git")
+            self._clone_bare(b1, b2)
+            c2 = self._add_commit(b1, "c2")        # only peer 1 knows c2
+
+            cfg = {
+                "platforms": {
+                    "m1": {"type": "local", "enabled": True, "path": p1},
+                    "m2": {"type": "local", "enabled": True, "path": p2},
+                },
+                "routes": [{
+                    "name": "mesh-route",
+                    "direction": "mesh",
+                    "source": "m1",
+                    "targets": ["m2"],
+                }],
+                "settings": {"mesh_conflict": "newest"},
+            }
+            old = (C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR)
+            C.CONFIG_DIR = td
+            C.CONFIG_FILE = os.path.join(td, "config.json")
+            C.DATA_DIR = os.path.join(td, "data")
+            C.MIRROR_DIR = os.path.join(C.DATA_DIR, "mirrors")
+
+            real_run = SY.P.run
+
+            def flaky(cmd, **kw):
+                # only the fetch of peer 2 fails; ls-remote and pushes work
+                if "fetch" in cmd and any(b2 in str(x) for x in cmd):
+                    return 1, "", "simulated network failure"
+                return real_run(cmd, **kw)
+
+            SY.P.run = flaky
+            try:
+                totals = SY.run_sync(cfg)
+            finally:
+                SY.P.run = real_run
+                C.CONFIG_DIR, C.CONFIG_FILE, C.DATA_DIR, C.MIRROR_DIR = old
+
+            m2_sha = subprocess.run(["git", "-C", b2, "rev-parse", "main"],
+                                    check=True, capture_output=True,
+                                    text=True).stdout.strip()
+            self.assertEqual(m2_sha, c1)         # not overwritten with c2
+            self.assertNotEqual(c1, c2)
+            # and the run does not claim success
+            self.assertEqual(totals["ok"], 0, totals)
+            self.assertGreaterEqual(totals["partial"] + totals["failed"], 1,
+                                    totals)
+
     def test_mesh_moved_tag_is_skipped(self):
         """Scenario (c): a moved tag is treated as a conflict and skipped in skip mode."""
         with tempfile.TemporaryDirectory() as td:
@@ -4820,8 +5112,12 @@ class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
 
         orig_sh = S._sh
         orig_have = S.have_task_scheduler
+        orig_sd = S.systemd_installed
         S._sh = mock_sh
         S.have_task_scheduler = lambda: True
+        # this is a Windows-precedence test: a real user systemd unit on the
+        # dev box must not change what it is asserting
+        S.systemd_installed = lambda: False
         try:
             self.assertTrue(S.windows_task_installed())
             st = S.windows_task_status()
@@ -4847,6 +5143,7 @@ class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
         finally:
             S._sh = orig_sh
             S.have_task_scheduler = orig_have
+            S.systemd_installed = orig_sd
 
     def test_install_cron_honesty(self):
         orig_sh = S._sh
@@ -4858,6 +5155,74 @@ class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
             self.assertTrue(S.install_cron("hourly"))
         finally:
             S._sh = orig_sh
+
+    def test_cron_install_refuses_to_replace_an_unreadable_table(self):
+        """`crontab -` REPLACES the whole table: never write blind.
+
+        A failed `crontab -l` (permission denied, spool error) used to look
+        like "no crontab", and the one gitsync line we wrote then deleted
+        every unrelated cron job on the box — while reporting success.
+        """
+        calls = []
+
+        def sh(cmd, stdin_text=None, timeout=20):
+            calls.append((cmd, stdin_text))
+            if cmd[:2] == ["crontab", "-l"]:
+                return subprocess.CompletedProcess(cmd, 1, "",
+                                                   "crontab: permission denied")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        orig = S._sh
+        S._sh = sh
+        try:
+            self.assertFalse(S.install_cron("hourly"))
+        finally:
+            S._sh = orig
+        self.assertFalse([c for c in calls if c[0] == ["crontab", "-"]],
+                         "wrote a crontab it could not read")
+
+    def test_install_cron_keeps_unrelated_lines(self):
+        calls = []
+
+        def sh(cmd, stdin_text=None, timeout=20):
+            calls.append((cmd, stdin_text))
+            if cmd[:2] == ["crontab", "-l"]:
+                return subprocess.CompletedProcess(
+                    cmd, 0, "0 15 * * * /root/backup.sh\n", "")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        orig = S._sh
+        S._sh = sh
+        try:
+            self.assertTrue(S.install_cron("hourly"))
+        finally:
+            S._sh = orig
+        written = [c[1] for c in calls if c[0] == ["crontab", "-"]]
+        self.assertEqual(len(written), 1)
+        self.assertIn("/root/backup.sh", written[0])
+        self.assertIn("gitsync", written[0])
+
+    def test_systemd_installed_sees_the_user_unit(self):
+        """The default install is a *user* unit; checking /etc missed it.
+
+        With only /etc inspected, `status` said "not scheduled", `schedule
+        remove` left the timer running, and `uninstall` deleted the binary
+        while the user timer kept firing every hour.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            orig = S._user_unit_dir
+            orig_etc = S.SYSTEMD_DIR
+            S._user_unit_dir = lambda: td
+            S.SYSTEMD_DIR = os.path.join(td, "nope")
+            try:
+                self.assertFalse(S.user_systemd_installed())
+                self.assertFalse(S.systemd_installed())
+                open(os.path.join(td, S.TIMER), "w").close()
+                self.assertTrue(S.user_systemd_installed())
+                self.assertTrue(S.systemd_installed())
+            finally:
+                S._user_unit_dir = orig
+                S.SYSTEMD_DIR = orig_etc
 
     def test_env_token_overrides(self):
         old_env = os.environ.copy()
@@ -4901,6 +5266,31 @@ class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
                 self.assertEqual(res_leg["at"], 1700000000.0)
             finally:
                 C.DATA_DIR = orig_data
+
+    def test_route_state_is_written_atomically(self):
+        """A kill mid-write used to empty route_state.json and drop every
+        route's last-run time (the TUI reads it on every frame)."""
+        with tempfile.TemporaryDirectory() as td:
+            orig_data = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                SY.mark_route_run({"name": "r1"}, status="ok", ok_count=2)
+                path = SY._route_state_path()
+                self.assertTrue(os.path.exists(path))
+                self.assertEqual(
+                    [n for n in os.listdir(td) if n.endswith(".tmp")], [])
+                with open(path, encoding="utf-8") as f:
+                    st = json.load(f)                  # must always parse
+                self.assertEqual(st["r1"]["ok"], 2)
+            finally:
+                C.DATA_DIR = orig_data
+
+    def test_an_interrupted_route_is_not_recorded_as_ok(self):
+        """`mark_route_run(route)` ran before any repo work, so a run killed
+        by the timer was served to the dashboard as status "ok", 0 repos."""
+        import inspect
+        src = inspect.getsource(SY.run_sync)
+        self.assertIn('mark_route_run(route, status="running")', src)
 
 
 class TestM1PolishFixes(unittest.TestCase):

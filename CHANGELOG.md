@@ -4,6 +4,33 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.9] - 2026-11-16
+
+### Data Safety
+- Atomic config writes: `save_config`, session persistence and the web password file now go through one `config.atomic_write_text()` helper (temp file in the same directory, `fsync`, `os.replace`, `0600`). A crash or full disk can no longer truncate the live config.
+- `load_config` no longer renames the live config to `.broken` on a transient read error; it retries once and only quarantines files that are genuinely unparseable. A config that is a JSON list/scalar is treated as empty instead of crashing.
+- Mesh sync no longer pushes stale refs for a peer whose fetch failed. Failed peers are marked `dead`, their namespace refs are dropped, and the peer is reported as "not pushed (fetch failed — its refs are unknown)" instead of silently overwriting newer peer history.
+- `route_state` is written atomically and a route is marked `running` before work starts, so an interrupted run is visible rather than stale.
+
+### Correctness
+- Fixed `NameError` in the GitHub browser device-login flow (`wizard.py` used `time` without importing it), which made that option always fail.
+- Fixed `IndexError` in the wizard when no platform ends up enabled, and clamped the `workers` answer to 1–16.
+- `gitsync compare` no longer reports "all in sync" and exits 0 when every route was skipped; it now says nothing was compared.
+- `gitsync mirror` counts partial results separately and exits 1 when any repo only partially mirrored.
+- `gitsync disk --orphans` refuses to claim success when no enabled route's source could be listed, and the reclaimed total only sums sizes actually deleted.
+- `gitsync schedule remove` no longer uninstalls cron and systemd twice with conflicting scope flags.
+
+### Scheduler
+- Cron install refuses to overwrite an unreadable crontab instead of replacing it with a single gitsync line.
+- User-scope systemd units (`~/.config/systemd/user`) are now detected by `systemd_installed()`, `timer_status()` and `next_run()`; previously a user timer was invisible, so the CLI reported "not installed" and installs duplicated cron entries alongside it.
+
+### Auth
+- Private GitHub repos over `https` with `auth: "gh"` now work without a global credential helper: `GitHubPlatform.git_env()` sets `GIT_ASKPASS` and the askpass helper falls back to `gh auth token` (then `glab`).
+
+### Observability & TUI
+- Prometheus `gitsync_last_run_ok` is 0 for `partial` runs, matching how `status` treats them.
+- History tab shows and colour-codes the partial count; the Repos browser marks mirrored state from one cached lookup instead of a `stat` per frame per row.
+
 ## [2.1.8] - 2026-11-15
 
 ### Core Sync & Disk Reclaim

@@ -310,6 +310,30 @@ class GitHubPlatform:
     def _gh(self, args):
         return run(["gh"] + args, timeout=API_TIMEOUT)
 
+    def git_env(self):
+        """environment for git subprocesses when auth="gh".
+
+        The gh CLI already holds a token; this hands it to git through the
+        askpass helper at call time (never into a URL or the hub's config).
+        Without it, clone_url carries no credentials and no helper, so every
+        PRIVATE repo failed with "could not read Username" — git had nothing
+        to answer the prompt with and no terminal to ask on.
+        """
+        if self.auth != "gh" or self.token:
+            return None
+        helper = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "askpass.py")
+        try:
+            from .sync import ensure_executable_helper
+            helper = ensure_executable_helper(helper)
+        except Exception:
+            pass
+        env = dict(os.environ)
+        env["GIT_ASKPASS"] = helper
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        env["GITSYNC_ASKPASS_PROVIDER"] = "gh"
+        return env
+
     def _api_base(self):
         """api.github.com for github.com, {url}/api/v3 for Enterprise.
 

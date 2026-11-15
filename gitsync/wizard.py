@@ -7,6 +7,7 @@ the token, and tests every connection before saving.
 
 import os
 import sys
+import time
 
 from . import config as C
 from . import permissions as PERM
@@ -299,6 +300,13 @@ def run_wizard():
     # ---- routes ----
     hr("STEP 3/4 — sync direction")
     enabled = [n for n, p in cfg["platforms"].items() if p.get("enabled")]
+    if not enabled:
+        # every platform was skipped or failed its test: there is nothing to
+        # route, and the old code died on enabled[0] *after* all the token
+        # work, losing the session as a traceback
+        print("\n no enabled platforms — nothing to route.")
+        print(" Re-run when you have a token: gitsync setup")
+        return None
     print(" Enabled platforms: %s" % ", ".join(enabled))
     src = ask("Source platform (repos are read from here)", enabled[0])
     tgt = ask("Targets (comma-separated, repos are written here)",
@@ -319,7 +327,12 @@ def run_wizard():
     print(" Schedules: hourly | 6h | 12h | daily | weekly | off (manual only)")
     sched = ask("Schedule", "hourly")
     cfg["settings"]["schedule"] = sched if sched in C.SCHEDULES else "hourly"
-    cfg["settings"]["workers"] = int(ask("Parallel workers", "4") or 4)
+    # a typo here used to raise ValueError and throw the whole session away
+    try:
+        workers = int(ask("Parallel workers", "4") or 4)
+    except (TypeError, ValueError):
+        workers = 4
+    cfg["settings"]["workers"] = max(1, min(16, workers))
     # Default No = safe: a new setup must not delete branches on the
     # destination until the user explicitly asks for an exact mirror.
     cfg["settings"]["mode"] = "full" if ask_yes(

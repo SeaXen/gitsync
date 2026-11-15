@@ -4,9 +4,9 @@
 #
 #   bash install.sh                # install to /opt/gitsync + symlink
 #   bash install.sh --user         # install to ~/.local/share/gitsync
-#   bash install.sh --schedule hourly|6h|12h|daily|off
+#   bash install.sh --schedule hourly|6h|12h|daily|weekly|off
 #   bash install.sh --cron         # use cron instead of a systemd timer
-#   bash install.sh --tag v2.1.7   # record which release this install is
+#   bash install.sh --tag vX.Y.Z   # record which release this install is
 #
 # What it does:
 #   1. copies the app (default: /opt/gitsync, or ~/.local/share/gitsync)

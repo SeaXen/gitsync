@@ -400,6 +400,14 @@ def cmd_install(args):
         print("status: %s" % S.status())
         return 0
     print("systemd install failed — falling back to cron")
+    if S.user_systemd_installed():
+        # the usual cause is running this under sudo: the user manager is not
+        # reachable, so the unit cannot be enabled even though it exists. Do
+        # not pretend the schedule was replaced — say both may be live.
+        print("  note: a user timer unit already exists. If it is active you "
+              "now have two schedulers (cron + timer); check "
+              "'systemctl --user list-timers gitsync.timer' and remove one "
+              "with 'gitsync schedule remove'.")
     S.install_cron(key)
     return 0
 
@@ -425,8 +433,9 @@ def cmd_schedule(args):
                 S.uninstall_windows_task()
                 print("windows scheduled task removed")
         elif S.systemd_installed():
-            S.uninstall_systemd(system=getattr(args, "system", False))
-            S.uninstall_systemd()
+            # one call, the scope the user asked for; the old code called it
+            # twice and announced a removal even when nothing was removed
+            S.uninstall_systemd(system=bool(getattr(args, "system", False)))
             print("systemd timer removed")
         S.install_cron("off")
         print("scheduler removed")
@@ -935,23 +944,32 @@ def cmd_compare(args):
             print(json.dumps(matrix))
         return 0
     problems = 0
+    compared = 0
+    skipped = []
     for route in routes:
         sp = C.platform(cfg, route["source"])
         if not sp or not sp.get("enabled"):
             print("route %s: source not enabled" % route.get("name"))
+            skipped.append(route.get("name"))
             continue
         source = P.make(route["source"], sp)
         targets = {t: P.make(t, C.platform(cfg, t))
                    for t in route.get("targets", [])
                    if C.platform(cfg, t) and C.platform(cfg, t).get("enabled")}
+        if not targets:
+            print("route %s: no enabled targets" % route.get("name"))
+            skipped.append(route.get("name"))
+            continue
         print("route %s: %s vs %s" % (route.get("name"), route["source"],
                                       ", ".join(targets)))
         try:
             repos = source.list_repos()
         except Exception as e:
             print("  cannot list source: %s" % e)
+            skipped.append(route.get("name"))
             continue
         for repo in repos:
+            compared += 1
             try:
                 src_head = _head_of(source, repo)
             except Exception as e:
@@ -972,6 +990,13 @@ def cmd_compare(args):
                 print("  %s %-28s src=%s %s=%s"
                       % (mark, repo["name"], str(src_head)[:8], tname,
                          str(thead)[:8]))
+    if compared == 0:
+        # a disabled source, a revoked token or a network error used to print
+        # "all in sync" and exit 0 — the exact output of a healthy run, from
+        # the one command people run *because* they suspect a problem
+        print("\nnothing was compared — every route was skipped (%s)"
+              % ", ".join(skipped))
+        return 0
     print("\n%s" % ("all in sync" if problems == 0
                     else "%d mismatched refs" % problems))
     return 0 if problems == 0 else 1
@@ -1101,7 +1126,7 @@ def cmd_mirror(args):
         print("cannot list repos on %s: %s" % (src_name, e))
         return 1
     by_name = {r["name"].lower(): r for r in available}
-    ok = failed = 0
+    ok = partial = failed = 0
     for name in names:
         if args.url:
             repo = {"name": name, "private": args.private,
@@ -1119,12 +1144,19 @@ def cmd_mirror(args):
             status, detail, errors = SYNC.sync_repo(
                 repo, source, targets, C.route_mode(cfg, route))
         print("%s: %s %s" % (name, status, detail))
-        if status in ("ok", "partial"):
+        if status == "ok":
             ok += 1
+        elif status == "partial":
+            # a target refused the push, or a mesh declined to overwrite a
+            # disagreement: that is not a success, and `gitsync sync` says so
+            partial += 1
         else:
             failed += 1
-    print("\n%d ok, %d failed" % (ok, failed))
-    return 0 if failed == 0 else 1
+    if partial:
+        print("\n%d ok, %d partial, %d failed" % (ok, partial, failed))
+    else:
+        print("\n%d ok, %d failed" % (ok, failed))
+    return 0 if (failed == 0 and partial == 0) else 1
 
 
 def sh(cmd, timeout=30, stdin_text=None, cwd=None):
@@ -1209,20 +1241,28 @@ def cmd_disk(args):
     if args.orphans:
         print("\norphaned mirrors (in no enabled route's repo list):")
         if not orphans:
-            print("  none — hub matches the source")
+            if listed:
+                print("  none — hub matches the source")
+            else:
+                # every source listing failed (token, network): saying
+                # "matches" here would be the opposite of the truth
+                print("  cannot tell — no enabled route's source could be listed")
         for name, path, size in orphans:
             print("  %-30s %8s" % (name, D.human(size)))
         if orphans and args.prune_orphans:
             print("\nremoving %d orphaned mirror(s)..." % len(orphans))
-            ok = 0
+            removed = 0
+            reclaimed = 0
             for name, path, size in orphans:
                 if D.delete_mirror(path):
                     print("  removed %-24s %s" % (name, D.human(size)))
-                    ok += 1
+                    removed += 1
+                    reclaimed += size or 0
                 else:
                     print("  FAILED  %s" % name)
-            print("\n%d removed, %s reclaimed" % (ok, D.human(
-                sum(o[2] for o in orphans[:ok]))))
+            # sum what was actually deleted, not the first `removed` entries
+            print("\n%d removed, %s reclaimed" % (removed,
+                                                  D.human(reclaimed)))
         elif orphans:
             print("\nre-run with --orphans --prune-orphans to delete them")
 

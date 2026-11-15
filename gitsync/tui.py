@@ -1378,9 +1378,21 @@ def load_repos(source=None, background=True):
             err = None
         except Exception as e:
             repos, err = [], str(e)[:80]
+        ptype = (C.platform(cfg, source) or {}).get("type") or "local"
+
+        def _mirrored(r):
+            # the hub is mirrors/{type}/{id}.git now, so probing
+            # mirrors/{name}.git reported "-" for every mirrored repo
+            try:
+                mp = SYNC.mirror_path(r, ptype)
+            except Exception:
+                return False
+            return bool(mp) and os.path.isdir(mp)
+
+        # computed once per listing, not once per row per frame
         state["repo_list"] = sorted(
-            [(r["name"], bool(r.get("private")), bool(r.get("fork")))
-             for r in repos], key=lambda t: t[0].lower())
+            [(r["name"], bool(r.get("private")), bool(r.get("fork")),
+              _mirrored(r)) for r in repos], key=lambda t: t[0].lower())
         state["repo_loaded"] = True
         state["repo_loading"] = False
         if err:
@@ -1529,13 +1541,12 @@ def repos_screen(stdscr, source=None):
             top = cur - rows + 1
         view = items[top:top + rows]
         name_w = max(26, min(60, w - 24))
-        for i, (name, priv, fork) in enumerate(view):
+        for i, (name, priv, fork, mirrored) in enumerate(view):
             mark = "[x]" if name in state["repo_sel"] else "[ ]"
             attr = curses.color_pair(2) if name in state["repo_sel"] else 0
             if (top + i) == cur:
                 attr |= curses.A_REVERSE
-            is_mirrored = os.path.isdir(os.path.join(C.MIRROR_DIR, name + ".git"))
-            hub_tag = "mirrored" if is_mirrored else "-"
+            hub_tag = "mirrored" if mirrored else "-"
             line = " %s %-*.*s %-4s %-8s %s" % (mark, name_w, name_w, name,
                                                "priv" if priv else "pub ",
                                                hub_tag,
@@ -3062,12 +3073,14 @@ def draw_history_tab(stdscr, h, w):
                        r.get("repos", 0), r.get("elapsed_sec")))
             attr = curses.A_DIM
         else:
-            line = ("%s | %d ok, %d failed of %d | %ss"
+            # partial is not ok (a target refused, or a mesh skipped a
+            # conflict): showing "failed" only painted such a run green
+            bad = (r.get("failed") or 0) + (r.get("partial") or 0)
+            line = ("%s | %d ok, %d partial, %d failed of %d | %ss"
                     % (r.get("finished_at"), r.get("ok", 0),
-                       r.get("failed", 0), r.get("repos", 0),
-                       r.get("elapsed_sec")))
-            attr = curses.color_pair(4) if r.get("failed") else \
-                curses.color_pair(2)
+                       r.get("partial", 0), r.get("failed", 0),
+                       r.get("repos", 0), r.get("elapsed_sec")))
+            attr = curses.color_pair(4) if bad else curses.color_pair(2)
         rows.append((_truncate_ellipsis(line, max(0, w - 8)), attr))
     if not rows:
         rows.append(("no runs recorded yet", curses.A_DIM))

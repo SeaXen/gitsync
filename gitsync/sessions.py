@@ -65,24 +65,9 @@ def _load():
 
 def _save(data):
     C.ensure_dirs()
-    path = _path()
-    tmp = path + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)          # 0600 at creation, not after
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    # the web server is multi-threaded: a shared "<path>.tmp" let two
+    # requests truncate each other's file and log everybody out
+    C.atomic_write_text(_path(), json.dumps(data), 0o600)
 
 
 def _expired(rec, now=None):

@@ -210,16 +210,7 @@ def set_password(username, password):
             "hash": dk.hex(), "iterations": _PBKDF2_ITER,
             "set_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     C.ensure_dirs()
-    tmp = _auth_path() + ".tmp"
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    fd = os.open(tmp, flags, 0o600)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f)
-    os.replace(tmp, _auth_path())
-    try:
-        os.chmod(_auth_path(), 0o600)
-    except OSError:
-        pass
+    C.atomic_write_text(_auth_path(), json.dumps(data), 0o600)
 
 
 def clear_password():
@@ -1617,8 +1608,8 @@ def h_metrics(handler):
           "When the last run finished (local clock).",
           _epoch(last.get("finished_at")))
         m("gitsync_last_run_ok", "gauge",
-          "1 when the last run finished with no failures.",
-          1 if not last.get("failed") else 0)
+          "1 when the last run finished with no failures or partials.",
+          1 if not (last.get("failed") or last.get("partial")) else 0)
         m("gitsync_last_run_repos", "gauge", "Repos seen by the last run.",
           last.get("repos", 0))
         m("gitsync_last_run_synced", "gauge", "Repos synced by the last run.",

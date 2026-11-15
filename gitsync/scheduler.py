@@ -94,8 +94,26 @@ def _sh(cmd, stdin_text=None, timeout=20):
         return subprocess.CompletedProcess(cmd, 1, "", str(e))
 
 
+def _user_unit_dir():
+    """the per-user systemd unit directory, resolved at call time.
+
+    install_systemd() writes here by default (a user unit inherits $HOME, so
+    `gh` and the tokens are visible to it), so every reader — status,
+    next_run, uninstall — has to look here too.
+    """
+    return os.path.join(os.path.expanduser("~"), ".config", "systemd", "user")
+
+
+def user_systemd_installed():
+    return os.path.exists(os.path.join(_user_unit_dir(), TIMER))
+
+
 def systemd_installed():
-    return os.path.exists(os.path.join(SYSTEMD_DIR, TIMER))
+    # checking only /etc meant the DEFAULT (user) install was invisible: the
+    # status line said "not scheduled", `schedule remove` silently kept the
+    # timer, and `uninstall` deleted the binary while the timer kept firing
+    return (os.path.exists(os.path.join(SYSTEMD_DIR, TIMER))
+            or user_systemd_installed())
 
 
 def install_systemd(schedule_key=None, system=False):
@@ -122,8 +140,7 @@ def install_systemd(schedule_key=None, system=False):
         _sh(["systemctl", "enable", "--now", TIMER])
         return True
 
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
-                            "user")
+    unit_dir = _user_unit_dir()
     try:
         os.makedirs(unit_dir, exist_ok=True)
         with open(os.path.join(unit_dir, SERVICE), "w") as f:
@@ -173,8 +190,7 @@ def uninstall_systemd(system=False):
                 pass
         _sh(["systemctl", "daemon-reload"])
         return True
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
-                            "user")
+    unit_dir = _user_unit_dir()
     _sh(["systemctl", "--user", "disable", "--now", TIMER])
     for f in (SERVICE, TIMER):
         try:
@@ -190,13 +206,37 @@ def uninstall_systemd(system=False):
 def timer_status():
     if not systemd_installed():
         return None
-    r = _sh(["systemctl", "list-timers", TIMER, "--no-pager"])
+    # ask the scope that actually has the unit: a user unit is invisible to
+    # the system manager
+    user = (user_systemd_installed()
+            and not os.path.exists(os.path.join(SYSTEMD_DIR, TIMER)))
+    # `list-timers` is a fixed-width table, so a non-tty call returns the
+    # NEXT/LEFT/LAST/PASSED columns glued into one unreadable line. `show`
+    # gives stable key=value properties instead.
+    props = ("ActiveState", "NextElapseUSecRealtime",
+             "LastTriggerUSecRealtime", "Result")
+    r = _sh(["systemctl"] + (["--user"] if user else []) +
+            ["show", TIMER, "-p", ",".join(props)])
     if r.returncode != 0:
         return "installed (status unavailable)"
+    vals = {}
     for line in r.stdout.splitlines():
-        if TIMER in line:
-            return line.strip()
-    return "installed"
+        if "=" in line:
+            k, v = line.split("=", 1)
+            vals[k.strip()] = v.strip()
+    if not vals:
+        return "installed"
+    parts = [vals.get("ActiveState") or "installed"]
+    nxt = vals.get("NextElapseUSecRealtime")
+    if nxt:
+        parts.append("next %s" % nxt)
+    last = vals.get("LastTriggerUSecRealtime")
+    if last:
+        parts.append("last %s" % last)
+    result = vals.get("Result")
+    if result and result not in ("success", ""):
+        parts.append("result %s" % result)
+    return ", ".join(parts)
 
 
 def _cron_field(field, lo, hi):
@@ -269,8 +309,10 @@ def next_run():
     and `gitsync schedule status`.
     """
     if systemd_installed():
-        r = _sh(["systemctl", "show", TIMER, "-p", "NextElapseUSecRealtime",
-                 "--value"])
+        user = (user_systemd_installed()
+                and not os.path.exists(os.path.join(SYSTEMD_DIR, TIMER)))
+        r = _sh(["systemctl"] + (["--user"] if user else []) +
+                ["show", TIMER, "-p", "NextElapseUSecRealtime", "--value"])
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
         return None
@@ -280,7 +322,7 @@ def next_run():
             parts = [p.strip().strip('"') for p in r.stdout.strip().split(",")]
             if len(parts) >= 2 and parts[1]:
                 return parts[1]
-    line = [l for l in _crontab().splitlines()
+    line = [l for l in (_crontab() or "").splitlines()
             if "gitsync" in l and " sync" in l]
     if not line:
         return None
@@ -291,8 +333,20 @@ def next_run():
 # ---- cron fallback ----
 
 def _crontab():
+    """the user's crontab text, or None when it cannot be read.
+
+    "no crontab for <user>" means an *empty* table. Anything else
+    (permission denied, no `crontab` binary, a broken spool) means we must
+    not write at all: `crontab -` REPLACES the entire table, so writing the
+    one gitsync line we managed to read would delete every other cron job
+    on the box.
+    """
     r = _sh(["crontab", "-l"])
-    return r.stdout if r.returncode == 0 else ""
+    if r.returncode == 0:
+        return r.stdout
+    if "no crontab" in (getattr(r, "stderr", "") or "").lower():
+        return ""
+    return None
 
 
 def cron_line():
@@ -308,9 +362,14 @@ def cron_line():
 def install_cron(schedule_key=None):
     cfg = C.load_config()
     key = schedule_key or C.setting(cfg, "schedule", "hourly")
+    table = _crontab()
+    if table is None:
+        # never replace a table we could not read
+        print("  cannot read the current crontab — refusing to overwrite it")
+        return False
     C.set_setting(cfg, "schedule", key)
     expr = C.SCHEDULES.get(key, C.SCHEDULES["hourly"])["cron"]
-    lines = [l for l in _crontab().splitlines() if "gitsync" not in l]
+    lines = [l for l in table.splitlines() if "gitsync" not in l]
     if expr:
         lines.append("%s %s sync --scheduled --quiet >/dev/null 2>&1"
                      % (expr, gitsync_bin()))
@@ -387,8 +446,7 @@ def install_webhooks(port=8791, bind="127.0.0.1", system=False):
         _sh(["systemctl", "daemon-reload"])
         _sh(["systemctl", "enable", "--now", WEBHOOK_SERVICE])
         return True
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
-                            "user")
+    unit_dir = _user_unit_dir()
     try:
         os.makedirs(unit_dir, exist_ok=True)
         with open(os.path.join(unit_dir, WEBHOOK_SERVICE), "w") as f:
@@ -411,8 +469,7 @@ def uninstall_webhooks(system=False):
             pass
         _sh(["systemctl", "daemon-reload"])
         return True
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
-                            "user")
+    unit_dir = _user_unit_dir()
     existed = os.path.exists(os.path.join(unit_dir, WEBHOOK_SERVICE))
     _sh(["systemctl", "--user", "disable", "--now", WEBHOOK_SERVICE])
     try:
@@ -479,8 +536,7 @@ def install_systemd_web(port=7765, bind="0.0.0.0", system=False):
         _sh(["systemctl", "daemon-reload"])
         _sh(["systemctl", "enable", "--now", WEB_SERVICE])
         return True
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
-                            "user")
+    unit_dir = _user_unit_dir()
     try:
         os.makedirs(unit_dir, exist_ok=True)
         with open(os.path.join(unit_dir, WEB_SERVICE), "w") as f:
@@ -508,8 +564,7 @@ def uninstall_systemd_web(system=False):
             pass
         _sh(["systemctl", "daemon-reload"])
         return True
-    unit_dir = os.path.join(os.path.expanduser("~"), ".config", "systemd",
-                            "user")
+    unit_dir = _user_unit_dir()
     existed = os.path.exists(os.path.join(unit_dir, WEB_SERVICE))
     _sh(["systemctl", "--user", "disable", "--now", WEB_SERVICE])
     try:
@@ -546,7 +601,7 @@ def status():
         return "systemd timer: %s" % (timer_status() or "active")
     if windows_task_installed():
         return "windows task: %s" % (windows_task_status() or "active")
-    line = [l for l in _crontab().splitlines() if "gitsync" in l]
+    line = [l for l in (_crontab() or "").splitlines() if "gitsync" in l]
     if line:
         return "cron: %s" % line[0]
     return "not scheduled (manual runs only)"
