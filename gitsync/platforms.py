@@ -731,16 +731,52 @@ class GitLabPlatform:
         return None
 
     def delete_repo(self, repo):
-        """permanently delete a project. Opt-in only (see sync.prune_repos)."""
+        """permanently delete a project. Opt-in only (see sync.prune_repos).
+
+        On gitlab.com only an admin gets an immediate hard delete. Everyone
+        else gets a 30-day holding pen where the project is renamed to
+        "<name>-deletion_scheduled-<id>" — which then reappears as a fresh
+        "extra repo" on the next prune run, forever. A second DELETE by id
+        with permanently_remove=true (allowed for the owner once the project
+        is marked) removes it now, which is what "permanently delete" has to
+        mean here.
+        """
         path = gitlab_path(repo["name"])
         proj = "%s/%s" % (self.owner, path) if self.owner else path
-        rc, out = self._api("/projects/%s" % urllib.parse.quote(proj,
-                                                                  safe=""),
-                            "DELETE")
-        if rc in (202, 204, 200):
-            return True, ""
-        return False, _short_text(out if isinstance(out, str) else
-                                  (out or {}).get("message", ""))
+        quoted = urllib.parse.quote(proj, safe="")
+        rc, out = self._api("/projects/%s" % quoted, "DELETE")
+        if rc not in (202, 204, 200):
+            return False, _short_text(out if isinstance(out, str)
+                                      else (out or {}).get("message", ""))
+        self._purge_scheduled(proj)
+        return True, ""
+
+    def _purge_scheduled(self, proj):
+        """finish a scheduled delete: remove the -deletion_scheduled- ghost.
+
+        ``search`` matches project names instance-wide on gitlab.com, so the
+        namespace is compared too — deleting a stranger's project because it
+        happens to share a name is not a risk worth taking.
+        """
+        if "/" not in proj:
+            return
+        ns, leaf = proj.rsplit("/", 1)
+        q = urllib.parse.urlencode({"search": leaf, "simple": "true",
+                                    "per_page": "100"})
+        rc, out = self._api("/projects?" + q)
+        if rc != 200 or not isinstance(out, list):
+            return
+        prefix = leaf + "-deletion_scheduled-"
+        for p in out:
+            fp = str(p.get("path_with_namespace") or "")
+            if "/" not in fp:
+                continue
+            p_ns, p_leaf = fp.rsplit("/", 1)
+            if p_ns != ns or not p_leaf.startswith(prefix):
+                continue
+            qs = urllib.parse.urlencode({"permanently_remove": "true",
+                                         "full_path": fp})
+            self._api("/projects/%s?%s" % (p.get("id"), qs), "DELETE")
 
     def token_info(self):
         """expiry + scopes, for the token-expiry warning"""

@@ -55,14 +55,31 @@ def cmd_setup(args):
     wizard.run_wizard()
 
 
+def _only_names(raw):
+    """--only values: repeatable, and each may be a comma-separated list"""
+    out, seen = [], set()
+    for chunk in raw or []:
+        for part in str(chunk).split(","):
+            part = part.strip()
+            if part and part not in seen:
+                seen.add(part)
+                out.append(part)
+    return out
+
+
 def cmd_prune(args):
     """delete, on opt-in targets, repos the source does not have.
 
     Dry-run by default: `gitsync prune --route X` only lists. Deleting
     needs --yes, a target named in the route's prune_repos, full mode, and
     is refused from the timer.
+
+    ``--only`` narrows the list to the repos you name (``name`` or
+    ``target:name``), so one dead repo can be removed without touching the
+    rest of the extras.
     """
     cfg = C.load_config()
+    only = _only_names(getattr(args, "only", None))
     routes = C.routes(cfg)
     if args.route:
         routes = [r for r in routes if r.get("name") == args.route]
@@ -83,6 +100,14 @@ def cmd_prune(args):
             rc = 2
             continue
         gone = SYNC.prune_repos(cfg, route)
+        unmatched = []
+        if only:
+            gone, unmatched = SYNC.filter_prune(gone, only)
+            for miss in unmatched:
+                print("route %s: '%s' is not an extra repo on an opted-in "
+                      "target — ignored" % (name, miss))
+            if unmatched:
+                rc = 1
         if not gone:
             print("route %s: nothing to delete" % name)
             continue
@@ -2619,6 +2644,9 @@ def main(argv=None):
                         help="delete target repos the source does not have "
                              "(dry-run unless --yes)")
     sp.add_argument("--route", help="only this route")
+    sp.add_argument("--only", action="append", metavar="[TARGET:]REPO",
+                    help="delete only this repo (repeatable, comma-separated; "
+                         "TARGET:REPO limits it to one site)")
     sp.add_argument("--yes", action="store_true",
                     help="actually delete (without it, only a list is shown)")
     sp.set_defaults(func=cmd_prune)

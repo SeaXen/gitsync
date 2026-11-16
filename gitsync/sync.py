@@ -1666,6 +1666,57 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
     return totals
 
 
+def filter_prune(gone, only):
+    """restrict a prune answer to the repositories that were asked for.
+
+    ``prune_repos()`` answers "every repo on a target that the source does
+    not have", which is too blunt for a config that deliberately keeps a
+    local-only repo: the operator wants the three dead ones, not all four.
+    ``only`` accepts ``name`` (that repo on every opted-in target) and
+    ``target:name`` (one site's copy), so the same helper serves the CLI
+    and the table of checkboxes.
+
+    Returns ``(kept, unmatched)``. ``unmatched`` is the specs that matched
+    nothing — a typo, or a repo that was already deleted — so the caller
+    can report it instead of claiming a deletion that never happened.
+    """
+    if not only:
+        return gone, []
+    specs = []
+    plain = set()
+    for spec in only:
+        spec = str(spec or "").strip()
+        if not spec:
+            continue
+        specs.append(spec)
+        if ":" in spec:
+            tname, name = spec.split(":", 1)
+            specs[-1] = (tname.strip(), name.strip())
+        else:
+            plain.add(spec)
+    kept, matched = {}, set()
+    for tname, items in gone.items():
+        keep = []
+        for it in items:
+            name = it["name"]
+            pair = (tname, name)
+            hit = name in plain
+            for spec in specs:
+                if isinstance(spec, tuple) and spec == pair:
+                    hit = True
+            if hit:
+                keep.append(it)
+                if name in plain:
+                    matched.add(name)
+                for spec in specs:
+                    if isinstance(spec, tuple) and spec == pair:
+                        matched.add("%s:%s" % spec)
+        if keep:
+            kept[tname] = keep
+    wanted = [("%s:%s" % s) if isinstance(s, tuple) else s for s in specs]
+    return kept, [w for w in wanted if w not in matched]
+
+
 def prune_repos(cfg, route, dry_run=False):
     """repositories to delete per target: present on a target, absent on the
     source. Read-only; nothing is deleted here.
@@ -1723,7 +1774,7 @@ def _prune_route_repos(cfg, route, repos, dry_run, totals):
             log("  %s: %s %s (%s)"
                 % (tname, "would delete" if dry_run else "deleting",
                    it["name"], it["why"]))
-    log("=== route '%s': %d repo(s) %s the source does not have%s ==="
+    log("=== route '%s': %d repo(s) %s the source does not have: %s ==="
         % (rname, n, "would be deleted from" if dry_run else "deleted from",
            ", ".join(sorted(gone))))
     if dry_run:

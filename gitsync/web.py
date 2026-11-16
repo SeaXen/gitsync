@@ -825,8 +825,25 @@ def _tool_argv(kind, b):
     if kind == "prune":
         # deletion is opt-in per target and per run: the route must name the
         # target in prune_repos, and this job only ever runs from an
-        # explicit click (never from the timer)
-        return ["prune"] + (["--route", route] if route else []) + ["--yes"], True
+        # explicit click (never from the timer). "only" carries the rows
+        # the operator ticked in the Repos table ("name" or "target:name"),
+        # so a single dead repo no longer drags every extra with it.
+        only = b.get("only") or []
+        if not isinstance(only, list):
+            raise ValueError("only must be a list of repo names")
+        if len(only) > 500:
+            raise ValueError("too many repos selected (max 500)")
+        argv = ["prune"] + (["--route", route] if route else []) + ["--yes"]
+        for item in only:
+            name = str(item or "").strip()
+            if not name:
+                continue
+            # a leading '-' would be read as a flag; control characters
+            # would split the argv entry
+            if name.startswith("-") or any(ord(c) < 32 for c in name):
+                raise ValueError("invalid repo name")
+            argv.append("--only=" + name)
+        return argv, True
     if kind == "tokens":
         return ["tokens"], False
     if kind == "disk":

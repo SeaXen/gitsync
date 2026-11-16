@@ -284,41 +284,96 @@
         G.esc(d.extra[t].join(", ")) + "</div></div>";
     }).join("");
     body.innerHTML = head + table + (extra || "") + pruneBox(d);
-    var btn = document.getElementById("r-prune");
-    if (btn) btn.addEventListener("click", doPrune);
+    wirePrune();
   }
 
-  // deletion is opt-in per target (route -> prune_repos) and per click, so
-  // the button only exists when the route allows it — and always asks for
-  // the route name before anything is removed
+  // deletion is opt-in per target (route -> prune_repos) and per check, so
+  // the box only exists when the route allows it — and it deletes exactly
+  // the ticked rows, never "everything that happens to be extra"
   function pruneBox(d) {
-    var n = Object.keys(d.extra || {}).reduce(function (a, t) {
-      return a + d.extra[t].length;
+    var extra = d.extra || {};
+    var total = Object.keys(extra).reduce(function (a, t) {
+      return a + extra[t].length;
     }, 0);
-    if (!n) return "";
+    if (!total) return "";
     var allowed = (d.prune_repos || []);
     if (!allowed.length) {
       return '<p class="muted u-fs125 u-mt14">' +
         "To delete these, tick the target under “Delete extra repos” on the " +
         '<a href="routes.html">Routes</a> page (full mode only).</p>';
     }
-    return '<div class="mt u-topline u-pt12">' +
-      '<div class="row"><span><strong>' + n + " repo(s)</strong> can be " +
-      "permanently deleted from " + G.esc(allowed.join(", ")) + "</span>" +
-      '<button class="btn danger" id="r-prune">Delete them…</button></div>' +
+    var groups = Object.keys(extra).map(function (t) {
+      return '<div class="mt"><div class="row"><span><strong>' + G.esc(t) +
+        "</strong> has " + extra[t].length + " repo(s) the source does not" +
+        "</span>" +
+        '<button class="linkbtn u-fs12" data-pick="all" data-target="' +
+        G.esc(t) + '">select all</button>' +
+        '<button class="linkbtn u-fs12" data-pick="none" data-target="' +
+        G.esc(t) + '">none</button></div>' +
+        '<div class="u-col6 mt4">' + extra[t].map(function (n) {
+          return '<label class="check"><input type="checkbox" name="r-pick" ' +
+            'data-target="' + G.esc(t) + '" value="' + G.esc(n) + '"> ' +
+            G.esc(n) + "</label>";
+        }).join("") + "</div></div>";
+    }).join("");
+    return '<div class="mt u-topline u-pt12">' + groups +
+      '<div class="row mt"><span><strong id="r-pick-n">0</strong> selected ' +
+      "of " + total + " · deletion targets " + G.esc(allowed.join(", ")) +
+      "</span>" +
+      '<button class="btn" id="r-pick-clear">Clear</button>' +
+      '<button class="btn danger" id="r-prune" disabled>' +
+      "Delete selected…</button></div>" +
       '<p class="muted u-fs125 u-mt6">' +
       "Deleting removes the repository and everything in it — issues, merge " +
       "requests, wiki, stars. It cannot be undone.</p></div>";
   }
 
+  function picks() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll('input[name="r-pick"]:checked'));
+  }
+
+  // the count and the button state follow the checkboxes, so "Delete
+  // selected" can never be pressed with nothing selected
+  function wirePrune() {
+    var boxes = Array.prototype.slice.call(
+      document.querySelectorAll('input[name="r-pick"]'));
+    var btn = document.getElementById("r-prune");
+    var count = document.getElementById("r-pick-n");
+    function sync() {
+      var n = picks().length;
+      if (count) count.textContent = n;
+      if (btn) btn.disabled = n === 0;
+    }
+    boxes.forEach(function (b) { b.addEventListener("change", sync); });
+    Array.prototype.forEach.call(
+      document.querySelectorAll("[data-pick]"), function (b) {
+        b.addEventListener("click", function () {
+          var t = b.getAttribute("data-target");
+          var on = b.getAttribute("data-pick") === "all";
+          boxes.forEach(function (x) {
+            if (x.getAttribute("data-target") === t) x.checked = on;
+          });
+          sync();
+        });
+      });
+    var clear = document.getElementById("r-pick-clear");
+    if (clear) clear.addEventListener("click", function () {
+      boxes.forEach(function (x) { x.checked = false; });
+      sync();
+    });
+    if (btn) btn.addEventListener("click", doPrune);
+    sync();
+  }
+
   function doPrune() {
     var d = state.cmp;
-    var n = Object.keys(d.extra || {}).reduce(function (a, t) {
-      return a + d.extra[t].length;
-    }, 0);
-    var list = Object.keys(d.extra || {}).map(function (t) {
-      return t + ": " + d.extra[t].join(", ");
-    }).join("\n");
+    var sel = picks().map(function (b) {
+      return b.getAttribute("data-target") + ":" + b.value;
+    });
+    if (!sel.length) return G.toast("tick at least one repo", "warn");
+    var n = sel.length;
+    var list = sel.join("\n");
     G.modalConfirm({
       title: "Delete " + n + " repo(s)?",
       message: "Route " + d.route + " — the following repositories exist on a " +
@@ -339,7 +394,8 @@
     }).then(function (typed) {
       // the second modal resolves with the typed text, not a boolean
       if (!typed) return;
-      return G.api("POST", "/api/jobs", { kind: "prune", route: d.route })
+      return G.api("POST", "/api/jobs",
+                   { kind: "prune", route: d.route, only: sel })
         .then(function (r) {
           G.toast("deleting " + n + " repo(s)…");
           var host = document.getElementById("r-live");

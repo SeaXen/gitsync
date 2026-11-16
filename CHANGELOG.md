@@ -4,6 +4,63 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.13] - 2026-11-16
+
+### Deletion — one repo at a time, from every surface
+`gitsync prune` could only ever delete *everything* a target had and the
+source did not, so a config that deliberately keeps one local-only repo
+could not use it at all: the keeper was always in the same list as the dead
+ones. Deletion is now selectable.
+
+- `gitsync prune --only NAME` deletes just that repo; `--only target:NAME`
+  limits it to one site. Repeatable and comma-split.
+  `SYNC.filter_prune()` is the pure helper behind it and reports the names
+  that matched nothing (a typo) instead of claiming a deletion.
+- Web UI: the Repos page lists the extras as per-repo checkboxes with
+  select all / none / clear and a "Delete selected…" button that stays
+  disabled at zero. It sends `only: ["target:name", …]`; the existing locks
+  (route `prune_repos`, full mode, an explicit click, never the timer) are
+  unchanged.
+- TUI: `X` on the Routes tab opens an Extras screen — space to tick, `A`/`N`
+  for all/none, `D` to delete after typing the route name. `T` toggles which
+  targets may have repositories deleted at all (`prune_repos`), so the
+  feature is reachable without hand-editing JSON.
+- The prune log line was missing its colon (`... does not have%s`), which
+  made it read as one run-on word.
+
+### GitLab — "permanently delete" now is permanent
+A plain `DELETE /projects/:path` on gitlab.com only *schedules* removal 30
+days out and renames the project to `<name>-deletion_scheduled-<id>`. Those
+ghosts then appeared as brand-new "extra repos" on every later prune run,
+so a target could never actually get clean. The adapter now finishes the
+job: after the scheduled delete it resolves the renamed project by id and
+issues `permanently_remove=true&full_path=…`, which the owner is allowed to
+do once the project is marked. The purge only ever touches projects in the
+route's own namespace. Verified by deleting three throwaway projects through
+the new TUI screen and confirming `search=` returns nothing afterwards.
+
+### TUI — the pages were haphazard; the dashboard said nothing
+Every page now shares one panel primitive that can draw at an exact
+rectangle, which is what made side-by-side layout possible in the first
+place.
+
+- **Dashboard**: four stat cards (LAST SYNC / SCHEDULE / MIRROR HUB /
+  ROUTES) instead of a bare platform table, then platforms and routes side
+  by side at ≥110 columns, then the health strip, then the log. A card
+  answers "did the last run work", "when is the next one" and "how big is
+  the hub" at a glance; the routes card counts paused routes.
+- **Platforms / Routes / History**: dim column headers and fixed columns.
+  History gained OK/PART/FAIL/OF/TIME columns and a duration bar, so a
+  20-run list is scannable. Routes shows ROUTE/DIRECTION/EVERY/NEXT/PATH
+  plus a digest line (last run, delete-on targets, filters).
+- **Settings**: two columns — what a sync does vs when/where — with paths
+  shortened to `~/…` so they stop being cut mid-name.
+- Panels size to their content on the list pages (a 4-row table in a
+  33-row box read as "this page is empty"), and a narrow terminal shows
+  "... +N more" rather than dropping the tail silently.
+- The health strip packs whole segments and drops the ones that do not fit
+  instead of printing `webhooks: conf`.
+
 ## [2.1.12] - 2026-11-16
 
 ### Web UI — the route list understated what a route does

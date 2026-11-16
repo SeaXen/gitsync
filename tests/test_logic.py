@@ -2076,6 +2076,88 @@ class TestPruneRepos(unittest.TestCase):
             # the repo the source does have is untouched
             self.assertTrue(os.path.isdir(os.path.join(dst, "a.git")))
 
+    def test_only_filter_keeps_just_the_named_repo(self):
+        gone = {"dst": [{"name": "z", "why": "not on the source"},
+                        {"name": "y", "why": "not on the source"}]}
+        kept, unmatched = SY.filter_prune(gone, ["z"])
+        self.assertEqual([i["name"] for i in kept["dst"]], ["z"])
+        self.assertEqual(unmatched, [])
+
+    def test_only_filter_target_prefix_limits_one_site(self):
+        gone = {"gl": [{"name": "z", "why": ""}],
+                "fj": [{"name": "z", "why": ""}]}
+        kept, unmatched = SY.filter_prune(gone, ["gl:z"])
+        self.assertEqual(sorted(kept), ["gl"])
+        self.assertEqual([i["name"] for i in kept["gl"]], ["z"])
+        self.assertEqual(unmatched, [])
+
+    def test_only_filter_reports_names_it_could_not_match(self):
+        gone = {"dst": [{"name": "z", "why": ""}]}
+        kept, unmatched = SY.filter_prune(gone, ["z", "typo"])
+        self.assertEqual(unmatched, ["typo"])
+        self.assertEqual([i["name"] for i in kept["dst"]], ["z"])
+
+    def test_only_filter_with_no_names_returns_everything(self):
+        gone = {"dst": [{"name": "z", "why": ""}]}
+        kept, unmatched = SY.filter_prune(gone, None)
+        self.assertEqual(kept, gone)
+        self.assertEqual(unmatched, [])
+
+    def test_only_filter_on_a_repo_that_is_not_extra(self):
+        gone = {"dst": [{"name": "z", "why": ""}]}
+        kept, unmatched = SY.filter_prune(gone, ["a"])
+        self.assertEqual(kept, {})
+        self.assertEqual(unmatched, ["a"])
+
+    def test_cli_only_deletes_that_repo_and_leaves_the_others(self):
+        # the whole point of --only: a config that deliberately keeps one
+        # local-only repo must be able to remove the dead ones without
+        # dragging the keeper with them
+        import argparse
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, dst = self._cfg(td, prune_repos=["dst"])
+            subprocess.run(["git", "init", "-q", "--bare",
+                            os.path.join(dst, "y.git")], check=True)
+            old = (C.CONFIG_DIR, C.CONFIG_FILE)
+            try:
+                C.CONFIG_DIR = td
+                C.CONFIG_FILE = os.path.join(td, "config.json")
+                with open(C.CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = M.cmd_prune(argparse.Namespace(
+                        route="r", only=["z"], yes=True))
+                self.assertEqual(rc, 0, out.getvalue())
+                self.assertFalse(os.path.exists(os.path.join(dst, "z.git")))
+                self.assertTrue(os.path.isdir(os.path.join(dst, "y.git")))
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE = old
+
+    def test_cli_only_with_an_unknown_name_deletes_nothing(self):
+        import argparse
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as td:
+            cfg, _s, dst = self._cfg(td, prune_repos=["dst"])
+            old = (C.CONFIG_DIR, C.CONFIG_FILE)
+            try:
+                C.CONFIG_DIR = td
+                C.CONFIG_FILE = os.path.join(td, "config.json")
+                with open(C.CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f)
+                out = io.StringIO()
+                with contextlib.redirect_stdout(out):
+                    rc = M.cmd_prune(argparse.Namespace(
+                        route="r", only=["typo"], yes=True))
+                self.assertEqual(rc, 1, out.getvalue())
+                self.assertIn("typo", out.getvalue())
+                self.assertTrue(os.path.isdir(os.path.join(dst, "z.git")))
+            finally:
+                C.CONFIG_DIR, C.CONFIG_FILE = old
+
     def test_safe_mode_refuses_to_delete(self):
         with tempfile.TemporaryDirectory() as td:
             cfg, _s, dst = self._cfg(td, mode="safe", prune_repos=["dst"])
@@ -2120,6 +2202,38 @@ class TestPruneRepos(unittest.TestCase):
             # deleting twice is not an error
             ok, _err = plat.delete_repo({"name": "z"})
             self.assertTrue(ok)
+
+    def test_gitlab_delete_purges_the_scheduled_ghost(self):
+        """a plain DELETE only parks a project for 30 days and renames it to
+        "<name>-deletion_scheduled-<id>", which then showed up as a fresh
+        extra repo on the next prune run. The ghost must be finished off."""
+        calls = []
+
+        class _Fake(P.GitLabPlatform):
+            def _api(self, path, method="GET", payload=None):
+                calls.append((method, path))
+                if method == "GET" and path.startswith("/projects?"):
+                    return 200, [
+                        {"id": 5, "path_with_namespace":
+                         "me/z-deletion_scheduled-5"},
+                        {"id": 6, "path_with_namespace":
+                         "someone/z-deletion_scheduled-6"},
+                        {"id": 7, "path_with_namespace": "me/zzz"},
+                    ]
+                return 202, {}
+
+        plat = _Fake("gl", {"url": "https://gitlab.com", "owner": "me",
+                            "token": "tok"})
+        ok, err = plat.delete_repo({"name": "z"})
+        self.assertTrue(ok, err)
+        deletes = [c[1] for c in calls if c[0] == "DELETE"]
+        self.assertEqual(deletes[0], "/projects/me%2Fz")
+        self.assertEqual(len(deletes), 2)
+        self.assertIn("/projects/5?", deletes[1])
+        self.assertIn("permanently_remove=true", deletes[1])
+        # a stranger's same-named project is never deleted
+        self.assertNotIn("/projects/6", deletes[1])
+        self.assertNotIn("/projects/7", deletes[1])
 
 
 class TestNotifyCli(unittest.TestCase):
@@ -2284,6 +2398,17 @@ class TestTui(unittest.TestCase):
     def test_merged_refs_counter(self):
         self.assertEqual(
             tui._merged_refs(["  x (3 refs merged)", "  y (1 refs merged)"]), 4)
+
+    def test_extras_argv_only_names_the_ticked_rows(self):
+        # the TUI must send the same --only=target:name arguments the web UI
+        # builds, or ticking one dead repo would take every other extra with
+        # it when the CLI ran
+        self.assertEqual(
+            tui._extras_prune_argv("main", [("gitlab", "z"), ("fj", "y")]),
+            ["prune", "--route", "main", "--yes",
+             "--only=gitlab:z", "--only=fj:y"])
+        self.assertEqual(tui._extras_prune_argv("main", []),
+                         ["prune", "--route", "main", "--yes"])
         self.assertEqual(tui._merged_refs(["  x"]), 0)
         self.assertEqual(tui._merged_refs([]), 0)
 
@@ -2624,6 +2749,14 @@ class TestWeb(unittest.TestCase):
         self.assertEqual(W._tool_argv("mirror", {"repos": "a,b", "to": "gl"}),
                          (["mirror", "a", "b", "--to", "gl"], True))
         self.assertEqual(W._tool_argv("tokens", {}), (["tokens"], False))
+        # prune carries the ticked rows; target:name keeps it to one site
+        self.assertEqual(
+            W._tool_argv("prune", {"route": "r",
+                                   "only": ["gitlab:z", "fj:y"]}),
+            (["prune", "--route", "r", "--yes",
+              "--only=gitlab:z", "--only=fj:y"], True))
+        self.assertEqual(W._tool_argv("prune", {"route": "r"}),
+                         (["prune", "--route", "r", "--yes"], True))
 
     def test_tool_argv_rejects_bad_input(self):
         with self.assertRaises(ValueError):
@@ -2632,6 +2765,12 @@ class TestWeb(unittest.TestCase):
             W._tool_argv("mirror", {})            # needs repos
         with self.assertRaises(ValueError):
             W._tool_argv("nonsense", {})          # unknown tool
+        with self.assertRaises(ValueError):
+            W._tool_argv("prune", {"only": "-rf"})      # reads as a flag
+        with self.assertRaises(ValueError):
+            W._tool_argv("prune", {"only": ["a\nb"]})   # splits the argv
+        with self.assertRaises(ValueError):
+            W._tool_argv("prune", {"only": "z"})        # must be a list
 
     def test_engine_sync_busy_is_false_when_free(self):
         with tempfile.TemporaryDirectory() as td:

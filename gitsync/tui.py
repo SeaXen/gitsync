@@ -2108,8 +2108,8 @@ def draw(stdscr):
         foot = (" [1-7]tabs  [S]ync  [D]ry-run  up/dn=scroll sites  "
                 "[A]cc  [R]efresh  [?]Help  [Q]uit ")
     if tab == 2:
-        foot = (" [1-7]tabs  [S]ync  [P]ause/resume  [O]ptions  "
-                "[R]efresh  [?]Help  [Q]uit ")
+        foot = (" [1-7]tabs  [S]ync  [P]ause/resume  [X]extras: delete repos  "
+                "[O]ptions  [R]efresh  [?]Help  [Q]uit ")
     if tab == 3:
         foot = (" [1-7]tabs  [S]ource  [C]opy stars  up/dn=scroll  "
                 "[R]e-read  [?]Help  [Q]uit ")
@@ -2124,7 +2124,38 @@ def draw(stdscr):
     commit_screen(stdscr)
 
 
-def _panel_rows(stdscr, h, w, top, rows, title, colors=None):
+def _panel_at(stdscr, y, x, width, height, rows, title=None, dim=None):
+    """a bordered panel at an exact rectangle.
+
+    `_panel_rows()` always spans the whole screen, so two panels could never
+    sit side by side and every page ended in a block of dead space. This
+    draws the box the caller asked for (filling it, so a short list does not
+    look like a rendering bug) and is what the dashboard's two-column body
+    and the stat cards use.
+    """
+    if dim is None:
+        dim = curses.A_DIM
+    h_scr, w_scr = stdscr.getmaxyx()
+    width = min(width, w_scr - x)
+    if height < 2 or width < 6 or y >= h_scr - 1:
+        return
+    inner = width - 2
+    if inner < 4:
+        return
+    label = (" %s " % title) if title else ""
+    if len(label) > inner - 1:
+        label = label[:max(0, inner - 1)]
+    safe_add(stdscr, y, x,
+             ("+" + label + "-" * max(0, inner - len(label)) + "+")[:width], dim)
+    body = height - 2
+    for i in range(body):
+        text, attr = rows[i] if i < len(rows) else ("", 0)
+        safe_add(stdscr, y + 1 + i, x,
+                 ("|" + (" " + str(text)).ljust(inner)[:inner] + "|"), attr)
+    safe_add(stdscr, y + height - 1, x, "+" + "-" * inner + "+", dim)
+
+
+def _panel_rows(stdscr, h, w, top, rows, title, colors=None, fit=False):
     """render rows [(text, attr)] inside a bordered panel.
 
     Drawn straight onto stdscr instead of into a separate curses window.
@@ -2134,26 +2165,82 @@ def _panel_rows(stdscr, h, w, top, rows, title, colors=None):
     and Routes tabs rendered an empty panel for every release so far.
     Drawing on stdscr makes the panel exactly as reliable as the header,
     tab bar and footer, which always worked.
+
+    fit=True sizes the box to its content instead of filling the screen —
+    a four-row table in a 33-row box reads as "this page is empty".
     """
-    avail = h - top - 2          # leave the hint line + footer alone
-    if avail < 1 or w < 8:
-        return
-    inner = w - 4
-    n = min(len(rows), avail - 1)
-    label = " %s " % title
-    if len(label) > inner:
-        label = label[:inner]
-    rule = "+" + label + "-" * max(0, inner - len(label)) + "+"
-    safe_add(stdscr, top, 1, rule[:w - 2], curses.A_DIM)
-    for i in range(n):
-        text, attr = rows[i]
-        body = "| " + str(text)
-        safe_add(stdscr, top + 1 + i, 1,
-                 body.ljust(inner + 1)[:inner + 1] + "+", attr)
-    if n < len(rows):
-        safe_add(stdscr, top + 1 + n, 1,
-                 ("| ... %d more" % (len(rows) - n)).ljust(inner + 1)[:inner + 1]
-                 + "+", curses.A_DIM)
+    avail = max(2, h - top - 2)
+    height = min(len(rows) + 2, avail) if fit else avail
+    _panel_at(stdscr, top, 1, w - 2, max(2, height), rows, title)
+
+
+def _stat_grid(stdscr, y, width, cards, per_row=4, height=4):
+    """draw small title/value/note cards in a grid; returns the next row.
+
+    cards: [(title, value, note, attr)] — the dashboard used to spend its
+    top half on a flat list and said nothing about the last run's outcome,
+    the next run, or the hub. A card is one glance.
+    """
+    cards = [c for c in cards if c]
+    if not cards or width < 24 or y < 0:
+        return y
+    gap = 1
+    per_row = max(1, min(per_row, len(cards)))
+    cw = (width - gap * (per_row - 1)) // per_row
+    while cw < 15 and per_row > 1:
+        per_row -= 1
+        cw = (width - gap * (per_row - 1)) // per_row
+    row_y = y
+    for i, card in enumerate(cards):
+        title, value, note = card[0], card[1], card[2]
+        attr = card[3] if len(card) > 3 else 0
+        col = i % per_row
+        if col == 0 and i:
+            row_y += height + 1
+        _panel_at(stdscr, row_y, 1 + col * (cw + gap), cw, height,
+                  [(value, attr), (note, curses.A_DIM)], title)
+    return row_y + height
+
+
+def _ago_text(stamp):
+    """'8m ago' from a 'YYYY-MM-DD HH:MM:SS' record stamp"""
+    try:
+        when = datetime.strptime(str(stamp), "%Y-%m-%d %H:%M:%S")
+    except (TypeError, ValueError):
+        return ""
+    secs = max(0, (datetime.now() - when).total_seconds())
+    if secs < 90:
+        return "%ds ago" % int(secs)
+    if secs < 5400:
+        return "%dm ago" % int(secs // 60)
+    if secs < 172800:
+        return "%.1fh ago" % (secs / 3600.0)
+    return "%.1fd ago" % (secs / 86400.0)
+
+
+def _next_run_text():
+    """short 'when does the timer fire' from the cached scheduler line.
+
+    S.status() shells out to systemctl, so it must never be called on the
+    draw path — cached_status() refreshes it in a thread every 15s and this
+    only parses the result. "systemd timer: active, next Mon 2026-11-16
+    12:00:00 +06" becomes "Mon 12:00".
+    """
+    s = (cached_status() or "").strip()
+    if "next " in s:
+        tail = s.split("next ", 1)[1].strip()
+        bits = tail.split()
+        if len(bits) >= 3 and len(bits[2]) >= 5 and bits[2][2] == ":":
+            return "%s %s" % (bits[0], bits[2][:5])
+        if len(bits) >= 2:
+            return " ".join(bits[:2])[:18]
+        return tail[:18]
+    low = s.lower()
+    if "active" in low:
+        return "active"
+    if not s or "not installed" in low or "missing" in low:
+        return "not scheduled"
+    return s[:18]
 
 
 def platforms_title():
@@ -2165,35 +2252,45 @@ def platforms_title():
     return "PLATFORMS (%d sites, %d connected)" % (len(rows), live)
 
 
+PLAT_FMT = "%-14.14s %-9.9s %-3s %-5s %5s  %s"
+PLAT_HEAD = PLAT_FMT % ("SITE", "TYPE", "ON", "STATE", "REPOS", "DETAIL")
+
+
 def draw_platforms(stdscr, h, w, G, R, dim):
     """the Platforms tab. Scrolls, because there is no cap on how many
-    sites a config can hold and a short terminal cannot show them all."""
-    rows = []
+    sites a config can hold and a short terminal cannot show them all.
+
+    A dim header row names the columns: the counts used to be crammed into
+    "repos=47" in the middle of a sentence, which made a table look like
+    prose.
+    """
+    body = []
     for name, ptype, on, ok, info, count in state["platforms"]:
         attr = (G if ok else R) if on else dim
-        rows.append(("%-14.14s %-9.9s %-4s %-5s repos=%-6s %s"
-                     % (name, ptype, "ON" if on else "off",
-                        "OK" if ok else "FAIL", count, info), attr))
-    if not rows:
+        body.append((PLAT_FMT % (name, ptype, "on" if on else "off",
+                                 "OK" if ok else "FAIL", count, info), attr))
+    if not body:
         cfg = C.load_config()
         if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
-            rows.append(("No platforms yet — press 'A' to add one or 'W' for wizard", curses.A_BOLD))
-            rows.append(("Or run: gitsync setup", dim))
+            body.append(("no sites yet — press A to add one, W for the wizard",
+                         curses.A_BOLD))
+            body.append(("or run: gitsync setup", dim))
         else:
-            rows.append(("platforms: loading...", dim))
-    avail = max(1, h - 4 - 2 - 1)          # panel body rows available
+            body.append(("platforms: loading...", dim))
+    avail = max(1, h - 8)                  # panel body rows (h - top - border)
     top = state.get("plat_scroll", 0)
-    top = max(0, min(top, max(0, len(rows) - 1)))
-    if top + avail < len(rows) and top > 0:
-        pass
+    top = max(0, min(top, max(0, len(body) - 1)))
     state["plat_scroll"] = top
-    _panel_rows(stdscr, h, w, 4, rows[top:top + avail], platforms_title())
-    if len(rows) > avail:
-        safe_add(stdscr, 3, 0, " %d-%d of %d sites " % (
-            top + 1, min(top + avail, len(rows)), len(rows)), curses.A_DIM)
+    shown = body[top:top + max(0, avail - 1)]
+    _panel_rows(stdscr, h, w, 4,
+                [(PLAT_HEAD, curses.A_DIM | curses.A_BOLD)] + shown,
+                platforms_title(), fit=True)
+    if len(body) > len(shown):
+        safe_add(stdscr, 3, 2, "%d-%d of %d" % (
+            top + 1, top + len(shown), len(body)), curses.A_DIM)
     safe_add(stdscr, h - 2, 2,
-             "up/dn=scroll  |  add/edit/remove: gitsync platforms "
-             "add|edit|remove NAME", dim)
+             "[A] add/manage  [R] re-test  [E] browse repos  [W] wizard  "
+             "|  up/dn scroll", dim)
 
 
 def platforms_key(ch):
@@ -2235,8 +2332,8 @@ def _route_last(name):
         bits.append("no sync yet" if dry else "never run")
     else:
         age = (time.time() - last) / 60.0
-        bits.append("ran %s ago" % ("%dm" % age if age < 1440
-                                    else "%.1fd" % (age / 1440.0)))
+        bits.append("%s ago" % ("%dm" % age if age < 1440
+                                else "%.1fd" % (age / 1440.0)))
     if rec:
         if dry:
             bits.append("last was a dry run — %d would change"
@@ -2288,14 +2385,20 @@ def draw_routes(stdscr, h, w, G, R, dim):
     if not rows:
         rows.append(("(no routes — add one: gitsync routes add main github "
                      "gitlab,forgejo)", dim))
+        head = None
+    else:
+        head = ("%-16.16s %-8s %-6s %-12.12s %s"
+                % ("ROUTE", "DIRECTION", "EVERY", "NEXT", "PATH"))
     inner = w - 6
     for i, (text, attr) in enumerate(rows):
         if len(text) > inner:
             rows[i] = (text[:inner - 18] + " ... (P for details)", attr)
-    _panel_rows(stdscr, h, w, 4, rows, "ROUTES (direction + pause)")
-    safe_add(stdscr, h - 2, 2,
-             "P = pause/resume a route or target   |   "
-             "add: gitsync routes add all github,gitlab,forgejo", dim)
+    body = ([(head, curses.A_DIM | curses.A_BOLD)] if head else []) + rows
+    _panel_rows(stdscr, h, w, 4, body, "ROUTES (direction + schedule)",
+                fit=True)
+    safe_add(stdscr, h - 2, 1,
+             "[P] pause/resume   [X] extras: delete repos a target has and "
+             "the source does not   [?] help"[:w - 2], dim)
 
 
 def _build_route_rows():
@@ -2305,37 +2408,44 @@ def _build_route_rows():
     for the clock, so the TUI re-parsed config.json and records.json even
     while the user sat on another tab. Cached in _DRAW_CACHE (~3s) and
     invalidated by _reload_routes().
+
+    One aligned line per route (name, direction, cadence, next run, path)
+    plus a dim digest line: "name: github -> gitlab [one-way, 6h, next: 3h]"
+    wrapped onto two lines in a way that never lined up.
     """
     rows = []
     cfg = C.load_config()
+    by_name = {r.get("name"): r for r in C.routes(cfg)}
     for (name, source, targets, inc, exc, direction, paused,
          route_on) in state["routes"]:
-        sched = C.route_schedule(cfg, {
-            "name": name, "schedule": state["route_sched"].get(name)})
-        nxt = SYNC.next_due_text({
-            "name": name, "schedule": state["route_sched"].get(name)}, cfg)
+        cur = by_name.get(name) or {"name": name,
+                                    "schedule": state["route_sched"].get(name)}
+        sched = C.route_schedule(cfg, cur)
+        nxt = SYNC.next_due_text(cur, cfg)
         mesh = direction == "mesh"
-        parts = []
-        for t in targets:
-            mark = ""
-            if t in paused:
-                mark = " (paused)"
-            parts.append(t + mark)
+        parts = [t + (" (paused)" if t in paused else "") for t in targets]
         arrow = (", ".join(["*" + source] + parts) if mesh
                  else "%s -> %s" % (source, ", ".join(parts) or "(none)"))
         meta = "mesh" if mesh else "one-way"
-        when = "PAUSED" if not route_on else "next: " + nxt
+        when = "PAUSED" if not route_on else nxt
         attr = curses.A_DIM if not route_on else curses.A_BOLD
-        rows.append(("%s:  %s   [%s, %s, %s]" % (name, arrow, meta, sched,
-                                                 when), attr))
+        rows.append((("%-16.16s %-8s %-6s %-12.12s %s"
+                      % (name, meta, sched, when, arrow)), attr))
         extra = []
-        last = _route_last(name)
-        if last:
-            extra.append(last)
+        try:
+            extra.append(_route_last(name))
+        except Exception:
+            pass
+        try:
+            pr = C.prune_targets(cfg, cur)
+        except Exception:
+            pr = []
+        if pr:
+            extra.append("deletes extras on %s" % ", ".join(pr))
         if inc or exc:
             extra.append("include=%s exclude=%s" % (inc or "-", exc or "-"))
         if extra:
-            rows.append(("    " + "  |  ".join(extra), curses.A_DIM))
+            rows.append(("    " + "  ·  ".join(extra), curses.A_DIM))
     return rows
 
 
@@ -2723,6 +2833,351 @@ def _remove_route_screen(stdscr, name):
             return
 
 
+EXTRAS = {"route": None, "rows": [], "sel": set(), "busy": False,
+          "at": 0.0, "err": "", "top": 0, "out": [], "rc": None,
+          "stale": False}
+
+
+def _extras_prune_argv(route_name, picks):
+    """the CLI call that deletes exactly the ticked (target, repo) pairs.
+
+    Pure so it can be tested without curses or network: the TUI must send
+    the same ``--only=target:name`` arguments as the web UI, otherwise a
+    ticked row could quietly take every other extra repo with it.
+    """
+    argv = ["prune", "--route", str(route_name), "--yes"]
+    for target, name in picks:
+        argv.append("--only=%s:%s" % (target, name))
+    return argv
+
+
+def _extras_load(route_name):
+    """read the extra repos for one route in the background (network)"""
+    EXTRAS.update(route=route_name, busy=True, err="", rows=[], sel=set(),
+                  at=0.0, out=[], rc=None, stale=False, top=0)
+
+    def worker():
+        try:
+            cfg = C.load_config()
+            route = next((r for r in C.routes(cfg)
+                          if r.get("name") == route_name), None)
+            if route is None:
+                raise RuntimeError("route '%s' is gone from the config"
+                                   % route_name)
+            gone = SYNC.prune_repos(cfg, route)
+            EXTRAS["rows"] = sorted((t, it["name"]) for t, items in gone.items()
+                                    for it in items)
+            EXTRAS["at"] = time.time()
+        except Exception as e:
+            EXTRAS["err"] = str(e)[:200]
+        finally:
+            EXTRAS["busy"] = False
+            state["dirty"] = True
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _extras_delete(route_name, picks):
+    """run the real delete (a subprocess, so every CLI lock still applies)"""
+    argv = [sys.executable, "-m", "gitsync"] + _extras_prune_argv(route_name,
+                                                                  picks)
+    EXTRAS.update(busy=True, out=["deleting %d repo(s)..." % len(picks)],
+                  rc=None, stale=False)
+    state["dirty"] = True
+
+    def worker():
+        try:
+            p = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True,
+                                 env=dict(os.environ, PYTHONPATH=_app_dir()))
+            for line in p.stdout:
+                EXTRAS["out"].append(line.rstrip())
+                state["dirty"] = True
+            p.wait()
+            EXTRAS["rc"] = p.returncode
+        except Exception as e:
+            EXTRAS["out"].append("error: %s" % e)
+            EXTRAS["rc"] = 1
+        finally:
+            EXTRAS["busy"] = False
+            EXTRAS["stale"] = True
+            state["dirty"] = True
+    threading.Thread(target=worker, daemon=True).start()
+
+
+def _extras_optin_screen(stdscr, route):
+    """tick which targets may have whole repositories deleted.
+
+    This is the lock the CLI calls "prune_repos": nothing is deletable until
+    a target is named here, so opening the screen on a fresh config shows
+    repos but refuses to tick anything for deletion.
+    """
+    name = route.get("name")
+    idx = 0
+    while True:
+        cfg = C.load_config()
+        cur = next((r for r in cfg.get("routes", [])
+                    if r.get("name") == name), None)
+        if cur is None:
+            return
+        allowed = set(C.prune_targets(cfg, cur))
+        targets = list(cur.get("targets") or [])
+        idx = max(0, min(idx, max(0, len(targets) - 1)))
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        safe_add(stdscr, 0, 0,
+                 (" DELETE TARGETS - %s " % name).center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(4))
+        safe_add(stdscr, 1, 0,
+                 " Tick a target to allow whole-repository deletion on it."
+                 .ljust(w - 1)[:w - 1], curses.A_DIM)
+        safe_add(stdscr, 2, 0,
+                 (" mode: %s%s" % (C.route_mode(cfg, cur),
+                                   "  (deletion needs full mode)"
+                                   if C.route_mode(cfg, cur) != "full" else ""))
+                 [:w - 1], curses.color_pair(3)
+                 if C.route_mode(cfg, cur) != "full" else 0)
+        for i, t in enumerate(targets):
+            if 4 + i >= h - 2:
+                break
+            attr = curses.A_REVERSE if i == idx else 0
+            safe_add(stdscr, 4 + i, 1,
+                     ("  [%s] %-14s %s" % (
+                         "x" if t in allowed else " ",
+                         t,
+                         "may have repos deleted" if t in allowed
+                         else "read-only"))[:w - 2], attr)
+        modal_footer(stdscr, h, w,
+                     " space=toggle  A=all  N=none  B=back ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        if ch in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            idx = min(max(0, len(targets) - 1), idx + 1)
+        elif ch in (10, 13, curses.KEY_ENTER, ord(" ")) and targets:
+            t = targets[idx]
+            if t in allowed:
+                allowed.discard(t)
+            else:
+                allowed.add(t)
+            allowed = set(C.prune_targets(cfg, dict(cur, prune_repos=sorted(allowed))))
+            # persist through the config so route validation still runs
+            for r in cfg.get("routes", []):
+                if r.get("name") == name:
+                    if allowed:
+                        r["prune_repos"] = sorted(allowed)
+                    else:
+                        r.pop("prune_repos", None)
+                    break
+            C.save_config(cfg)
+            _reload_routes()
+            EXTRAS["stale"] = True
+        elif ch in (ord("a"), ord("A")):
+            for r in cfg.get("routes", []):
+                if r.get("name") == name and targets:
+                    r["prune_repos"] = sorted(targets)
+                    break
+            C.save_config(cfg)
+            _reload_routes()
+            EXTRAS["stale"] = True
+        elif ch in (ord("n"), ord("N")):
+            for r in cfg.get("routes", []):
+                if r.get("name") == name:
+                    r.pop("prune_repos", None)
+                    break
+            C.save_config(cfg)
+            _reload_routes()
+            EXTRAS["stale"] = True
+
+
+def extras_screen(stdscr, route_name=None):
+    """delete extra repos — one, several, or all — from the TUI.
+
+    `gitsync prune` used to be all-or-nothing from the CLI and the TUI could
+    not delete a single dead repo at all. Tick the rows here and only those
+    are passed to the CLI as --only=target:name, so the deliberate
+    local-only repo next to them survives.
+    """
+    cfg = C.load_config()
+    routes = C.routes(cfg)
+    if not routes:
+        flash("no routes configured — add one first", 4)
+        return
+    route = next((r for r in routes if r.get("name") == route_name), None)
+    if route is None and len(routes) == 1:
+        route = routes[0]
+    if route is None:
+        picked = {}
+
+        def _pick(n):
+            def _f():
+                picked["name"] = n
+            return _f
+        menu(stdscr, "EXTRAS - pick a route",
+             [(r.get("name"),
+               "%s -> %s" % (r.get("source"),
+                             ", ".join(r.get("targets") or []) or "(none)"),
+               _pick(r.get("name"))) for r in routes],
+             note="then tick the repositories to delete from its targets")
+        if not picked:
+            return
+        route = next((r for r in routes if r.get("name") == picked["name"]),
+                     None)
+        if route is None:
+            return
+    name = route.get("name")
+    if EXTRAS.get("route") != name or (not EXTRAS["at"]
+                                       and not EXTRAS["busy"]):
+        _extras_load(name)
+    idx = 0
+    while True:
+        if EXTRAS.get("stale") and not EXTRAS["busy"]:
+            _extras_load(name)
+        cfg = C.load_config()
+        cur = next((r for r in C.routes(cfg) if r.get("name") == name), None)
+        if cur is None:
+            return
+        allowed = C.prune_targets(cfg, cur)
+        mode = C.route_mode(cfg, cur)
+        rows = EXTRAS["rows"]
+        sel = EXTRAS["sel"]
+        idx = max(0, min(idx, max(0, len(rows) - 1)))
+        h, w = stdscr.getmaxyx()
+        stdscr.erase()
+        safe_add(stdscr, 0, 0,
+                 (" EXTRAS - delete repos on a target that the source does "
+                  "not have ").center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 0,
+                 (" route %s   %s -> %s   mode %s"
+                  % (name, cur.get("source"),
+                     ", ".join(cur.get("targets") or []), mode))[:w - 1], 0)
+        if allowed:
+            opt_txt = "delete allowed on: %s" % ", ".join(allowed)
+            opt_attr = curses.color_pair(2)
+        else:
+            opt_txt = ("no target opted in — press T to allow deletion "
+                       "(nothing can be removed until you do)")
+            opt_attr = curses.color_pair(3)
+        safe_add(stdscr, 2, 0, (" " + opt_txt)[:w - 1], opt_attr)
+        if mode != "full":
+            safe_add(stdscr, 3, 0,
+                     (" deletion also needs mirror mode = full (it is %s)"
+                      " — O to change it" % mode)[:w - 1],
+                     curses.color_pair(4))
+        # ---- the list ----
+        body = []
+        if EXTRAS["busy"] and not rows:
+            body.append(("reading the extra-repo list from the targets...",
+                         curses.A_DIM))
+        elif EXTRAS["err"]:
+            body.append(("could not read the list: %s" % EXTRAS["err"],
+                         curses.color_pair(4)))
+            body.append(("R = try again", curses.A_DIM))
+        elif not rows:
+            body.append(("nothing to delete — every target repo also exists "
+                         "on %s" % cur.get("source"), curses.A_DIM))
+        else:
+            top = EXTRAS.get("top", 0)
+            vis = max(1, h - 9)
+            top = max(0, min(top, max(0, len(rows) - 1)))
+            if idx < top:
+                top = idx
+            elif idx >= top + vis:
+                top = idx - vis + 1
+            EXTRAS["top"] = top
+            for i in range(top, min(len(rows), top + vis)):
+                t, n = rows[i]
+                tick = "[x]" if (t, n) in sel else "[ ]"
+                allowed_here = t in allowed
+                attr = (curses.A_REVERSE if i == idx else 0)
+                if not allowed_here:
+                    attr |= curses.A_DIM
+                body.append(("%s %-12.12s %s%s" % (
+                    tick, t, n,
+                    "" if allowed_here else "   (target not opted in)"), attr))
+        _panel_rows(stdscr, h, w, 5, body,
+                    "REPOS (%d found, %d ticked)" % (len(rows), len(sel)))
+        # ---- output / status ----
+        status_row = h - 2
+        if EXTRAS["out"]:
+            tail = EXTRAS["out"][-1]
+            rc = EXTRAS.get("rc")
+            attr = (curses.color_pair(2) if rc == 0 else curses.color_pair(4))
+            safe_add(stdscr, status_row, 0,
+                     (" %s%s" % (tail, "" if rc is None
+                                 else "   [rc=%s]" % rc))[:w - 1], attr)
+        elif EXTRAS["busy"]:
+            safe_add(stdscr, status_row, 0, " working...", curses.A_DIM)
+        else:
+            safe_add(stdscr, status_row, 0,
+                     (" %d selected of %d extra repo(s) — D deletes only the "
+                      "ticked rows" % (len(sel), len(rows)))[:w - 1],
+                     curses.A_DIM)
+        modal_footer(stdscr, h, w,
+                     " space=tick  A=all  N=none  D=delete  T=targets  "
+                     "R=reload  B=back ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        if EXTRAS["busy"]:
+            continue
+        if ch in (curses.KEY_UP, ord("k")):
+            idx = max(0, idx - 1)
+        elif ch in (curses.KEY_DOWN, ord("j")):
+            idx = min(max(0, len(rows) - 1), idx + 1)
+        elif ch == curses.KEY_NPAGE:
+            idx = min(max(0, len(rows) - 1), idx + 10)
+        elif ch == curses.KEY_PPAGE:
+            idx = max(0, idx - 10)
+        elif ch in (ord(" "), 10, 13, curses.KEY_ENTER) and rows:
+            t, n = rows[idx]
+            if t not in allowed:
+                flash("%s is not opted in — press T to allow deletion there"
+                      % t, 5)
+            elif (t, n) in sel:
+                sel.discard((t, n))
+            else:
+                sel.add((t, n))
+        elif ch in (ord("a"), ord("A")):
+            EXTRAS["sel"] = {(t, n) for t, n in rows if t in allowed}
+        elif ch in (ord("n"), ord("N")):
+            EXTRAS["sel"] = set()
+        elif ch in (ord("r"), ord("R")):
+            _extras_load(name)
+        elif ch in (ord("t"), ord("T")):
+            _extras_optin_screen(stdscr, cur)
+            EXTRAS["stale"] = True
+        elif ch in (ord("d"), ord("D")):
+            picks = sorted(EXTRAS["sel"])
+            if not picks:
+                flash("tick at least one repo first (space)", 4)
+            elif mode != "full":
+                flash("deletion needs mirror mode = full (press O)", 5)
+            elif not allowed:
+                flash("no target is opted in — press T first", 5)
+            else:
+                conf = prompt_line(
+                    stdscr,
+                    " DELETE %d repo(s) permanently — type the route name "
+                    "(%s) to confirm: " % (len(picks), name), "")
+                if conf is None:
+                    flash("delete cancelled", 3)
+                elif conf.strip() == name:
+                    _extras_delete(name, picks)
+                else:
+                    flash("route name did not match — nothing deleted", 5)
+
+
 def routes_screen(stdscr):
     """pause/resume a whole route or one of its targets, live.
 
@@ -3053,69 +3508,144 @@ def draw_log_tab(stdscr, h, w, R, G, dim=0):
     safe_add(stdscr, h - 2, 2, hint[:w - 4], dim)
 
 
+HIST_FMT = "%-19s %4s %4s %4s %4s %7s  %s"
+HIST_HEAD = HIST_FMT % ("FINISHED", "OK", "PART", "FAIL", "OF", "TIME", "")
+
+
 def draw_history_tab(stdscr, h, w):
+    """run history: one aligned row per run plus a duration bar.
+
+    The old line was "%s | %d ok, %d partial, %d failed of %d | %ss", so
+    nothing lined up and a 20-run list was unreadable.
+    """
     recs = _cached_last_records(40)
     durs = [r.get("elapsed_sec", 0) or 0 for r in recs[-30:]]
     spark = _sparkline(durs)
-    title = "RUN HISTORY"
+    title = "RUN HISTORY (%d runs)" % len(recs)
     if spark:
-        title += "  (duration trend: %s)" % spark
+        title += "   duration trend: %s" % spark
+    peak = max(durs) if durs else 0
+    bar_w = max(8, min(24, w - 52))
     rows = []
-    avail = max(1, h - 7)
     scroll = state.get("scroll", 0)
-    rev_recs = list(reversed(recs))
-    for r in rev_recs[scroll:scroll + avail]:
+    avail = max(1, h - 7)
+    for r in list(reversed(recs))[scroll:scroll + max(0, avail - 1)]:
+        dur = r.get("elapsed_sec") or 0
+        bar = "#" * int(round(bar_w * (dur / peak))) if peak else ""
         if r.get("dry_run"):
             # a dry run records what it *would* change; showing it as
             # "N ok" made a preview look like a successful sync
-            line = ("%s | dry run — %d would change of %d | %ss"
-                    % (r.get("finished_at"), r.get("would_change") or 0,
-                       r.get("repos", 0), r.get("elapsed_sec")))
+            line = HIST_FMT % (r.get("finished_at"), "dry", "-", "-",
+                               r.get("repos", 0), "%ss" % dur,
+                               "%d would change" % (r.get("would_change")
+                                                    or 0))
             attr = curses.A_DIM
         else:
             # partial is not ok (a target refused, or a mesh skipped a
             # conflict): showing "failed" only painted such a run green
             bad = (r.get("failed") or 0) + (r.get("partial") or 0)
-            line = ("%s | %d ok, %d partial, %d failed of %d | %ss"
-                    % (r.get("finished_at"), r.get("ok", 0),
-                       r.get("partial", 0), r.get("failed", 0),
-                       r.get("repos", 0), r.get("elapsed_sec")))
+            line = HIST_FMT % (r.get("finished_at"), r.get("ok", 0),
+                               r.get("partial", 0), r.get("failed", 0),
+                               r.get("repos", 0), "%ss" % dur, bar)
             attr = curses.color_pair(4) if bad else curses.color_pair(2)
         rows.append((_truncate_ellipsis(line, max(0, w - 8)), attr))
     if not rows:
-        rows.append(("no runs recorded yet", curses.A_DIM))
-    _panel_rows(stdscr, h, w, 3, rows, title)
-    safe_add(stdscr, h - 2, 2, "H = interactive history screen  |  up/dn = scroll", curses.A_DIM)
+        rows.append(("no runs recorded yet — press S to sync", curses.A_DIM))
+    _panel_rows(stdscr, h, w, 3, [(HIST_HEAD, curses.A_DIM | curses.A_BOLD)]
+                + rows, title)
+    safe_add(stdscr, h - 2, 2,
+             "up/dn = scroll   H = interactive history   "
+             "green = all ok, red = partial/failed"[:w - 2], curses.A_DIM)
+
+
+def _short_path(path):
+    """'/root/.local/share/gitsync' -> '~/.local/share/gitsync'
+
+    The settings panel has two columns; the full absolute path of three
+    files did not fit either of them and was silently cut mid-name.
+    """
+    home = os.path.expanduser("~")
+    path = str(path or "")
+    if home and home != "/" and path.startswith(home + os.sep):
+        return "~" + path[len(home):]
+    return path
+
+
+def _kv_rows(pairs, label_w=20):
+    """[(label, value, attr)] -> aligned [(text, attr)] for a panel body"""
+    out = []
+    for item in pairs:
+        label, value = item[0], item[1]
+        attr = item[2] if len(item) > 2 else 0
+        out.append(("%-*.*s %s" % (label_w, label_w, label, value), attr))
+    return out
 
 
 def draw_settings(stdscr, h, w, dim):
+    """settings, grouped: what a sync does on the left, when/where on the right.
+
+    It used to be one 17-line list with a hard-coded "Parallel workers   : 4"
+    string, which wrapped off the edge on a narrow terminal and buried the
+    file paths at the bottom.
+    """
     # read the cached config rather than reloading from disk on every frame
     st = _cached_config().get("settings", {}) or {}
     notify = st.get("notify", {}) or {}
-    rows = [
-        ("Parallel workers   : %s" % st.get("workers", 4), 0),
-        ("Mirror mode        : %s" % eff_mode_cached(), 0),
-        ("Include forks      : %s" % st.get("include_forks", False), 0),
-        ("Schedule           : %s" % st.get("schedule", "hourly"), 0),
-        ("Notification chans : %s"
-         % (", ".join(NT.channels({"settings": st})) or "none configured"), 0),
-        ("Notify on          : %s" % notify.get("on", "failure"), 0),
-        ("Pause between repos : %ss" % (st.get("pace", 0) or 0), 0),
-        ("Mesh conflicts     : %s (only diverged branches left alone; normal pushes still sync)"
-         % st.get("mesh_conflict", C.DEFAULT_MESH_CONFLICT), 0),
-        ("Token warning      : %s days" % (st.get("token_warn_days", 30)
-                                           or 30), 0),
-        ("Colour theme       : %s" % st.get("theme", "default"), 0),
-        ("Scheduler          : %s" % cached_status(), 0),
-        ("Config file        : %s" % C.CONFIG_FILE, dim),
-        ("Mirror hub         : %s" % C.MIRROR_DIR, dim),
-        ("Log file           : %s" % C.log_file(), dim),
-        ("", 0),
-        ("change with: O (options)  C (schedule)  A (accounts)  "
-         "W (wizard)", dim),
-        ("notify test  : gitsync notify --test", dim),
+    with _health_lock:
+        wh_txt = _health["wh_txt"]
+    sync_pairs = [
+        ("Workers", "%s per route" % st.get("workers", 4)),
+        ("Mirror mode", "%s  (%s)" % (
+            eff_mode_cached(),
+            "prunes refs" if eff_mode_cached() == "full" else "never deletes")),
+        ("Include forks", "yes" if st.get("include_forks") else "no"),
+        ("Pace", "%ss between repos" % (st.get("pace", 0) or 0)),
+        ("Mesh conflicts", str(st.get("mesh_conflict",
+                                      C.DEFAULT_MESH_CONFLICT))),
+        ("Token warning", "%s days" % (st.get("token_warn_days", 30) or 30)),
+        ("Theme", str(st.get("theme", "default"))),
+        ("Routes", "%d configured" % len(state["routes"])),
+        ("Sites", "%d configured" % len(state["platforms"])),
     ]
-    _panel_rows(stdscr, h, w, 3, rows[:h - 6], "SETTINGS & CONFIGURATION")
+    where_pairs = [
+        ("Schedule", str(st.get("schedule", "hourly"))),
+        ("Next run", _next_run_text()),
+        ("Scheduler", re.sub(r",?\s*next .*$", "", cached_status())
+         or cached_status()),
+        ("Notify on", str(notify.get("on", "failure"))),
+        ("Channels", ", ".join(NT.channels({"settings": st}))
+         or "none configured"),
+        ("Webhooks", wh_txt.replace("webhooks: ", "")),
+        ("Config file", _short_path(C.CONFIG_FILE)),
+        ("Mirror hub", _short_path(C.MIRROR_DIR)),
+        ("Log file", _short_path(C.log_file())),
+    ]
+    left = _kv_rows(sync_pairs)
+    right = _kv_rows(where_pairs, label_w=12)
+    hint = ("[O] options   [C] schedule   [A] accounts   [W] wizard   "
+            "[N] notify test")
+    if w < 100:
+        body = ([("SYNC", curses.A_DIM | curses.A_BOLD)] + left +
+                [("", 0), ("SCHEDULE & PATHS", curses.A_DIM | curses.A_BOLD)] +
+                right)
+        _panel_rows(stdscr, h, w, 3, body, "SETTINGS & CONFIGURATION")
+    else:
+        usable = w - 2 - 1
+        lw = max(38, min(46, usable - 52))
+        rw = usable - 1 - lw
+        ph = min(max(4, h - 3 - 2),
+                 max(len(left), len(right)) + 2)
+        _panel_at(stdscr, 3, 1, lw, ph, left, "WHAT A SYNC DOES")
+        _panel_at(stdscr, 3, 1 + lw + 1, rw, ph, right,
+                  "WHEN & WHERE")
+        hint_row = 3 + ph
+        if hint_row < h - 1:
+            safe_add(stdscr, hint_row, 1, hint[:w - 2], dim)
+    if w < 100:
+        if h - 2 > 3:
+            safe_add(stdscr, h - 2, 1, hint[:w - 2], dim)
+    else:
+        safe_add(stdscr, h - 2, 1, hint[:w - 2], dim)
 
 
 HEALTH_TTL = 30          # seconds between health refreshes (network + disk walk)
@@ -3188,18 +3718,133 @@ def refresh_health(force=False):
 
 
 def _health_strip(stdscr, row, w, G, Y, R, dim):
-    """one line: token health + hub disk + webhook receiver state (cached)"""
+    """one line: token health + hub disk + webhook receiver state (cached)
+
+    Segments are packed until they stop fitting and the rest are dropped, so
+    a narrow terminal shows whole facts instead of "webhooks: conf".
+    """
     if row >= stdscr.getmaxyx()[0] - 2:
         return
     with _health_lock:
-        tok_txt = _health["tok_txt"]
-        tok_attr = _health["tok_attr"]
-        disk_txt = _health["disk_txt"]
-        wh_txt = _health["wh_txt"]
-    safe_add(stdscr, row, 1, (" %-34s %-46s %s"
-                              % (tok_txt, disk_txt, wh_txt))[:w - 3], dim)
-    # recolour just the token segment
-    safe_add(stdscr, row, 2, tok_txt[:32], tok_attr)
+        segs = [(_health["tok_txt"], _health["tok_attr"]),
+                (_health["disk_txt"], 0),
+                (_health["wh_txt"], 0)]
+    x = 1
+    for text, attr in segs:
+        text = str(text or "")
+        if not text:
+            continue
+        if x + len(text) > w - 1:
+            break
+        safe_add(stdscr, row, x, text, attr or dim)
+        x += len(text) + 2
+
+
+def _platform_lines(G, R, dim, limit=None):
+    """aligned platform table (dim header + one line per site)
+
+    ``limit`` is the number of panel body rows available: when the list does
+    not fit, the last row becomes "... +N more" instead of silently losing
+    the tail, which is how a 4th site vanished on a 100-column terminal.
+    """
+    rows = [(PLAT_HEAD, curses.A_DIM | curses.A_BOLD)]
+    plats = state["platforms"]
+    overflow = 0
+    if limit is not None and limit > 0 and len(plats) > limit - 1:
+        shown = plats[:max(0, limit - 2)]
+        overflow = len(plats) - len(shown)
+    else:
+        shown = plats[:limit] if limit else plats
+    for name, ptype, on, ok, info, count in shown:
+        attr = (G if ok else R) if on else dim
+        rows.append((PLAT_FMT % (name, ptype, "on" if on else "off",
+                                 "OK" if ok else "FAIL", count, info), attr))
+    if not plats:
+        cfg = _cached_config()
+        if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
+            rows.append(("no sites yet — press A to add one, W for the wizard",
+                         curses.A_BOLD))
+            rows.append(("or run: gitsync setup", dim))
+        else:
+            rows.append(("platforms: loading...", dim))
+    elif overflow:
+        rows.append(("... +%d more site(s) — see 2:Platforms" % overflow, dim))
+    return rows
+
+
+def _dash_route_rows(G, Y, R, dim):
+    """compact route digest for the dashboard's right column"""
+    rows = []
+    cfg = _cached_config()
+    by_name = {r.get("name"): r for r in C.routes(cfg)}
+    for (name, source, targets, _i, _e, direction, paused,
+         route_on) in state["routes"]:
+        mesh = direction == "mesh"
+        shown = [t + ("*" if t in paused else "") for t in targets]
+        arrow = ("%s <-> %s" % (source, ", ".join(shown)) if mesh
+                 else "%s -> %s" % (source, ", ".join(shown) or "(none)"))
+        rows.append((name if route_on else name + "  [PAUSED]",
+                     curses.A_BOLD if route_on else dim))
+        rows.append(("   " + arrow, 0 if route_on else dim))
+        nxt = SYNC.next_due_text(by_name.get(name) or {"name": name}, cfg)
+        rows.append(("   next: %s" % nxt, dim))
+    return rows
+
+
+def _dashboard_cards(G, Y, R, dim):
+    """the four stat cards: last run, schedule, hub, routes.
+
+    The dashboard listed platforms and a raw log tail and never answered
+    "did the last run work", "when is the next one", or "how big is the
+    hub" — the questions an operator actually opens it for.
+    """
+    cards = []
+    recs = _cached_last_records(1)
+    rec = recs[-1] if recs else None
+    if not rec:
+        cards.append(("LAST SYNC", "never", "no run recorded yet", dim))
+    elif rec.get("dry_run"):
+        cards.append(("LAST SYNC", "dry run",
+                      "%d would change · %s" % (
+                          rec.get("would_change") or 0,
+                          _ago_text(rec.get("finished_at")) or "just now"), Y))
+    else:
+        bad = (rec.get("partial") or 0) + (rec.get("failed") or 0)
+        ok = rec.get("ok") or 0
+        note = "%s · %ss" % (_ago_text(rec.get("finished_at")) or "just now",
+                             rec.get("elapsed_sec"))
+        if bad:
+            cards.append(("LAST SYNC", "%d ok, %d bad" % (ok, bad),
+                          "see 6:History", R))
+        else:
+            cards.append(("LAST SYNC", "%d/%d ok" % (ok, rec.get("repos")
+                                                     or ok), note, G))
+
+    cfg = _cached_config()
+    sched = C.setting(cfg, "schedule", "hourly")
+    nxt = _next_run_text()
+    cards.append(("SCHEDULE", "every %s" % sched if sched != "hourly"
+                  else "hourly",
+                  "next: %s" % nxt,
+                  dim if nxt in ("not scheduled", "off") else G))
+
+    with _health_lock:
+        hub_txt = _health["disk_txt"]
+    m = re.match(r"hub: (\d+) mirrors, ([^,]+), disk (\d+)%", hub_txt or "")
+    if m:
+        cards.append(("MIRROR HUB", "%s mirrors" % m.group(1),
+                      "%s · disk %s%% full" % (m.group(2), m.group(3)),
+                      R if int(m.group(3)) > 90 else G))
+    else:
+        cards.append(("MIRROR HUB", "hub", (hub_txt or "?")[:28], dim))
+
+    n_routes = len(state["routes"])
+    paused = sum(1 for r in state["routes"] if not r[7])
+    note = "see 3:Routes"
+    cards.append(("ROUTES", "%d route%s%s" % (
+        n_routes, "" if n_routes == 1 else "s",
+        ", paused" if paused else ""), note, Y if paused else 0))
+    return cards
 
 
 def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
@@ -3241,7 +3886,7 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
                 txt = txt[w - 1:]
                 row += 1
         else:
-            cfg = C.load_config()
+            cfg = _cached_config()
             if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
                 safe_add(stdscr, row, 0, " No platforms yet — press 'A' or 'W' for wizard", curses.A_BOLD)
             else:
@@ -3260,105 +3905,71 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         return
 
     # ---------------- full (desktop) layout ----------------
-    # Every section is drawn straight onto stdscr via _panel_rows: the
-    # old per-section curses windows were noutrefresh'd correctly but then
-    # wiped by the clock's stdscr flush, so the dashboard rendered empty.
-    top = 4
-    plat_rows = []
-    shown_plats = state["platforms"][:(3 if h <= 26 else 6)]
-    for name, ptype, on, ok, info, count in shown_plats:
-        attr = (G if ok else R) if on else dim
-        plat_rows.append(("%-14.14s %-9.9s %-4s %-5s repos=%-5s %s"
-                          % (name, ptype, "ON" if on else "off",
-                             "OK" if ok else "FAIL", count, info), attr))
-    if not plat_rows:
-        cfg = C.load_config()
-        if state.get("platforms_loaded") and not (cfg.get("platforms") or {}):
-            plat_rows.append(("No platforms yet — press 'A' to add one or 'W' for wizard", curses.A_BOLD))
-        else:
-            plat_rows.append(("platforms: loading...", dim))
-    hidden_plats = len(state["platforms"]) - len(shown_plats)
-    if hidden_plats > 0:
-        plat_rows.append(("... +%d more site(s) - see the Platforms tab"
-                          % hidden_plats, dim))
-    _panel_rows(stdscr, h, w, top, plat_rows,
-                platforms_title() + "  (A = manage accounts)")
-    top2 = top + min(len(plat_rows) + 2, h - top - 6)
+    # Every section is drawn straight onto stdscr via _panel_at/_panel_rows:
+    # the old per-section curses windows were noutrefresh'd correctly but
+    # then wiped by the clock's stdscr flush, so the dashboard rendered empty.
+    row = 4
+    cards = _dashboard_cards(G, Y, R, dim)
+    if cards:
+        row = _stat_grid(stdscr, row, w - 2, cards,
+                         per_row=4 if w >= 100 else 2, height=4) + 1
 
-    if not state["routes"]:
-        _panel_rows(stdscr, h, w, top2, [
-            ("1. add your accounts:  A  (or: gitsync platforms add ...)", 0),
-            ("2. add a route:        gitsync routes add main github "
-             "gitlab,forgejo,backup", 0),
-            ("   two-way instead:    gitsync routes add all "
-             "github,gitlab,forgejo", 0),
-            ("3. run it:             S  (or: gitsync sync)", 0),
-        ], "GETTING STARTED - no routes yet")
-        top2 += 6
-    else:
-        bits = []
-        for (n, s, t, _i, _e, direction, paused, route_on) in state["routes"]:
-            if direction == "mesh":
-                bits.append("%s: mesh %s" % (n, ", ".join([s] + t)))
-            else:
-                shown = [x + ("*" if x in paused else "") for x in t]
-                bits.append("%s: %s -> %s" % (n, s, ", ".join(shown) or "(none)"))
-            if not route_on:
-                bits[-1] += " [PAUSED]"
-        routes_txt = "  |  ".join(bits) or "(none)"
-        # one long line used to be truncated at the screen edge with no hint,
-        # so with several routes the dashboard silently hid the last ones
-        if len(routes_txt) > w - 10 and bits:
-            keep, used = [], 0
-            for b in bits:
-                if used + len(b) + 4 > w - 26:
-                    break
-                keep.append(b)
-                used += len(b) + 4
-            hidden = len(bits) - len(keep)
-            routes_txt = "  |  ".join(keep)
-            if hidden > 0:
-                routes_txt += "  |  +%d more (3:Routes)" % hidden
-        st = state["settings"]
-        sched_txt = cached_status()
-        if len(sched_txt) > 34:
-            # a cron line is long; keep the useful head instead of letting the
-            # panel clip mid-word
-            sched_txt = sched_txt[:31].rstrip() + "…"
-        route_rows = [
-            (routes_txt[:w - 8], curses.A_BOLD),
-            ("workers=%s  mode=%s  forks=%s   scheduler: %s"
-             % (st.get("workers"), eff_mode_cached(), st.get("include_forks"),
-                sched_txt), dim),
-        ]
-        _panel_rows(stdscr, h, w, top2, route_rows, "ROUTES & SETTINGS")
-        top2 += len(route_rows) + 2
-
-    # ---- health strip: tokens, disk, webhooks ----
-    _health_strip(stdscr, top2, w, G, Y, R, dim)
-
-    top3 = top2 + 2
     if state["syncing"]:
         done, total, current, ok_n, fail_n, skip_n = sync_progress(detailed=True)
         pct = ("%d/%d" % (done, total)) if total else "starting..."
-        bar_w = max(10, w - 44)
+        bar_w = max(10, w - 46)
         filled = int(bar_w * done / total) if total else 0
-        stat_summary = "%d ok, %d fail" % (ok_n, fail_n)
+        tail = "%d ok, %d fail" % (ok_n, fail_n)
         if skip_n:
-            stat_summary += ", %d skip" % skip_n
-        _panel_rows(stdscr, h, w, top3, [
-            ("[%s%s] %s  (%s)" % ("#" * filled, "-" * (bar_w - filled), pct, stat_summary),
-             curses.A_BOLD),
-            ("current: %s  [X=cancel]" % (current[:w - 28] or "..."), Y),
+            tail += ", %d skip" % skip_n
+        _panel_at(stdscr, row, 1, w - 2, 3, [
+            ("[%s%s] %s  (%s)" % ("#" * filled, "-" * (bar_w - filled),
+                                  pct, tail), curses.A_BOLD),
+            ("current: %s   [X] cancel" % ((current or "...")[:w - 26]), Y),
         ], "SYNC IN PROGRESS")
-        top3 += 4
+        row += 4
+
+    # ---- body: platforms | routes, side by side when there is room ----
+    plats = state["platforms"]
+    route_rows = _dash_route_rows(G, Y, R, dim)
+    if not route_rows:
+        route_rows = [("no routes yet — press 3 to add one", curses.A_BOLD),
+                      ("gitsync routes add main github gitlab,forgejo", dim)]
+    usable = w - 2
+    if w >= 110:
+        gap = 1
+        left_w = max(50, min(usable - 44, int(usable * 0.54)))
+        right_w = usable - gap - left_w
+        room = max(6, h - row - 11)      # leave the strip + >= 6 log rows
+        body_h = max(6, min(max(len(plats) + 3, len(route_rows) + 2), room))
+        _panel_at(stdscr, row, 1, left_w, body_h,
+                  _platform_lines(G, R, dim, limit=body_h - 2),
+                  platforms_title())
+        _panel_at(stdscr, row, 1 + left_w + gap, right_w, body_h,
+                  route_rows, "ROUTES (%d)" % len(state["routes"]))
+        row += body_h
+    else:
+        room = max(5, h - row - 13)
+        body_h = max(5, min(len(plats) + 3, room))
+        _panel_at(stdscr, row, 1, usable, body_h,
+                  _platform_lines(G, R, dim, limit=body_h - 2),
+                  platforms_title())
+        row += body_h
+        if row + 4 < h - 4:
+            _panel_at(stdscr, row, 1, usable, 4, route_rows[:2],
+                      "ROUTES (%d)" % len(state["routes"]))
+            row += 4
+
+    # ---- health strip: token health, hub size, webhook receiver ----
+    _health_strip(stdscr, row, w, G, Y, R, dim)
+    row += 2
 
     lines = state["sync_lines"] if state["syncing"] else state["log_tail"]
     q = state["search"].lower()
     if q:
         lines = [l for l in lines if q in l.lower()]
     log_rows = []
-    avail_log = max(3, h - top3 - 3)
+    avail_log = max(3, h - row - 2)
     for line in _log_window(lines, avail_log):
         attr = 0
         if re.search(r"\b(FAIL|failed|error)\b", line, re.I):
@@ -3370,16 +3981,18 @@ def draw_dashboard(stdscr, h, w, Cc, G, Y, R, dim):
         log_rows.append((_truncate_ellipsis(line, max(0, w - 8)), attr))
     if not log_rows:
         if q:
-            log_rows.append(("(no line matches '%s' — Esc clears filter)" % state["search"], dim))
+            log_rows.append(("(no line matches '%s' — Esc clears filter)"
+                             % state["search"], dim))
         else:
             log_rows.append(("(no log lines yet)", dim))
-    title = "LOG (live tail - L for full log, H for history)"
+    title = "LOG (live tail — L for full log, H for history)"
     if q:
-        title = "LOG (filtered '%s': %d lines - Esc clears)" % (state["search"], len(lines))
+        title = "LOG (filtered '%s': %d lines — Esc clears)" % (
+            state["search"], len(lines))
     elif state.get("log_scroll"):
-        title = ("LOG (scrolled back %d - wheel down or Esc to follow)"
+        title = ("LOG (scrolled back %d — wheel down or Esc to follow)"
                  % state["log_scroll"])
-    _panel_rows(stdscr, h, w, top3, log_rows, title)
+    _panel_at(stdscr, row, 1, w - 2, max(3, h - row - 1), log_rows, title)
 
 
 # ---------------------------------------------------------------- snapshot
@@ -3501,7 +4114,7 @@ def global_help_lines():
         "  W          Launch setup wizard",
         "  L          Full log viewer",
         "  H          Sync run history and duration trends",
-        "  X          Cancel running sync",
+        "  X          Cancel a running sync (on Routes: delete extra repos)",
         "  ?          Show this help overlay",
         "",
         "MOUSE & TERMINAL:",
@@ -3741,6 +4354,10 @@ def _run(stdscr):
         elif state["tab"] == 2 and ch in (ord("p"), ord("P"), 10, 13,
                                           curses.KEY_ENTER):
             routes_screen(stdscr)
+        elif state["tab"] == 2 and ch in (ord("x"), ord("X")):
+            extras_screen(stdscr)
+            _DRAW_CACHE.pop("routes_panel", None)
+            state["dirty"] = True
         elif state["tab"] in (0, 4) and ch in (curses.KEY_UP, curses.KEY_DOWN,
                                               curses.KEY_PPAGE, curses.KEY_NPAGE,
                                               curses.KEY_HOME, curses.KEY_END,
