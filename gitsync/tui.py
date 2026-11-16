@@ -4593,9 +4593,9 @@ def _confirm_bg(stdscr, title, cmd, warning):
 def _tools_screen(stdscr):
     """everything that still needed a terminal, in one menu.
 
-    Read-only checks (disk, doctor, compare) render inside the TUI; the
-    ones that change something (mirror, update, uninstall) drop to the
-    shell and come back.
+    Read-only checks (disk, doctor, compare, verify, tokens) render inside
+    the TUI; the ones that change something (mirror, gc, restore, fix,
+    update, uninstall) ask first and run in the background.
     """
     def bg(title, cmd):
         _run_bg(title, cmd)
@@ -4607,6 +4607,18 @@ def _tools_screen(stdscr):
         _run_bg("MIRROR %s" % name,
                 [sys.executable, "-m", "gitsync", "mirror", name])
 
+    def restore_tool():
+        """push hub mirrors back out — the source host is gone"""
+        to = prompt_line(stdscr, " restore to which platform: ")
+        if not to:
+            return
+        repos = prompt_line(stdscr, " only these repos (blank = all): ")
+        cmd = [sys.executable, "-m", "gitsync", "restore", "--to", to]
+        if repos:
+            cmd += ["--repos", repos]
+        _confirm_bg(stdscr, "RESTORE", cmd,
+                    "This pushes every hub mirror back out to %s." % to)
+
     items = [
         ("Disk usage + orphans", "hub size, what can be reclaimed",
          lambda: bg("DISK", [sys.executable, "-m", "gitsync", "disk",
@@ -4615,6 +4627,18 @@ def _tools_screen(stdscr):
          lambda: bg("DOCTOR", [sys.executable, "-m", "gitsync", "doctor"])),
         ("Compare sites", "which repos differ across a route",
          lambda: bg("COMPARE", [sys.executable, "-m", "gitsync", "compare"])),
+        ("Verify backup", "hub vs every target, branch by branch (read-only)",
+         lambda: bg("VERIFY", [sys.executable, "-m", "gitsync", "verify"])),
+        ("Token health", "expiry / revocation for every credential",
+         lambda: bg("TOKENS", [sys.executable, "-m", "gitsync", "tokens"])),
+        ("Reclaim mirror space", "gc the hub; keeps every reachable commit",
+         lambda: _confirm_bg(
+             stdscr, "GC",
+             [sys.executable, "-m", "gitsync", "disk", "--gc"],
+             "gc rewrites mirrors to reclaim space. Safe, but it can take "
+             "several minutes.")),
+        ("Restore from hub", "push hub mirrors back out (source host gone)",
+         restore_tool),
         ("Mirror one repo", "sync a single repo now", ask_repo),
         ("Fix drift (preview)", "see which repos disagree, change nothing",
          lambda: bg("FIX DRIFT", [sys.executable, "-m", "gitsync", "fix",

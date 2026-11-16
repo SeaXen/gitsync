@@ -4,6 +4,34 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.18] - 2026-11-16
+
+### Both surfaces can now do everything — and `verify` was missing from both
+`gitsync verify` is the one command that answers "is the backup actually a
+backup?" long before a restore is needed — it compares the hub against every
+target branch by branch and tag by tag, and it is read-only. Neither the web
+app nor the TUI exposed it: both offered `compare` (source vs targets) and
+stopped there.
+
+- **Web Tools**: new *Verify backup* card (route optional). Read-only, so it
+  cannot be confused with the mutating tools around it.
+- **TUI Tools**: *Verify backup*, *Token health*, *Reclaim mirror space*
+  (`disk --gc`, asks first) and *Restore from hub* (prompts for the target
+  platform and an optional repo list, asks first) — the four tools the web
+  page had and the terminal did not. The menu is now the same 13 actions in
+  both orders of risk: read-only checks first, then the ones that change
+  something.
+- **Web Settings → Paths**: *Download config*. It is the credential-stripped
+  export `gitsync config export` already produces (verified by a test that
+  asserts no token reaches the response), behind the same auth gate as every
+  other API call. Import stays on the CLI: pasting a config that may carry
+  tokens into a browser is a worse trade than `gitsync config import FILE`,
+  which backs the current config up first.
+
+Parity is now enforced by tests rather than by memory: the Tools page's card
+ids must all map to a backend tool, and the TUI tools menu must contain every
+action the web page has.
+
 ## [2.1.17] - 2026-11-16
 
 ### Nothing in the repo identifies the machine it was built on

@@ -809,10 +809,12 @@ def _tool_argv(kind, b):
     Accepts the 'doctorfix' card id as an alias for doctor --fix so the
     frontend contract can never silently drift again."""
     route = (b.get("route") or "").strip()
-    if kind in ("compare",):
-        # --json: the last line the job prints is the matrix the Repos page
-        # renders (progress lines come first)
-        return ["compare", "--json"] + (["--route", route] if route else []), False
+    if kind in ("compare", "verify"):
+        # both read-only. compare --json because the last line it prints is
+        # the matrix the Repos page renders; verify has no machine-readable
+        # mode, so its human report streams straight to the output viewer.
+        argv = [kind] + (["--json"] if kind == "compare" else [])
+        return argv + (["--route", route] if route else []), False
     if kind == "doctor":
         return ["doctor"] + (["--fix"] if b.get("fix") else []), bool(b.get("fix"))
     if kind == "doctorfix":                     # alias for doctor --fix
@@ -2521,6 +2523,31 @@ def h_notify_test(handler):
     handler._json({"ok": bool(ok), "message": _redactor().redact(msg or "")})
 
 
+def h_config_export(handler):
+    """download the config with every credential blanked.
+
+    `gitsync config export` already does this; the web UI is where an
+    operator is when they decide to back the config up, and the stripped
+    form is safe to keep in a downloads folder. Import stays on the CLI:
+    pasting a config (which may carry tokens) into a browser is a worse
+    idea than `gitsync config import FILE`, and that path already backs
+    the current config up first.
+    """
+    try:
+        text, removed = C.export_config()
+    except OSError as e:
+        raise _Http(500, "cannot export the config: %s" % e)
+    body = text.encode("utf-8")
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/json")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Content-Disposition",
+                        'attachment; filename="gitsync-config.json"')
+    handler.send_header("X-Gitsync-Redacted-Fields", str(len(removed)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def h_scopes(handler):
     out = []
     for ptype in C.PLATFORM_TYPES:
@@ -2836,6 +2863,7 @@ ROUTES = [
     ("GET", re.compile(r"^/api/settings$"), lambda h: h_settings_get(h)),
     ("PUT", re.compile(r"^/api/settings$"), lambda h: h_settings_put(h)),
     ("POST", re.compile(r"^/api/notify/test$"), lambda h: h_notify_test(h)),
+    ("GET", re.compile(r"^/api/config/export$"), lambda h: h_config_export(h)),
     ("GET", re.compile(r"^/api/scopes$"), lambda h: h_scopes(h)),
     ("GET", re.compile(r"^/api/health$"), lambda h: h_health(h)),
     ("POST", re.compile(r"^/api/scheduler/install$"),

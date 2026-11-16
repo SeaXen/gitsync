@@ -88,7 +88,9 @@
       '<section class="card" id="scopes" tabindex="-1"><div class="bar"><span class="route-title">Token scopes</span></div>' +
         '<div id="scopes-body" class="mt">' + G.loading() + "</div></section>" +
 
-      '<section class="card"><p class="label">Paths</p><div class="mono" id="paths">—</div></section>';
+      '<section class="card"><p class="label">Paths</p><div class="mono" id="paths">—</div>' +
+        '<div class="actions mt"><button class="btn sm" id="export-config">Download config (credentials blanked)</button>' +
+        '<span class="muted u-fs12">back it up before big changes; re-enter tokens after an import</span></div></section>';
 
     document.getElementById("save-settings").addEventListener("click", function () { G.busy(this, saveSettings); });
     document.getElementById("install-sched").addEventListener("click", function () { G.busy(this, installSched); });
@@ -102,7 +104,29 @@
       G.setTheme(this.value);
     });
     document.getElementById("sessions-refresh").addEventListener("click", function () {
-      G.busy(this, loadSessions);
+      G.busy(this, loadSessions);    });
+    // the export is a file download, not JSON: a plain navigation keeps the
+    // session cookie and the CSRF header irrelevant for a GET
+    document.getElementById("export-config").addEventListener("click", function () {
+      var a = this;
+      G.busy(a, function () {
+        return fetch("api/config/export", { credentials: "same-origin" })
+          .then(function (r) {
+            if (!r.ok) throw new Error("export failed (" + r.status + ")");
+            return r.blob();
+          })
+          .then(function (b) {
+            var u = URL.createObjectURL(b), link = document.createElement("a");
+            link.href = u;
+            link.download = "gitsync-config.json";
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(u);
+            G.toast("config downloaded — every credential was blanked", "ok");
+          })
+          .catch(function (e) { G.toast(String(e.message || e), "bad"); });
+      });
     });
     document.getElementById("sessions-revoke-all").addEventListener("click", signOutEverywhere);
     document.getElementById("pw-save").addEventListener("click", function () { G.busy(this, savePassword); });

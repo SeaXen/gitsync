@@ -21,6 +21,8 @@
       toolCard("doctorfix", "Doctor — auto-repair", "Also remove broken mirror shells so the next sync re-clones.", "", "Run --fix") +
       toolCard("compare", "Compare (drift)", "Check every repo's HEAD matches across a route. Read-only, can be slow.",
         f("Route (blank = all)", '<input type="text" id="compare-route" name="route" placeholder="all…">')) +
+      toolCard("verify", "Verify backup", "Compare the hub against every target, branch by branch and tag by tag. Read-only — the one check that answers “is the backup really a backup?”, long before a restore is needed.",
+        f("Route (blank = all)", '<input type="text" id="verify-route" name="route" placeholder="all…">')) +
       toolCard("fix", "Fix drift", "Detect divergence and re-sync the mismatched repos.",
         f("Route (blank = all)", '<input type="text" id="fix-route" name="route" placeholder="all…">') +
         '<div class="field"><label>Options</label>' +
@@ -67,6 +69,7 @@
     if (kind === "doctor") { body = {}; label = "doctor"; }
     else if (kind === "doctorfix") { body = { fix: true }; label = "doctor --fix"; }
     else if (kind === "compare") { body = { route: val("compare-route") }; label = "compare"; }
+    else if (kind === "verify") { body = { route: val("verify-route") }; label = "verify"; }
     else if (kind === "fix") {
       body = { route: val("fix-route") };
       if (checked("fix-dry")) { body.dry_run = true; label = "fix --dry-run"; }

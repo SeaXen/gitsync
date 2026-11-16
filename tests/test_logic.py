@@ -2454,8 +2454,18 @@ class TestTui(unittest.TestCase):
         self.assertEqual(tui._extras_prune_argv("main", []),
                          ["prune", "--route", "main", "--yes"])
 
-    def test_last_sync_card_ignores_a_run_that_found_nothing_due(self):
-        # a timer run with no route due still records 0 repos; reading only
+    def test_tools_screen_covers_every_web_tool(self):
+        # the web Tools page grew tools the TUI never got (verify, tokens,
+        # gc, restore); both surfaces must offer the same actions or the
+        # terminal user has to drop to the shell
+        import inspect
+        src = inspect.getsource(tui._tools_screen)
+        for tool in ("disk", "doctor", "compare", "verify", "tokens",
+                     "restore", "mirror", "fix"):
+            self.assertIn('"%s"' % tool, src, tool)
+        self.assertIn("--gc", src)
+
+    def test_last_sync_card_ignores_a_run_that_found_nothing_due(self):        # a timer run with no route due still records 0 repos; reading only
         # the newest record made the card say "0/0 ok" minutes after a
         # healthy 47-repo sync
         real = {"finished_at": "2026-11-16 11:46:16", "repos": 47, "ok": 47,
@@ -2797,6 +2807,11 @@ class TestWeb(unittest.TestCase):
                                                       False))
         self.assertEqual(W._tool_argv("compare", {"route": "main"}),
                          (["compare", "--json", "--route", "main"], False))
+        # verify is the read-only "is the backup real" check; it has no
+        # machine-readable mode, so no --json
+        self.assertEqual(W._tool_argv("verify", {}), (["verify"], False))
+        self.assertEqual(W._tool_argv("verify", {"route": "main"}),
+                         (["verify", "--route", "main"], False))
         self.assertEqual(W._tool_argv("fix", {"route": "main"}),
                          (["fix", "--route", "main"], True))
         self.assertEqual(W._tool_argv("doctor", {"fix": True}),
@@ -3172,8 +3187,11 @@ class TestWeb(unittest.TestCase):
         args = {"restore": {"to": "dst"}, "mirror": {"repos": "hello"}}
         for kind in ids:
             argv, _mut = W._tool_argv(kind, args.get(kind, {}))
-            self.assertIn(argv[0], ("compare", "doctor", "fix", "tokens",
-                                    "disk", "restore", "mirror"), kind)
+            self.assertIn(argv[0], ("compare", "verify", "doctor", "fix",
+                                    "tokens", "disk", "restore", "mirror"),
+                          kind)
+        # verify and compare are read-only; nothing else on the page may be
+        self.assertFalse(W._tool_argv("verify", {})[1])
 
 
 class TestWebHttp(unittest.TestCase):
@@ -3243,6 +3261,22 @@ class TestWebHttp(unittest.TestCase):
     def test_unauthenticated_api_is_401(self):
         code, _, _ = self._req("GET", "/api/status")
         self.assertEqual(code, 401)
+
+    def test_config_export_needs_auth_and_blanks_every_credential(self):
+        # the export is the one download a browser makes, so it must be
+        # behind the same auth gate as every API call — and it must never
+        # carry a token into a downloads folder
+        cfg = C.load_config()
+        cfg["platforms"]["src"]["token"] = "SECRET-TOKEN-VALUE"
+        C.save_config(cfg)
+        code, _, _ = self._req("GET", "/api/config/export")
+        self.assertEqual(code, 401)
+        code, body, hdrs = self._req("GET", "/api/config/export",
+                                     headers=self._auth())
+        self.assertEqual(code, 200)
+        self.assertIn("attachment", hdrs.get("content-disposition", ""))
+        self.assertNotIn("SECRET-TOKEN-VALUE", body)
+        self.assertIn('"src"', body)
 
     def test_metrics_is_prometheus_text_and_needs_auth(self):
         code, _, _ = self._req("GET", "/metrics")
