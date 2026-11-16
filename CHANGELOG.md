@@ -4,6 +4,37 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.19] - 2026-11-16
+
+### Web and TUI are now the same product
+Audited every action against both surfaces. Five things were one-sided, and
+all five are now on both:
+
+| Action | Was | Now |
+|---|---|---|
+| Notification channels | web: all 5 · TUI: Discord + Telegram only | **both: all 5** (Discord, Telegram, ntfy, generic webhook, SMTP — every field, plus the TLS toggle) |
+| Web sessions (who is signed in, revoke all) | web only | **both** |
+| Config export | web only | **both** (TUI: Tools → Export config) |
+| Config import | CLI only | **both** — Settings → paste an export, merge or replace |
+| Update / Uninstall | TUI only | **both** (web: Tools, both behind a typed confirmation) |
+
+Notes on the two that needed care:
+
+- **Import keeps your credentials.** `C.import_config()` already backs the
+  current config up first and carries over any secret the pasted file left
+  blank, so importing an export never locks you out of your own accounts;
+  a platform that arrives without a token is named in the result.
+- **Uninstall from the web** removes the scheduler and the command (config
+  and mirrors are kept) and says so, because the page you are reading is the
+  thing being removed. Typing `uninstall` is required, as in the TUI.
+- The TUI's export prompt no longer pre-fills the path: `prompt_line`
+  leaves the cursor at the end of a pre-filled value, so typing appended to
+  the default and wrote to the wrong place.
+
+Parity is enforced by tests now: every web Tools card id must map to a
+backend tool, the TUI tools menu must contain every one of those actions,
+and the notifications screen must expose every field of every channel.
+
 ## [2.1.18] - 2026-11-16
 
 ### Both surfaces can now do everything — and `verify` was missing from both

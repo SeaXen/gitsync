@@ -102,6 +102,7 @@ from . import scheduler as S
 from . import diskutil as DK
 from . import sync as SYNC
 from . import stars as ST
+from . import sessions as SS
 from . import tokencheck as TK
 from . import webhooks as WH
 
@@ -1154,90 +1155,66 @@ def _edit_platform_screen(stdscr, name):
     _test_platform(name)
 
 
-def _input_line(stdscr, prompt, secret=False):
-    """single-line text input (used by the notifications setup screen)"""
-    text = ""
-    curses.curs_set(1)
-    try:
-        while True:
-            h, w = stdscr.getmaxyx()
-            stdscr.erase()
-            safe_add(stdscr, 0, 0, (" %s " % prompt).center(w - 1)[:w - 1],
-                     curses.A_BOLD | curses.color_pair(1))
-            shown = ("*" * len(text)) if secret else text
-            safe_add(stdscr, 2, 1, "> %s_" % shown[:w - 6])
-            safe_add(stdscr, h - 1, 0,
-                     " type, Enter = save, Esc = cancel ".center(w - 1)[:w - 1],
-                     curses.A_REVERSE)
-            commit_screen(stdscr)
-            try:
-                wch = stdscr.get_wch()
-                if isinstance(wch, str):
-                    ch = ord(wch)
-                    c_val = wch
-                else:
-                    ch = wch
-                    c_val = ""
-            except (curses.error, AttributeError):
-                ch = stdscr.getch()
-                c_val = chr(ch) if (32 <= ch < 0x110000 and ch != 127) else ""
-            if ch == getattr(curses, "KEY_RESIZE", 410):
-                _handle_resize(stdscr)
-                continue
-            if ch in (27,):
-                return None
-            if ch in (10, 13, curses.KEY_ENTER):
-                return text.strip()
-            if ch in (curses.KEY_BACKSPACE, 127, 8):
-                text = text[:-1]
-            elif c_val and c_val.isprintable():
-                text += c_val
-            elif 32 <= ch < 0x110000 and ch != 127:
-                try:
-                    c = chr(ch)
-                    if c.isprintable():
-                        text += c
-                except ValueError:
-                    pass
-    finally:
-        curses.curs_set(0)
+NOTIFY_CHANNELS = [
+    ("Discord", [("discord_webhook", "webhook URL", True)]),
+    ("Telegram", [("telegram_token", "bot token", True),
+                  ("telegram_chat_id", "chat id", False)]),
+    ("ntfy", [("ntfy_url", "topic url (https://ntfy.sh/<topic>)", False),
+              ("ntfy_token", "access token (optional)", True)]),
+    ("Webhook", [("webhook_url", "url that receives the JSON", False)]),
+    ("SMTP", [("smtp_host", "host", False),
+              ("smtp_port", "port", False),
+              ("smtp_user", "user (blank = none)", False),
+              ("smtp_password", "password (blank = none)", True),
+              ("smtp_from", "from address", False),
+              ("smtp_to", "to address(es)", False),
+              ("smtp_tls", "TLS", "bool")]),
+]
 
 
-def notifications_screen(stdscr):
-    """add / edit / test Discord + Telegram notification channels"""
-    cfg = C.load_config()
+def _masked(val, secret):
+    """a set credential shows as 'set …last4', never in full"""
+    if not val:
+        return "not set"
+    if secret:
+        return "set …%s" % str(val)[-4:]
+    return str(val)
+
+
+def _notify_channel_screen(stdscr, cfg, title, fields):
+    """edit one notification channel: every field, clear, done.
+
+    A blank value removes the field. That is the one thing a terminal can
+    say unambiguously — the web UI needs separate clear buttons because a
+    blank input there means "keep".
+    """
     while True:
-        n = cfg.get("settings", {}).get("notify", {}) or {}
-        d_url = n.get("discord_webhook", "")
-        t_tok = n.get("telegram_token", "")
-        t_chat = n.get("telegram_chat_id", "")
+        n = cfg.setdefault("settings", {}).setdefault("notify", {})
         stdscr.erase()
         h, w = stdscr.getmaxyx()
-        safe_add(stdscr, 0, 0, " NOTIFICATIONS ".center(w - 1)[:w - 1],
+        G, dim = curses.color_pair(2), curses.A_DIM
+        safe_add(stdscr, 0, 0, (" NOTIFICATIONS - %s " % title)
+                 .center(w - 1)[:w - 1],
                  curses.A_BOLD | curses.color_pair(1))
-        G, R, dim = (curses.color_pair(2), curses.color_pair(4),
-                     curses.A_DIM)
-        safe_add(stdscr, 2, 1, "Discord webhook : %s"
-                 % ("configured" if d_url else "not set"),
-                 G if d_url else dim)
-        if d_url:
-            safe_add(stdscr, 3, 1, "  %s...%s" % (d_url[:38], d_url[-12:]),
-                     dim)
-        safe_add(stdscr, 4, 1, "Telegram bot    : %s"
-                 % ("configured" if t_tok else "not set"),
-                 G if t_tok else dim)
-        if t_tok:
-            safe_add(stdscr, 5, 1, "  chat id: %s" % (t_chat or "(missing)"),
-                     dim)
-        safe_add(stdscr, 7, 1, "Notify on       : %s"
-                 % n.get("on", "failure"), curses.A_BOLD)
-        safe_add(stdscr, 9, 1, "credentials are stored in YOUR config file",
-                 dim)
-        safe_add(stdscr, 10, 1, "(%s) - never in the code" % C.CONFIG_FILE,
-                 dim)
+        row = 2
+        for spec in fields:
+            if row >= h - 4:
+                break
+            key, label, kind = spec[0], spec[1], spec[2]
+            if kind == "bool":
+                on = n.get(key, True)
+                safe_add(stdscr, row, 2, "%-30s %s" % (label,
+                                                      "on" if on else "off"),
+                         G if on else dim)
+            else:
+                safe_add(stdscr, row, 2, "%-30s %s"
+                         % (label, _masked(n.get(key, ""), kind is True)),
+                         0 if n.get(key) else dim)
+            row += 1
+        safe_add(stdscr, row + 1, 2,
+                 "stored in %s - never in the code" % C.CONFIG_FILE, dim)
         modal_footer(stdscr, h, w,
-                     " [D]iscord  [T]elegram  [M]ode  [W]ebhook  "
-                     "[Enter]test  [B]ack ")
+                     " Enter=edit a field  [X]=clear this channel  [B]=back ")
         commit_screen(stdscr)
         ch = stdscr.getch()
         if ch == getattr(curses, "KEY_RESIZE", 410):
@@ -1245,36 +1222,108 @@ def notifications_screen(stdscr):
             continue
         if ch in (ord("b"), ord("B"), 27):
             return
-        elif ch in (ord("d"), ord("D")):
-            val = _input_line(stdscr, "Discord webhook URL", secret=True)
-            if val is not None:
-                cfg.setdefault("settings", {}).setdefault("notify", {})
-                cfg["settings"]["notify"]["discord_webhook"] = val
-                C.save_config(cfg)
-                flash("discord webhook saved")
-        elif ch in (ord("t"), ord("T")):
-            tok = _input_line(stdscr, "Telegram bot token", secret=True)
-            if tok:
-                chat = _input_line(stdscr, "Telegram chat id")
-                if chat is not None:
-                    cfg.setdefault("settings", {}).setdefault("notify", {})
-                    cfg["settings"]["notify"]["telegram_token"] = tok
-                    cfg["settings"]["notify"]["telegram_chat_id"] = chat
-                    C.save_config(cfg)
-                    flash("telegram credentials saved")
-        elif ch in (ord("m"), ord("M")):
-            order = ["failure", "success", "always", "never"]
-            cur = n.get("on", "failure")
-            cfg["settings"]["notify"]["on"] = \
-                order[(order.index(cur) + 1) % len(order)] \
-                if cur in order else "failure"
+        if ch in (ord("x"), ord("X")):
+            for spec in fields:
+                n.pop(spec[0], None)
             C.save_config(cfg)
-            flash("notify on: %s" % cfg["settings"]["notify"]["on"])
-        elif ch in (ord("w"), ord("W")):
-            _webhooks_screen(stdscr, cfg)
-        elif ch in (10, 13, curses.KEY_ENTER):
+            flash("%s notifications cleared" % title)
+            return
+        if ch in (10, 13, curses.KEY_ENTER):
+            names = ", ".join(s[1].split(" (")[0] for s in fields)
+            pick = prompt_line(stdscr, " edit which field (%s): " % names)
+            if not pick:
+                continue
+            pick = pick.strip().lower()
+            spec = next((s for s in fields
+                         if s[1].lower().startswith(pick)
+                         or s[0].lower() == pick), None)
+            if spec is None:
+                flash("no field called '%s'" % pick, 4)
+                continue
+            if spec[2] == "bool":
+                n[spec[0]] = not n.get(spec[0], True)
+                C.save_config(cfg)
+                flash("%s -> %s" % (spec[1], "on" if n[spec[0]] else "off"))
+                continue
+            cur = "" if spec[2] is True else str(n.get(spec[0], "") or "")
+            val = prompt_line(stdscr, " %s (blank = remove): " % spec[1],
+                              initial=cur, secret=spec[2] is True)
+            if val is None:
+                continue
+            if val.strip():
+                n[spec[0]] = val.strip()
+            else:
+                n.pop(spec[0], None)
+            C.save_config(cfg)
+            flash("%s saved" % spec[1])
+
+
+def notifications_screen(stdscr):
+    """every notification channel, set / cleared / tested from here.
+
+    Only Discord and Telegram used to be settable, so a terminal user had to
+    open the web UI — or hand-edit JSON — for ntfy, a generic webhook or
+    SMTP. All five channels now live here, next to the notify-on mode and
+    the send-a-test action the web UI has.
+    """
+    while True:
+        cfg = C.load_config()
+        n = cfg.setdefault("settings", {}).setdefault("notify", {})
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        G, dim = curses.color_pair(2), curses.A_DIM
+        safe_add(stdscr, 0, 0, " NOTIFICATIONS ".center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 1, "credentials are stored in YOUR config file "
+                 "(%s) - never in the code" % C.CONFIG_FILE, dim)
+        row = 3
+        for title, fields in NOTIFY_CHANNELS:
+            if row >= h - 4:
+                break
+            if title == "SMTP":
+                ok = bool(n.get("smtp_host") and n.get("smtp_to"))
+            elif title == "Telegram":
+                ok = bool(n.get("telegram_token") and n.get("telegram_chat_id"))
+            else:
+                ok = bool(n.get(fields[0][0]))
+            safe_add(stdscr, row, 2, "%-10s %s"
+                     % (title, "configured" if ok else "not set"),
+                     G if ok else dim)
+            row += 1
+        safe_add(stdscr, row + 1, 2, "Notify on       : %s"
+                 % n.get("on", "failure"), curses.A_BOLD)
+        modal_footer(stdscr, h, w,
+                     " [D]iscord [T]elegram [N]tfy [W]ebhook [S]MTP "
+                     "[H]ook receiver [M]ode [Enter]test [B]ack ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        if ch in (10, 13, curses.KEY_ENTER):
             ok, msg = NT.notify_test(cfg)
             flash("test: %s" % msg, 6)
+            continue
+        if ch in (ord("m"), ord("M")):
+            order = ["failure", "success", "always", "never"]
+            cur = n.get("on", "failure")
+            n["on"] = order[(order.index(cur) + 1) % len(order)] \
+                if cur in order else "failure"
+            C.save_config(cfg)
+            flash("notify on: %s" % n["on"])
+            continue
+        if ch in (ord("h"), ord("H")):
+            _webhooks_screen(stdscr, cfg)
+            continue
+        for key, title in ((ord("d"), "Discord"), (ord("t"), "Telegram"),
+                           (ord("n"), "ntfy"), (ord("w"), "Webhook"),
+                           (ord("s"), "SMTP")):
+            if ch == key:
+                fields = next(f for t, f in NOTIFY_CHANNELS if t == title)
+                _notify_channel_screen(stdscr, cfg, title, fields)
+                break
 
 
 def _webhooks_screen(stdscr, cfg):
@@ -4590,6 +4639,70 @@ def _confirm_bg(stdscr, title, cmd, warning):
     _confirm_modal(stdscr, title, warning, lambda: _run_bg(title, cmd))
 
 
+def _sessions_screen(stdscr):
+    """who is signed in to the web UI, and sign them all out.
+
+    The web Settings page has had this since sessions existed; the TUI could
+    not see them at all, so a terminal operator had no way to answer "is
+    someone else in my dashboard?" without opening a browser.
+    """
+    while True:
+        try:
+            rows = SS.active()
+        except Exception as e:
+            rows = []
+            err = str(e)[:120]
+        else:
+            err = ""
+        stdscr.erase()
+        h, w = stdscr.getmaxyx()
+        G, R, dim = (curses.color_pair(2), curses.color_pair(4),
+                     curses.A_DIM)
+        safe_add(stdscr, 0, 0, (" WEB SESSIONS (%d) " % len(rows))
+                 .center(w - 1)[:w - 1],
+                 curses.A_BOLD | curses.color_pair(1))
+        safe_add(stdscr, 1, 1, "signed-in browsers for this web UI", dim)
+        row = 3
+        if err:
+            safe_add(stdscr, row, 1, "cannot read sessions: %s" % err, R)
+            row += 1
+        elif not rows:
+            safe_add(stdscr, row, 1, "no active sessions", dim)
+            row += 1
+        for r in rows:
+            if row >= h - 4:
+                safe_add(stdscr, row, 1, "... +%d more"
+                         % (len(rows) - (row - 3)), dim)
+                break
+            age = _ago_text(datetime.fromtimestamp(
+                r.get("last_seen") or 0).strftime("%Y-%m-%d %H:%M:%S"))
+            safe_add(stdscr, row, 2, "%-16s %-42s %s"
+                     % (r.get("ip") or "?", (r.get("ua") or "")[:42],
+                        age or "active now"), 0)
+            row += 1
+        modal_footer(stdscr, h, w,
+                     " [R]evoke all (signs out every browser, including "
+                     "this one)  [B]ack ")
+        commit_screen(stdscr)
+        ch = stdscr.getch()
+        if ch == getattr(curses, "KEY_RESIZE", 410):
+            _handle_resize(stdscr)
+            continue
+        if ch in (ord("b"), ord("B"), 27):
+            return
+        if ch in (ord("r"), ord("R")) and rows:
+            conf = prompt_line(stdscr,
+                               " sign out every web session? type yes: ")
+            if conf and conf.strip().lower() == "yes":
+                try:
+                    n = SS.revoke_all()
+                    flash("signed out %d session(s)" % n)
+                except Exception as e:
+                    flash("could not revoke: %s" % e, 5)
+            else:
+                flash("nothing changed", 3)
+
+
 def _tools_screen(stdscr):
     """everything that still needed a terminal, in one menu.
 
@@ -4619,6 +4732,18 @@ def _tools_screen(stdscr):
         _confirm_bg(stdscr, "RESTORE", cmd,
                     "This pushes every hub mirror back out to %s." % to)
 
+    def export_config_tool():
+        """`gitsync config export` — credentials blanked, 0600 on disk"""
+        # no pre-filled value: prompt_line leaves the cursor at the end of
+        # one, so typing would append to the default instead of replacing it
+        path = prompt_line(stdscr, " export to [~/gitsync-config.json]: ")
+        if path is None:
+            return
+        path = path.strip() or os.path.expanduser("~/gitsync-config.json")
+        _run_bg("EXPORT CONFIG",
+                [sys.executable, "-m", "gitsync", "config", "export",
+                 "--out", path])
+
     items = [
         ("Disk usage + orphans", "hub size, what can be reclaimed",
          lambda: bg("DISK", [sys.executable, "-m", "gitsync", "disk",
@@ -4637,6 +4762,10 @@ def _tools_screen(stdscr):
              [sys.executable, "-m", "gitsync", "disk", "--gc"],
              "gc rewrites mirrors to reclaim space. Safe, but it can take "
              "several minutes.")),
+        ("Export config", "write a backup with every credential blanked",
+         export_config_tool),
+        ("Web sessions", "who is signed in to the web UI; revoke them all",
+         lambda: _sessions_screen(stdscr)),
         ("Restore from hub", "push hub mirrors back out (source host gone)",
          restore_tool),
         ("Mirror one repo", "sync a single repo now", ask_repo),

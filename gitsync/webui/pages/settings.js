@@ -90,7 +90,13 @@
 
       '<section class="card"><p class="label">Paths</p><div class="mono" id="paths">—</div>' +
         '<div class="actions mt"><button class="btn sm" id="export-config">Download config (credentials blanked)</button>' +
-        '<span class="muted u-fs12">back it up before big changes; re-enter tokens after an import</span></div></section>';
+        '<span class="muted u-fs12">back it up before big changes; re-enter tokens after an import</span></div>' +
+        '<div class="field mt"><label for="import-config">Import a config export</label>' +
+        '<textarea id="import-config" rows="6" placeholder="paste the JSON from Download config…"></textarea>' +
+        '<div class="hint">Credentials already stored here are kept; a platform with no token is reported so you can add one. Your current config is backed up first.</div></div>' +
+        '<div class="actions"><button class="btn sm" id="import-config-btn">Import</button>' +
+        '<label class="check u-fs125"><input type="checkbox" id="import-replace"> replace instead of merge</label></div>' +
+        '<div class="u-hint" id="import-out"></div></section>';
 
     document.getElementById("save-settings").addEventListener("click", function () { G.busy(this, saveSettings); });
     document.getElementById("install-sched").addEventListener("click", function () { G.busy(this, installSched); });
@@ -126,6 +132,44 @@
             G.toast("config downloaded — every credential was blanked", "ok");
           })
           .catch(function (e) { G.toast(String(e.message || e), "bad"); });
+      });
+    });
+    document.getElementById("import-config-btn").addEventListener("click", function () {
+      var btn = this, out = document.getElementById("import-out");
+      var text = document.getElementById("import-config").value;
+      if (!text.trim()) { G.toast("paste a config export first", "warn"); return; }
+      G.modalConfirm({
+        title: "Import config",
+        message: "This merges the pasted config into this installation. " +
+          "Credentials already stored here are kept, and your current config " +
+          "is backed up first. Continue?",
+        confirmText: "Import",
+        danger: false
+      }).then(function (ok) {
+        if (!ok) return;
+        out.textContent = "importing…";
+        G.busy(btn, function () {
+          return G.api("POST", "/api/config/import", {
+            config: text,
+            replace: document.getElementById("import-replace").checked
+          }).then(function (r) {
+            var s = r.summary || {};
+            var bits = ["imported " + (s.platforms || 0) + " platform(s), " +
+                        (s.routes || 0) + " route(s)"];
+            if ((s.kept_secrets || []).length) {
+              bits.push((s.kept_secrets || []).length + " credential(s) kept from this box");
+            }
+            if ((s.needs_token || []).length) {
+              bits.push("needs a token: " + (s.needs_token || []).join(", "));
+            }
+            out.textContent = bits.join(" · ");
+            G.toast("config imported", "ok");
+          }).catch(function (e) {
+            out.textContent = "";
+            G.toast(G.apiError(e), "bad");
+            throw e;
+          });
+        });
       });
     });
     document.getElementById("sessions-revoke-all").addEventListener("click", signOutEverywhere);

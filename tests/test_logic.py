@@ -2461,9 +2461,27 @@ class TestTui(unittest.TestCase):
         import inspect
         src = inspect.getsource(tui._tools_screen)
         for tool in ("disk", "doctor", "compare", "verify", "tokens",
-                     "restore", "mirror", "fix"):
+                     "restore", "mirror", "fix", "config"):
             self.assertIn('"%s"' % tool, src, tool)
         self.assertIn("--gc", src)
+        # sessions and config export/import are web actions the TUI now has
+        self.assertIn("_sessions_screen", src)
+
+    def test_notifications_cover_every_channel(self):
+        # only Discord and Telegram used to be settable from the terminal;
+        # ntfy, a generic webhook and SMTP needed the browser or hand-edited
+        # JSON. The web UI's five channels must all exist here.
+        import inspect
+        src = inspect.getsource(tui.notifications_screen)
+        for key, title in (("d", "Discord"), ("t", "Telegram"),
+                           ("n", "ntfy"), ("w", "Webhook"), ("s", "SMTP")):
+            self.assertIn('ord("%s")' % key, src, title)
+        fields = {f[0] for _t, fs in tui.NOTIFY_CHANNELS for f in fs}
+        for field in ("discord_webhook", "telegram_token", "telegram_chat_id",
+                      "ntfy_url", "ntfy_token", "webhook_url", "smtp_host",
+                      "smtp_port", "smtp_user", "smtp_password", "smtp_from",
+                      "smtp_to", "smtp_tls"):
+            self.assertIn(field, fields, field)
 
     def test_last_sync_card_ignores_a_run_that_found_nothing_due(self):        # a timer run with no route due still records 0 repos; reading only
         # the newest record made the card say "0/0 ok" minutes after a
@@ -2812,6 +2830,10 @@ class TestWeb(unittest.TestCase):
         self.assertEqual(W._tool_argv("verify", {}), (["verify"], False))
         self.assertEqual(W._tool_argv("verify", {"route": "main"}),
                          (["verify", "--route", "main"], False))
+        # the two actions the TUI had and the web page did not
+        self.assertEqual(W._tool_argv("update", {}), (["update"], True))
+        self.assertEqual(W._tool_argv("uninstall", {}),
+                         (["uninstall", "--yes"], True))
         self.assertEqual(W._tool_argv("fix", {"route": "main"}),
                          (["fix", "--route", "main"], True))
         self.assertEqual(W._tool_argv("doctor", {"fix": True}),
@@ -3188,8 +3210,8 @@ class TestWeb(unittest.TestCase):
         for kind in ids:
             argv, _mut = W._tool_argv(kind, args.get(kind, {}))
             self.assertIn(argv[0], ("compare", "verify", "doctor", "fix",
-                                    "tokens", "disk", "restore", "mirror"),
-                          kind)
+                                    "tokens", "disk", "restore", "mirror",
+                                    "update", "uninstall"), kind)
         # verify and compare are read-only; nothing else on the page may be
         self.assertFalse(W._tool_argv("verify", {})[1])
 
@@ -3277,6 +3299,36 @@ class TestWebHttp(unittest.TestCase):
         self.assertIn("attachment", hdrs.get("content-disposition", ""))
         self.assertNotIn("SECRET-TOKEN-VALUE", body)
         self.assertIn('"src"', body)
+
+    def test_config_import_merges_and_keeps_stored_credentials(self):
+        pasted = json.dumps({"platforms": {
+            "src": {"type": "local", "enabled": True, "path": self.td
+                    + "/src"},
+            "newgl": {"type": "gitlab", "url": "https://gitlab.com",
+                      "owner": "me", "token": ""}},
+            "routes": [{"name": "imported", "source": "src",
+                        "targets": ["dst"]}],
+            "settings": {"workers": 8}})
+        code, body, _ = self._req("POST", "/api/config/import",
+                                  {"config": pasted}, headers=self._auth())
+        self.assertEqual(code, 200, body)
+        got = json.loads(body)
+        self.assertEqual(got["summary"]["platforms"], 2)
+        self.assertEqual(got["summary"]["routes"], 1)
+        cfg = C.load_config()
+        self.assertEqual(cfg["settings"]["workers"], 8)
+        self.assertIn("imported", [r["name"] for r in cfg["routes"]])
+        # a platform with no token is reported, not silently broken
+        self.assertEqual(got["summary"]["needs_token"], ["newgl"])
+        # the previous config was backed up first
+        self.assertTrue(any(f.startswith("config.json.bak-")
+                            for f in os.listdir(C.CONFIG_DIR)))
+
+    def test_config_import_rejects_junk(self):
+        for bad in ("", "not json", '{"nope": 1}', "[]"):
+            code, _, _ = self._req("POST", "/api/config/import",
+                                   {"config": bad}, headers=self._auth())
+            self.assertEqual(code, 400, bad[:20])
 
     def test_metrics_is_prometheus_text_and_needs_auth(self):
         code, _, _ = self._req("GET", "/metrics")

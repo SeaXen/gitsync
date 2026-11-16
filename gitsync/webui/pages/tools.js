@@ -45,6 +45,8 @@
         f("Repos", '<input type="text" id="mirror-repos" name="mirror_repos" placeholder="comma-separated…">') +
         f("From", '<input type="text" id="mirror-from" name="mirror_from" placeholder="route source…">') +
         f("To", '<input type="text" id="mirror-to" name="mirror_to" placeholder="all targets…">')) +
+      toolCard("update", "Update gitsync", "Pull the newest release and reinstall. The web UI keeps running the old code until it is restarted.", "") +
+      toolCard("uninstall", "Uninstall", "Remove the scheduler and the command. Config and mirrors are kept.", "", "Uninstall…") +
       "</div>" +
       '<section class="card hide" id="tool-out-card">' +
         '<div class="bar"><span class="route-title" id="tool-out-title">Output</span>' +
@@ -130,6 +132,39 @@
       if (!val("mirror-repos")) return G.toast("mirror needs repo names", "warn");
       body = { repos: val("mirror-repos"), src: val("mirror-from"), to: val("mirror-to") };
       label = "mirror " + val("mirror-repos");
+    } else if (kind === "update") {
+      return G.modalConfirm({
+        title: "Update gitsync",
+        message: "This pulls the newest release and reinstalls. The web UI you " +
+          "are looking at keeps running the old code until it is restarted " +
+          "(systemctl --user restart gitsync-web.service, or the TUI's Update).",
+        confirmText: "Update",
+        danger: false
+      }).then(function (ok) {
+        if (!ok) return;
+        body = { kind: kind };
+        return G.api("POST", "/api/jobs", body).then(function (r) {
+          showOut("update", r.job_id);
+        }).catch(handleErr);
+      });
+    } else if (kind === "uninstall") {
+      // the scheduler and the command go away; config and mirrors do not.
+      // Typed confirmation because the web UI is the thing being removed.
+      return G.modalConfirm({
+        title: "Uninstall gitsync",
+        message: "This removes the scheduler and the gitsync command. Your " +
+          "config and mirror hub are kept. This page will stop working. " +
+          "Type uninstall to confirm.",
+        prompt: "uninstall",
+        confirmText: "Uninstall",
+        danger: true
+      }).then(function (ok) {
+        if (!ok) return;
+        body = { kind: kind };
+        return G.api("POST", "/api/jobs", body).then(function (r) {
+          showOut("uninstall", r.job_id);
+        }).catch(handleErr);
+      });
     }
     body.kind = kind;
     return G.api("POST", "/api/jobs", body).then(function (r) {

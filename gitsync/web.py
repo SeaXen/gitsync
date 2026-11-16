@@ -47,6 +47,7 @@ import secrets
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -887,6 +888,14 @@ def _tool_argv(kind, b):
         if b.get("to") and _valid_name(b["to"]):
             argv += ["--to", b["to"]]
         return argv, True
+    if kind == "update":
+        # reinstalls to /opt and rewrites the timer; the running web process
+        # keeps its old code until it is restarted, which the card says
+        return ["update"], True
+    if kind == "uninstall":
+        # the CLI refuses to run unattended without --yes; the web card makes
+        # the operator type the word first, so the flag is earned, not assumed
+        return ["uninstall", "--yes"], True
     raise ValueError("unknown tool: %s" % kind)
 
 
@@ -2548,6 +2557,47 @@ def h_config_export(handler):
     handler.wfile.write(body)
 
 
+def h_config_import(handler):
+    """merge a pasted config, keeping the credentials already on this box.
+
+    This is the other half of the export button. `C.import_config()` does the
+    safety work — the current config is backed up first, a platform that
+    already exists keeps its token, and a new platform is reported as needing
+    one — so the endpoint only has to hand it a file and relay the summary.
+    """
+    b = handler._body()
+    text = (b.get("config") or "")
+    if not isinstance(text, str) or not text.strip():
+        raise _Http(400, "paste a gitsync config export first")
+    if len(text) > 512 * 1024:
+        raise _Http(400, "that config is too large to paste")
+    try:
+        incoming = json.loads(text)
+    except ValueError as e:
+        raise _Http(400, "not valid JSON: %s" % str(e)[:120])
+    if not isinstance(incoming, dict):
+        raise _Http(400, "not a gitsync config (expected an object)")
+    fd, tmp = tempfile.mkstemp(prefix="gitsync-import-", suffix=".json",
+                               dir=C.CONFIG_DIR)
+    os.close(fd)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        summary = C.import_config(tmp, replace=bool(b.get("replace")))
+    except C.ConfigImportError as e:
+        raise _Http(400, str(e))
+    except OSError as e:
+        raise _Http(500, "cannot import: %s" % e)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    _audit("config imported from the web UI")
+    _invalidate("platforms", "routes", "settings", "next", "sched")
+    handler._json({"ok": True, "summary": summary})
+
+
 def h_scopes(handler):
     out = []
     for ptype in C.PLATFORM_TYPES:
@@ -2863,6 +2913,7 @@ ROUTES = [
     ("GET", re.compile(r"^/api/settings$"), lambda h: h_settings_get(h)),
     ("PUT", re.compile(r"^/api/settings$"), lambda h: h_settings_put(h)),
     ("POST", re.compile(r"^/api/notify/test$"), lambda h: h_notify_test(h)),
+    ("POST", re.compile(r"^/api/config/import$"), lambda h: h_config_import(h)),
     ("GET", re.compile(r"^/api/config/export$"), lambda h: h_config_export(h)),
     ("GET", re.compile(r"^/api/scopes$"), lambda h: h_scopes(h)),
     ("GET", re.compile(r"^/api/health$"), lambda h: h_health(h)),
