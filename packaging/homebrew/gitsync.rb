@@ -4,7 +4,7 @@ class Gitsync < Formula
   url "https://github.com/SeaXen/gitsync/archive/refs/tags/v2.1.11.tar.gz"
   # Template formula: update sha256 upon release tag creation via:
   #   curl -fsSL https://github.com/SeaXen/gitsync/archive/refs/tags/v2.1.11.tar.gz | sha256sum
-  # sha256 "REPLACE_WITH_V2_1_11_SHA256"
+  sha256 "62dcc98c40ce9618d2053404e4c69c8e6ffd91aca749fab7838921104e60c8dd"
   license "MIT"
 
   depends_on "python@3.12"
