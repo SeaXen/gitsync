@@ -1290,6 +1290,50 @@ class TestRouteSkips(unittest.TestCase):
         self.assertEqual(skipped["empty"], 1)
 
 
+class TestRouteSelection(unittest.TestCase):
+    """the one list sync, verify and compare must all agree on.
+
+    compare used to drop every fork regardless of `include_forks`, so on a
+    config that mirrors its forks (include_forks: true) the 8 mirrored forks
+    were reported as "extra repos on the target" — advice that would have
+    deleted 24 healthy repositories across gitlab, forgejo and the backup hub.
+    """
+
+    REPOS = [{"name": "main"}, {"name": "fork-a", "fork": True},
+             {"name": "old-thing"}, {"name": "archived-one", "archived": True}]
+
+    def names(self, repos):
+        return [r["name"] for r in repos]
+
+    def test_forks_are_kept_when_the_config_mirrors_them(self):
+        cfg = {"settings": {"include_forks": True}}
+        kept, skipped = SY.route_selection(cfg, {"name": "r"}, self.REPOS)
+        self.assertEqual(self.names(kept), ["main", "fork-a", "old-thing"])
+        self.assertEqual(skipped["archived"], 1)
+        self.assertEqual(skipped["fork"], 0)
+
+    def test_forks_are_dropped_when_the_config_does_not(self):
+        cfg = {"settings": {"include_forks": False}}
+        kept, skipped = SY.route_selection(cfg, {"name": "r"}, self.REPOS)
+        self.assertEqual(self.names(kept), ["main", "old-thing"])
+        self.assertEqual(skipped["fork"], 1)
+
+    def test_a_route_override_beats_the_global_setting(self):
+        cfg = {"settings": {"include_forks": False}}
+        kept, _ = SY.route_selection(cfg, {"include_forks": True}, self.REPOS)
+        self.assertIn("fork-a", self.names(kept))
+
+    def test_excluded_repos_are_never_expected_on_a_target(self):
+        cfg = {"settings": {"include_forks": True}}
+        kept, _ = SY.route_selection(cfg, {"exclude": ["old-*"]}, self.REPOS)
+        self.assertEqual(self.names(kept), ["main", "fork-a"])
+
+    def test_include_globs_narrow_the_list(self):
+        cfg = {"settings": {"include_forks": True}}
+        kept, _ = SY.route_selection(cfg, {"include": ["fork-*"]}, self.REPOS)
+        self.assertEqual(self.names(kept), ["fork-a"])
+
+
 class TestScheduler(unittest.TestCase):
     """P0-1: the calendar is derived, and every schedule key is allowed."""
 
@@ -3438,6 +3482,18 @@ class TestTenOutOfTenFixes(unittest.TestCase):
         import inspect
         src = inspect.getsource(W)
         self.assertIn('"effective_mode": C.route_mode(cfg, r)', src)
+
+    def test_compare_and_verify_use_the_sync_selection(self):
+        # compare filtered forks on its own (always dropped) and verify
+        # filtered nothing, so on this very box the 8 mirrored forks showed
+        # up as "extra repos — delete them" while verify checked repos the
+        # route never syncs. Both must go through route_selection().
+        import inspect
+        compare = inspect.getsource(M.compare_matrix)
+        verify = inspect.getsource(SY.verify)
+        self.assertIn("route_selection(", compare)
+        self.assertIn("route_selection(", verify)
+        self.assertNotIn('if not r.get("fork")', compare)
 
 
 class TestTUIDrawPerformance(unittest.TestCase):

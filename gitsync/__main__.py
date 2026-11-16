@@ -869,8 +869,12 @@ def compare_matrix(cfg, route, log=None):
         repos = source.list_repos()
     except Exception as e:
         raise RuntimeError("cannot list %s: %s" % (route["source"], e))
-    names = [r["name"] for r in repos if not r.get("fork")] or \
-        [r["name"] for r in repos]
+    # The same selection `sync` uses. This dropped every fork unconditionally,
+    # so the 8 forks a config with include_forks=true really does mirror were
+    # reported as "extra repos on the target" — advice that would have deleted
+    # 24 healthy repositories. Excluded repos are not "extra" either.
+    repos, _skipped = SYNC.route_selection(cfg, route, repos)
+    names = [r["name"] for r in repos]
     say("route %s: %d repos × %d sites" % (route.get("name"), len(names),
                                            len(targets) + 1))
 

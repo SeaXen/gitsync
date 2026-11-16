@@ -4,6 +4,29 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.14] - 2026-11-16
+
+### compare — it told you to delete 8 repos that were fine
+`gitsync compare` built its own source list and dropped **every** fork,
+ignoring `include_forks` entirely. The live config mirrors its forks, so
+`compare` reported `39` repos and named the 8 GitHub forks (`9router`,
+`OmniRoute`, `OpenTerminal`, `hermes-agent`, `hermes-telemetry`, `manifest`,
+`mnemosyne`, `mnemosyne-dashboard`) as "extra repos" on gitlab, forgejo and
+the backup hub — 24 perfectly healthy repositories, presented as deletable
+extras. `gitsync verify` disagreed and said 47, because it filtered nothing
+at all: it checked repos a route deliberately excludes, so a fork on a
+config with `include_forks: false` would have reported NO MIRROR forever.
+
+Both now use `SYNC.route_selection()` — the same include/exclude globs and
+the same fork/archived/empty skips that `sync` applies — so all three
+commands name the same repositories. `gitsync compare` on this box went
+from `39 repos, extra {gitlab: 8, forgejo: 8, backup: 8}` to
+`47 repos, extra {}`.
+
+Nothing was deleted: the prune path never used the filtered list, so a
+multi-repo delete could not have followed the bad advice — but a human
+reading the report could have.
+
 ## [2.1.13] - 2026-11-16
 
 ### Deletion — one repo at a time, from every surface

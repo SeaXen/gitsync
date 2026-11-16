@@ -958,6 +958,21 @@ def _apply_route_skips(cfg, route, repos):
     return kept, skipped
 
 
+def route_selection(cfg, route, repos):
+    """the repos a route actually syncs: include/exclude globs, then skips.
+
+    `sync`, `verify` and `compare` have to agree on this list, and they did
+    not: compare dropped every fork no matter what `include_forks` said, so a
+    config that mirrors its forks (the live one does) was told those 8
+    mirrored repos were "extra repos — delete them"; verify checked repos the
+    route excludes, so a fork on a config with `include_forks: false` reported
+    NO MIRROR forever even though nothing was wrong.
+
+    Returns (kept, skipped) — the same shape `_apply_route_skips` produces.
+    """
+    return _apply_route_skips(cfg, route, _filter_repos(repos, route))
+
+
 def _mirror_extras(hub):
     """(needs_lfs, has_submodules) for one bare mirror.
 
@@ -1913,6 +1928,10 @@ def verify(cfg, route_name=None, log_fn=None):
             rows.append({"route": rname, "state": "list-failed", "repo": "-",
                          "target": "-", "detail": _redact(str(e))[:200]})
             continue
+        # only the repos this route actually syncs: forks are mirrored when
+        # include_forks says so, and an excluded repo is never expected on a
+        # target — checking it reported a permanent, harmless NO MIRROR
+        repos, _skipped = route_selection(cfg, route, repos)
         log("verifying %d repo(s) on route '%s'" % (len(repos), rname))
         for repo in repos:
             name = repo.get("name")
