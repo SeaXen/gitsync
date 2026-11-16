@@ -92,7 +92,12 @@ def askpass_env(user=None, token=None, base_env=None):
     helper = ensure_executable_helper(helper)
     env["GIT_ASKPASS"] = helper
     env["GIT_TERMINAL_PROMPT"] = "0"
-    if "GIT_CONFIG_PARAMETERS" not in env:
+    # Only blank out the configured helpers when we are supplying a token
+    # ourselves. Doing it unconditionally disabled a working global helper
+    # (`!gh auth git-credential`) for the gh/glab modes, so a single empty
+    # answer from the askpass helper became an empty password that every
+    # private repo rejected.
+    if token and "GIT_CONFIG_PARAMETERS" not in env:
         env["GIT_CONFIG_PARAMETERS"] = "'credential.helper='"
     if os.name == "nt":
         env["GITSYNC_PYTHON"] = sys.executable

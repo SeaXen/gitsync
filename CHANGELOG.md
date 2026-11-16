@@ -4,6 +4,37 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.10] - 2026-11-16
+
+### Auth — `auth: "gh"` really works now
+Two bugs stacked into one failure mode, seen live: a route syncing 47 **private**
+GitHub repos reported `33 failed` with `remote: Invalid username or token.
+Password authentication is not supported`.
+
+- `askpass.py` built the `gh`/`glab` subprocess environment as `{"PATH": ...}`,
+  throwing away `HOME`. Both CLIs find their credentials in `~/.config/gh`
+  (and `~/.config/glab`), so the lookup failed with *"no oauth token found for
+  github.com"* and the helper printed an **empty password**. Git then sent that
+  empty password, which GitHub rejects. The helper now inherits the caller's
+  environment and reconstructs `HOME` from the passwd entry when a unit runs
+  without it.
+- `askpass_env()` set `GIT_CONFIG_PARAMETERS="'credential.helper='"` even when
+  it had no token to offer, which disabled a perfectly good global helper
+  (`!gh auth git-credential`). It is now applied only when an explicit token is
+  supplied, so the askpass is a fallback instead of the sole source of truth.
+- `glab` lookups get the same environment fix (`GLAB_HOST` still passed).
+
+Verified against the live config: 47/47 repos synced, `verify` reported
+141/141 in-sync.
+
+### Scheduler
+- `timer_status()` no longer scrapes the fixed-width `systemctl list-timers`
+  table, which collapses into one unreadable line without a tty. It reads
+  `systemctl show` properties (`ActiveState`, next/last elapse, `Result`).
+- `gitsync install` warns when it falls back to cron while a user timer unit
+  already exists — that combination means two schedulers, usually because the
+  installer ran under `sudo` and could not reach the user manager.
+
 ## [2.1.9] - 2026-11-16
 
 ### Data Safety

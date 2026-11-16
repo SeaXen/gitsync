@@ -1581,6 +1581,60 @@ class TestGlabAuth(unittest.TestCase):
         self.assertEqual(buf.getvalue().strip(), "ghp_from_gh")
         self.assertEqual(calls[0][0], "gh")        # gh first, not glab
 
+    def test_askpass_keeps_the_environment_gh_needs(self):
+        # gh/glab read their credentials from $HOME; passing a bare
+        # {"PATH": ...} env made `gh auth token` answer "no oauth token
+        # found", so the askpass printed an EMPTY password. Git then sent
+        # that empty password and every private repo was rejected with
+        # "Invalid username or token. Password authentication is not
+        # supported".
+        import gitsync.askpass as AP
+        seen = {}
+        real = AP.subprocess.run
+
+        def fake(cmd, **kw):
+            seen[cmd[0]] = kw.get("env") or {}
+            return subprocess.CompletedProcess(cmd, 0, "ghp_x\n", "")
+
+        AP.subprocess.run = fake
+        old = os.environ.copy()
+        os.environ["HOME"] = "/home/someone"
+        os.environ["GH_CONFIG_DIR"] = "/home/someone/.config/gh"
+        try:
+            self.assertEqual(AP._token_from_gh("https://github.com"), "ghp_x")
+        finally:
+            AP.subprocess.run = real
+            os.environ.clear()
+            os.environ.update(old)
+        env = seen["gh"]
+        self.assertEqual(env.get("HOME"), "/home/someone")
+        self.assertEqual(env.get("GH_CONFIG_DIR"), "/home/someone/.config/gh")
+        self.assertTrue(env.get("PATH"))
+
+    def test_askpass_invents_home_when_the_unit_has_none(self):
+        # a systemd user unit can run without HOME; expanduser/pwd still
+        # knows where the user lives, so the lookup must not fail there.
+        import gitsync.askpass as AP
+        old = os.environ.copy()
+        os.environ.pop("HOME", None)
+        try:
+            env = AP._cli_env()
+        finally:
+            os.environ.clear()
+            os.environ.update(old)
+        self.assertTrue(env.get("HOME"))
+
+    def test_askpass_env_does_not_disable_a_working_credential_helper(self):
+        # `credential.helper=` was set unconditionally, so a global
+        # `!gh auth git-credential` helper was switched off for the gh/glab
+        # modes and the askpass became the only source of truth.
+        env = SY.askpass_env(None, None, base_env={"PATH": "/usr/bin:/bin"})
+        self.assertNotIn("GIT_CONFIG_PARAMETERS", env)
+        # an explicit token still wins over any configured helper
+        env = SY.askpass_env("u", "tok", base_env={"PATH": "/usr/bin:/bin"})
+        self.assertEqual(env["GIT_CONFIG_PARAMETERS"], "'credential.helper='")
+        self.assertEqual(env["GITSYNC_ASKPASS_TOKEN"], "tok")
+
     def test_askpass_helper_answers_username_without_a_token(self):
         import gitsync.glab_askpass as GA
         # "Username for ..." must not leak anything

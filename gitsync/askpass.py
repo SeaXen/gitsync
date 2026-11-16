@@ -10,13 +10,35 @@ import subprocess
 import sys
 
 
+def _cli_env(extra=None):
+    """environment for the gh/glab CLI, inheriting ours.
+
+    Both tools find their credentials in $HOME (`~/.config/gh/hosts.yml`), so
+    building a bare {"PATH": ...} env made every lookup fail with "no oauth
+    token found" — and an askpass that prints an empty password is worse than
+    no askpass, because git sends that empty password and the server rejects
+    it. Keep the caller's env and only guarantee the two variables that
+    matter.
+    """
+    env = dict(os.environ)
+    env.setdefault("PATH", "/usr/local/bin:/usr/bin:/bin")
+    if not env.get("HOME"):
+        try:
+            import pwd
+            env["HOME"] = pwd.getpwuid(os.getuid()).pw_dir
+        except Exception:
+            pass
+    if extra:
+        env.update(extra)
+    return env
+
+
 def _token_from_glab(host):
     for args in (["auth", "status", "-t"], ["auth", "token"]):
         try:
             r = subprocess.run(["glab"] + args, capture_output=True,
                                text=True, timeout=20,
-                               env={"GLAB_HOST": host,
-                                    "PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+                               env=_cli_env({"GLAB_HOST": host}))
         except Exception:
             continue
         out = (r.stdout or "").strip()
@@ -35,9 +57,7 @@ def _token_from_gh(_host):
     """
     try:
         r = subprocess.run(["gh", "auth", "token"], capture_output=True,
-                           text=True, timeout=20,
-                           env={"PATH": os.environ.get("PATH",
-                                                       "/usr/bin:/bin")})
+                           text=True, timeout=20, env=_cli_env())
     except Exception:
         return ""
     out = (r.stdout or "").strip()
