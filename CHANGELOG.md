@@ -4,6 +4,17 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.15] - 2026-11-16
+
+### Dashboard — "0/0 ok" right after a good sync
+A timer run that finds no route due still writes a record, with `repos=0`,
+`ok=0` and `skipped=N`. The LAST SYNC card read only the newest record, so
+after a manual sync the 12:00 timer run replaced "47/47 ok" with "0/0 ok" —
+the one number the card exists to show. It now reads the last record that
+actually did work and appends when the last *check* happened; a config whose
+only record is such a check reads "not due" instead of inventing a
+zero-repo sync.
+
 ## [2.1.14] - 2026-11-16
 
 ### compare — it told you to delete 8 repos that were fine

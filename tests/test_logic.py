@@ -2453,6 +2453,24 @@ class TestTui(unittest.TestCase):
              "--only=gitlab:z", "--only=fj:y"])
         self.assertEqual(tui._extras_prune_argv("main", []),
                          ["prune", "--route", "main", "--yes"])
+
+    def test_last_sync_card_ignores_a_run_that_found_nothing_due(self):
+        # a timer run with no route due still records 0 repos; reading only
+        # the newest record made the card say "0/0 ok" minutes after a
+        # healthy 47-repo sync
+        real = {"finished_at": "2026-11-16 11:46:16", "repos": 47, "ok": 47,
+                "failed": 0, "partial": 0, "elapsed_sec": 38.9,
+                "dry_run": False}
+        idle = {"finished_at": "2026-11-16 12:00:42", "repos": 0, "ok": 0,
+                "failed": 0, "partial": 0, "elapsed_sec": 0.0,
+                "dry_run": False, "skipped": 1}
+        card = tui._last_sync_card([real, idle], 1, 2, 3, 0)
+        self.assertEqual(card[0], "LAST SYNC")
+        self.assertEqual(card[1], "47/47 ok")
+        self.assertIn("checked", card[2])
+        # with nothing but an idle check, say so rather than "0/0 ok"
+        self.assertEqual(tui._last_sync_card([idle], 1, 2, 3, 0)[1], "not due")
+        self.assertEqual(tui._last_sync_card([], 1, 2, 3, 0)[1], "never")
         self.assertEqual(tui._merged_refs(["  x"]), 0)
         self.assertEqual(tui._merged_refs([]), 0)
 

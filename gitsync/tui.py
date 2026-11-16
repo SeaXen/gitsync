@@ -3791,6 +3791,51 @@ def _dash_route_rows(G, Y, R, dim):
     return rows
 
 
+def _last_sync_card(recs, G, Y, R, dim):
+    """the LAST SYNC card, from run records (pure; unit-tested).
+
+    A timer run that finds no route due still writes a record — with
+    repos=0, ok=0, skipped=N. Reading only the newest record made the card
+    say "0/0 ok" right after a healthy 47-repo sync, which is exactly the
+    question the card exists to answer. The card now reports the last run
+    that actually did work and appends when the last *check* happened.
+    """
+    last = recs[-1] if recs else None
+    if not last:
+        return ("LAST SYNC", "never", "no run recorded yet", dim)
+    idle = (not last.get("dry_run") and not (last.get("repos") or 0)
+            and last.get("skipped"))
+    rec = last
+    if idle:
+        rec = next((r for r in reversed(recs)
+                    if (r.get("repos") or 0) > 0 or r.get("dry_run")), last)
+    if rec.get("dry_run"):
+        return ("LAST SYNC", "dry run",
+                "%d would change · %s" % (rec.get("would_change") or 0,
+                                          _ago_text(rec.get("finished_at"))
+                                          or "just now"), Y)
+    if idle and rec is last:
+        # nothing to report yet: the only record is a check that found no
+        # route due, so say that instead of inventing a 0-repo sync
+        return ("LAST SYNC", "not due",
+                "checked %s" % (_ago_text(last.get("finished_at"))
+                                or "just now"), dim)
+    ok = rec.get("ok") or 0
+    bad = (rec.get("partial") or 0) + (rec.get("failed") or 0)
+    age = _ago_text(rec.get("finished_at")) or "just now"
+    note = "%s · %ss" % (age, rec.get("elapsed_sec"))
+    if idle:
+        # keep the card two lines wide: the elapsed time is the least useful
+        # number when the more interesting fact is that nothing was due
+        note = "%s · checked %s" % (age, _ago_text(last.get("finished_at"))
+                                    or "just now")
+    if bad:
+        return ("LAST SYNC", "%d ok, %d bad" % (ok, bad), "see 6:History", R)
+    if not ok and not (rec.get("repos") or 0):
+        return ("LAST SYNC", "nothing synced", note, dim)
+    return ("LAST SYNC", "%d/%d ok" % (ok, rec.get("repos") or ok), note, G)
+
+
 def _dashboard_cards(G, Y, R, dim):
     """the four stat cards: last run, schedule, hub, routes.
 
@@ -3798,27 +3843,7 @@ def _dashboard_cards(G, Y, R, dim):
     "did the last run work", "when is the next one", or "how big is the
     hub" — the questions an operator actually opens it for.
     """
-    cards = []
-    recs = _cached_last_records(1)
-    rec = recs[-1] if recs else None
-    if not rec:
-        cards.append(("LAST SYNC", "never", "no run recorded yet", dim))
-    elif rec.get("dry_run"):
-        cards.append(("LAST SYNC", "dry run",
-                      "%d would change · %s" % (
-                          rec.get("would_change") or 0,
-                          _ago_text(rec.get("finished_at")) or "just now"), Y))
-    else:
-        bad = (rec.get("partial") or 0) + (rec.get("failed") or 0)
-        ok = rec.get("ok") or 0
-        note = "%s · %ss" % (_ago_text(rec.get("finished_at")) or "just now",
-                             rec.get("elapsed_sec"))
-        if bad:
-            cards.append(("LAST SYNC", "%d ok, %d bad" % (ok, bad),
-                          "see 6:History", R))
-        else:
-            cards.append(("LAST SYNC", "%d/%d ok" % (ok, rec.get("repos")
-                                                     or ok), note, G))
+    cards = [_last_sync_card(_cached_last_records(12), G, Y, R, dim)]
 
     cfg = _cached_config()
     sched = C.setting(cfg, "schedule", "hourly")
