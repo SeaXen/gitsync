@@ -99,11 +99,16 @@ a:hover{text-decoration:underline}
 .side .foot .meta{font:500 11px var(--mono);color:var(--side-meta,var(--muted));padding:4px 10px 8px}
 
 /* top bar */
-.top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;padding:10px 22px;background:var(--top-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+/* flex-wrap: at ~1000px the brand + a long status pill ("idle · 6h · next Mon
+   2026-11-16 18:00:00 +06") + three labelled buttons + three icon buttons is
+   847px of content in a 760px box, so the theme/account/sign-out buttons ran
+   off the right edge and the page itself scrolled sideways. Wrapping keeps
+   every control reachable; the pill truncates instead of pushing. */
+.top{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:10px 22px;background:var(--top-bg);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
 .top .brand{font:600 15px var(--mono);display:flex;align-items:center;gap:8px;color:var(--text)}
 .top .brand svg{width:20px;height:20px;color:var(--accent)}
 .top .spacer{flex:1}
-.status{display:inline-flex;align-items:center;gap:8px;padding:5px 12px;border-radius:99px;background:var(--panel);border:1px solid var(--line);font-size:12.5px;color:var(--muted);white-space:nowrap}
+.status{display:inline-flex;align-items:center;gap:8px;padding:5px 12px;border-radius:99px;background:var(--panel);border:1px solid var(--line);font-size:12.5px;color:var(--muted);white-space:nowrap;min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis}
 .status .pip{width:8px;height:8px;border-radius:50%;background:var(--muted);flex:none}
 .status.live .pip{background:var(--accent);box-shadow:0 0 0 0 rgba(110,168,254,.6);animation:pulse 1.4s infinite}
 .status.live{color:var(--text)}
@@ -166,7 +171,9 @@ a:hover{text-decoration:underline}
 .label a{margin-left:auto}
 .chip{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;margin:0 6px 6px 0;border:1px solid var(--line2);border-radius:var(--radius-pill);font-size:12px;color:var(--nav);background:var(--panel2)}
 .chip.paused{border-style:dashed;border-color:rgba(210,153,34,.35);color:var(--warn)}
-.row{display:flex;justify-content:space-between;gap:12px;align-items:center}
+/* a platform row is name + state + repo count + a "repos ▾" toggle: 4px too
+   wide in a 306px card clipped the toggle, so let it wrap instead */
+.row{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap}
 .stack{display:flex;flex-direction:column;gap:12px}
 .dot{display:inline-block;width:9px;height:9px;margin-right:9px;border-radius:50%;background:var(--ok);flex:none}
 .dot.bad{background:var(--bad)}
@@ -269,6 +276,20 @@ td .mono{color:var(--nav)}
   .top .status{font-size:12px;padding:4px 8px;max-width:38vw;overflow:hidden;text-overflow:ellipsis}
   .form-grid{grid-template-columns:1fr}
 }
+@media (max-width:1100px){
+  /* Between ~861px and ~1100px the brand + a long status pill ("idle · 6h ·
+     next Mon 2026-11-16 18:00:00 +06") + the action buttons is ~820px of
+     content in a 760px box, so the theme/account/sign-out buttons ran off
+     the right edge and the page itself scrolled sideways. The sidebar
+     already carries the wordmark, so drop it here, take the ghost buttons
+     down to icons (each keeps its title and aria-label) and leave the
+     primary "Sync now" labelled — it is the one control that must stay
+     readable. The pause icon is itself a <span>, so the text spans are
+     excluded by id rather than by position. */
+  .top .brand{display:none}
+  .top .btn.ghost span:not(#top-pause-icon){display:none}
+  .top .btn.ghost{padding:8px 10px;min-width:40px;justify-content:center}
+}
 @media (min-width:541px){
   .side .mobile-logout{display:none}
 }
@@ -276,7 +297,9 @@ td .mono{color:var(--nav)}
   .top{padding:8px 10px;gap:6px}
   .top .brand span{display:none}
   .top .status{max-width:32vw}
-  .top button span{display:none}
+  /* the same id guard as above: `.top button span` also matched the pause
+     icon's span, which left the button an empty 36px box on a phone */
+  .top button span:not(#top-pause-icon){display:none}
   .top button.btn{padding:8px 10px;min-width:36px;justify-content:center}
   /* Pause stays reachable on a phone: icon-only like the other controls */
   #top-pause{padding:8px 10px;min-width:36px}

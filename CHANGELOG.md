@@ -4,6 +4,32 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.16] - 2026-11-16
+
+### Web UI — the top bar pushed Sign out off the screen
+Measured on a 1000px window (the default on a 1080p laptop, and any split
+screen): the wordmark + the status pill + three labelled buttons + three
+icon buttons is 847px of content in a 760px box, so the theme, account and
+sign-out buttons ran past the right edge and the whole page scrolled
+sideways. The pill grows with the schedule text ("idle · 6h · next Mon
+2026-11-16 18:00:00 +06"), so it got worse the longer a box stayed up.
+
+- Below ~1100px the top bar drops the wordmark (the sidebar already shows
+  it) and takes the ghost buttons down to icons, each keeping its `title`
+  and `aria-label`. The primary **Sync now** stays labelled.
+- The bar also wraps now, so a longer status text can never push a control
+  off-screen again, and the pill ellipsises instead of growing.
+- The phone rule (≤540px) hid *every* `<span>` inside the top buttons —
+  including the Pause icon, which is itself a span — leaving an empty 36px
+  box. It now excludes that span by id.
+- `.row` (platform name + state + repo count + "repos ▾") was 4px wider
+  than its card and clipped the toggle; it wraps instead.
+
+Verified live at 1000px on every page: one 65px bar, no horizontal page
+scroll, no clipped element. Lighthouse on the dashboard: accessibility 100,
+best practices 100 (the only miss is a meta description, irrelevant for a
+login-gated local app).
+
 ## [2.1.15] - 2026-11-16
 
 ### Dashboard — "0/0 ok" right after a good sync
