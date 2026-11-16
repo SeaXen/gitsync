@@ -143,12 +143,12 @@ gitsync disk --gc --older-than 7   # gc only idle mirrors
 mirror hub: /root/.local/share/gitsync/mirrors
   mirrors      : 53
   total size   : 7.2G
-  filesystem   : 847.1G free of 916.5G
+  filesystem   : 412.5G free of 931.5G
   orphans      : 2 (696.0K)
 
 orphaned mirrors (repo gone from github):
-  mdsagar-com-claude1              600.0K
-  my-portable-llm-wikis             96.0K
+  old-project                      600.0K
+  stale-fork                         96.0K
 
 re-run with --orphans --prune-orphans to delete them
 ```
@@ -181,8 +181,8 @@ Two rules keep it safe:
   "not on that site" — that is the honest answer, not a failure.
 - **Matching is never by name alone.** GitHub → GitHub matches the exact
   `owner/repo`; anything else matches the repo's remote URL. A name match
-  would have starred `nujovich/hermes-telemetry` when you meant
-  `SeaXen/hermes-telemetry`.
+  would have starred `bob/hermes-telemetry` when you meant
+  `alice/hermes-telemetry`.
 
 ---
 

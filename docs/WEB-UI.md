@@ -24,7 +24,7 @@ gitsync web --port 8484             # your bind/port are remembered
 
 It binds `0.0.0.0` by default (a browser dashboard is meant to be opened from
 another device) and prints the exact URLs to open, e.g.
-`http://192.168.0.222:7765`. **Authentication is always required.** Restrict
+`http://192.168.1.50:7765`. **Authentication is always required.** Restrict
 to this machine any time with `--bind 127.0.0.1` — the choice is saved, so you
 set it once.
 
@@ -142,7 +142,7 @@ scrape_configs:
     authorization:
       credentials_file: /root/.config/gitsync/web.token
     static_configs:
-      - targets: ["192.168.0.222:7765"]
+      - targets: ["192.168.1.50:7765"]
 ```
 
 ## Metrics (`/metrics`)

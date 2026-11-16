@@ -4,6 +4,35 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.17] - 2026-11-16
+
+### Nothing in the repo identifies the machine it was built on
+Audited every tracked file and the whole git history: no token, config,
+`records.json`, mirror or `web.token` was ever committed, and `.gitignore`
+covers all of them. What *was* shipping was the operator's own environment
+pasted into examples:
+
+- `AGENTS.md` — this project's working notes for the machine it is developed
+  on (its real backup-hub path, all three remotes with usernames, git
+  identity) — was tracked, so it rode along in every clone and release
+  tarball. It is now local-only (`git rm --cached` + `.gitignore`); the file
+  stays on disk, and the Docker image never copied it.
+- `docs/GETTING-STARTED.md` used the real backup-hub path
+  `/mnt/sg/Sea/6Repo/1git` as the wizard's example, twice.
+- `docs/CLI.md`'s sample `gitsync disk --orphans` output listed real repo
+  names and a real disk size, and its stars example named real owners.
+- `docs/WEB-UI.md` / `docs/GETTING-STARTED.md` used `192.168.0.222` — this
+  box's actual LAN address — as the example instance.
+- Two tests and one docstring used the operator's usernames as fixtures.
+
+All replaced with neutral examples (`/mnt/backup/git`, `192.168.1.50`,
+`alice`/`bob`, `acme`). The project's own `SeaXen/gitsync` URLs stay: the
+updater, the Homebrew formula and the clone instructions need them.
+
+A fresh clone now starts from a genuinely blank config: `gitsync setup`
+creates zero platforms and a random web token, so the first-run experience
+is identical for everyone.
+
 ## [2.1.16] - 2026-11-16
 
 ### Web UI — the top bar pushed Sign out off the screen

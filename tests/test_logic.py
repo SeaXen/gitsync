@@ -175,16 +175,16 @@ class TestPlatformUrls(unittest.TestCase):
     def test_forgejo_https_url_encodes_token(self):
         # P0-3: private git operations send no token without this
         p = P.make('fj', {'type': 'forgejo', 'url': 'http://localhost:3002',
-                          'owner': 'sagar', 'token': 'a/b'})
-        self.assertEqual(p._push_url('sagar', 'repo'),
-                         'http://git:a%2Fb@localhost:3002/sagar/repo.git')
+                          'owner': 'me', 'token': 'a/b'})
+        self.assertEqual(p._push_url('me', 'repo'),
+                         'http://git:a%2Fb@localhost:3002/me/repo.git')
         p2 = P.make('fj2', {'type': 'forgejo', 'url': 'https://codeberg.org',
                             'owner': 'me', 'token': 'tok'})
         self.assertEqual(p2._push_url('me', 'repo'),
                          'https://git:tok@codeberg.org/me/repo.git')
         # the scheme must follow the configured URL: a LAN Forgejo over
         # plain http must not be forced to https (regression: TLS error)
-        self.assertTrue(p._push_url('sagar', 'repo').startswith('http://'))
+        self.assertTrue(p._push_url('me', 'repo').startswith('http://'))
         self.assertTrue(p2._push_url('me', 'repo').startswith('https://'))
         # no token -> plain URL, ssh -> never embedded
         p3 = P.make('fj3', {'type': 'forgejo', 'url': 'http://h:3002',
@@ -1007,14 +1007,14 @@ class TestStars(unittest.TestCase):
         self.assertEqual(ST._norm_url('git@github.com:SeaXen/gitsync.git'),
                          'github.com/seaxen/gitsync')
         self.assertEqual(
-            ST._norm_url('http://localhost:3002/sagar/gitsync.git'),
-            'localhost:3002/sagar/gitsync')
+            ST._norm_url('http://localhost:3002/me/gitsync.git'),
+            'localhost:3002/me/gitsync')
         self.assertEqual(ST._norm_url(''), '')
 
     def test_different_hosts_are_different_repos(self):
         # a name match is only trusted for github -> github
         self.assertNotEqual(
-            ST._norm_url('https://gitlab.com/seaxen/gitsync.git'),
+            ST._norm_url('https://gitlab.com/alice/gitsync.git'),
             ST._norm_url('https://github.com/SeaXen/gitsync.git'))
 
 
@@ -1863,7 +1863,7 @@ class TestRestore(unittest.TestCase):
                 C.MIRROR_DIR, C.DATA_DIR = old_m, old_d
 
     def test_hub_repo_name_from_the_directory(self):
-        self.assertEqual(SY._hub_repo_name("SeaXen__gitsync"), "gitsync")
+        self.assertEqual(SY._hub_repo_name("acme__gitsync"), "gitsync")
         self.assertEqual(SY._hub_repo_name("gitlab/group__docs"), "docs")
         self.assertEqual(SY._hub_repo_name("legacy"), "legacy")
 

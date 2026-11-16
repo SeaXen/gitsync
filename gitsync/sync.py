@@ -1976,7 +1976,7 @@ def _hub_repo_name(rel_id):
     """the repo name a hub mirror directory stands for.
 
     New layout is mirrors/{type}/{fs_safe(id)}.git with '/' turned into
-    '__', so 'SeaXen__gitsync' is the repo 'gitsync' in owner 'SeaXen'. The
+    '__', so 'acme__gitsync' is the repo 'gitsync' in owner 'acme'. The
     legacy flat layout stored the name directly.
     """
     last = rel_id.split("/")[-1]

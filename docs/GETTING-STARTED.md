@@ -120,7 +120,7 @@ Press **Enter** — your personal namespace is used automatically.
 ```
 Instance URL [http://localhost:3000]
 ```
-Enter your instance (e.g. `http://192.168.0.222:3002`), then:
+Enter your instance (e.g. `http://192.168.1.50:3000`), then:
 
 ```
 forgejo token
@@ -138,10 +138,10 @@ Local mirror folder (bare repos are created here) [~/git-mirrors]
 Type your path, for example:
 
 ```
-/mnt/sg/Sea/6Repo/1git
+/mnt/backup/git
 ```
 
-or `/mnt/backup/git`, or just press Enter for `~/git-mirrors`.
+or `/mnt/usb/git-backup`, or just press Enter for `~/git-mirrors`.
 
 ---
 
@@ -154,7 +154,7 @@ or `/mnt/backup/git`, or just press Enter for `~/git-mirrors`.
  github       OK  gh CLI authenticated as yourname
  gitlab       OK  token OK — user yourname
  forgejo      OK  token OK — user yourname
- local        OK  folder ready: /mnt/sg/Sea/6Repo/1git
+ local        OK  folder ready: /mnt/backup/git
 ```
 
 Every line must say **OK**. If one says FAIL, the message tells you why

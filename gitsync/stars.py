@@ -11,8 +11,8 @@ Matching is deliberately conservative:
   and cannot hit the wrong project.
 - Anything else matches only when the target *already has* a project whose
   remote URL (or, for GitLab, its path) is the same repo. A name match is
-  never enough on its own — ``SeaXen/hermes-telemetry`` and
-  ``nujovich/hermes-telemetry`` are different projects with the same name,
+  never enough on its own — ``alice/hermes-telemetry`` and
+  ``bob/hermes-telemetry`` are different projects with the same name,
   and starring the wrong one is worse than skipping it.
 """
 
