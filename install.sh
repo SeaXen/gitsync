@@ -69,6 +69,12 @@ echo "    target : $INSTALL_DIR"
 
 # --- copy the app ---
 $SUDO mkdir -p "$INSTALL_DIR"
+# docs/ is replaced, not merged into: `cp -r` alone leaves guides that were
+# deleted or renamed in the source behind forever, so an updated install keeps
+# serving the old ones (this is how FIX-PLAN.md outlived its move to
+# docs/archive/). Nothing under INSTALL_DIR is user data — config and mirrors
+# live in the user's home — so removing the stale copy is safe.
+$SUDO rm -rf "$INSTALL_DIR/docs"
 $SUDO cp -r "$SRC_DIR/bin" "$SRC_DIR/gitsync" "$SRC_DIR/README.md" \
          "$SRC_DIR/LICENSE" "$SRC_DIR/docs" "$SRC_DIR/quickinstall.sh" \
          "$INSTALL_DIR/"

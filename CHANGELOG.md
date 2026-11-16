@@ -4,6 +4,50 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.21] - 2026-11-16
+
+### install.sh — an update no longer leaves the old guides behind
+`cp -r docs` merges, so a guide that was deleted or renamed in the source
+stayed in `/opt/gitsync/docs` forever and every later update kept serving it
+— which is how `FIX-PLAN.md` outlived its move into `docs/archive/`. The
+installer now replaces the directory instead of merging into it. Nothing under
+the install dir is user data (config and mirrors live in the user's home), so
+the stale copy is safe to drop. `gitsync update` inherits the fix.
+
+
+
+### Docs catch up with the product, and the README tells an agent how to install it
+Nothing in the engine changed; four guides were describing an older gitsync.
+
+- **TUI.md** — the Tools row listed six actions; there are fourteen now. Added
+  verify backup, token health, reclaim (`gc`), export config, web sessions,
+  restore, retry-failed, and the `X` Extras key. Notifications now documents
+  all five channels with every field, the TLS toggle and clear-a-channel.
+- **WEB-UI.md** — new sections for the **Verify** card (the read-only "is the
+  backup really a backup?" check), config export *and* import (what import
+  keeps, backs up, and reports), the Update and Uninstall cards with their
+  confirmations, per-repo deletion on the Repos page, and the responsive top
+  bar.
+- **SCHEDULING.md** — a new "the clock is the anchor, not your last run"
+  section: the fixed firing times for every schedule, why a tick can
+  legitimately do nothing (each route checks its own last run), and how to get
+  custom times like 09:30/15:30 with your own cron without `gitsync install`
+  overwriting it.
+- **CLI.md** — `prune` now documents `--only [TARGET:]NAME`.
+- **README** — the pinned-install example was three releases stale
+  (`--tag v2.1.12` → `v2.1.21`); the "Everything in a UI" row now names verify,
+  sessions and config backup; a new row covers per-repo deletion.
+
+### New: "Install and set up with an AI agent"
+
+A copy-paste block in the README for Claude Code, Codex, OpenCode, Cline —
+anything that can run shell commands. It walks install → `gitsync setup` →
+verify, and states the rules that keep an agent from doing damage on this
+kind of tool: never echo a token, never delete or gc the mirror hub without
+asking, keep `mode: safe`, re-run `install.sh` after editing source, run
+`gitsync ci` before committing, and isolate any test config with
+`GITSYNC_CONFIG_DIR`/`GITSYNC_DATA_DIR` instead of pointing at the live one.
+
 ## [2.1.20] - 2026-11-16
 
 ### Web UI — one row of top bar at every width

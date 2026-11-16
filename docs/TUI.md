@@ -41,8 +41,9 @@ The TUI and every subprocess it starts run the *installed* copy in
 | `O` | Global options: workers, mirror mode, forks, notifications, pacing, mesh policy, token warning, theme |
 | `A` | Accounts manager: add / edit / remove / test / enable-disable site, `L` GitHub browser login, `V` browse repos, `?` scopes |
 | `E` | **Repo browser** — see repos, mirror status, pick selection, `+` add to route, `P` switch account, `S` all / `T` one site / `L` local only |
-| `T` | **Tools menu**: disk usage + orphans, doctor, compare sites, mirror one repo, fix drift, update, uninstall |
-| `N` | Notifications manager: Discord, Telegram, ntfy, webhook, and email |
+| `T` | **Tools menu** — read-only first: disk usage + orphans, doctor, compare sites, **verify backup** (hub vs every target, branch by branch), token health. Then the ones that change something: reclaim mirror space (`gc`, asks first), export config (credentials blanked), web sessions (who is signed in, revoke all), restore from hub (asks first), mirror one repo, fix drift (preview / run), retry failed repos. Last: update gitsync, uninstall |
+| `N` | Notifications manager: all five channels — Discord, Telegram, ntfy, generic webhook, SMTP — every field, the TLS toggle, clear-a-channel, notify-on mode, send a test |
+| `X` | **Extras** (Routes tab) — delete repos a target has and the source does not: tick rows, `T` chooses which targets may have repos deleted at all |
 | `W` | Setup wizard |
 | `R` | Refresh platform connection status and repo counts |
 | `↑` / `↓` or `k` / `j` | Scroll logs on Dashboard & Log tab, or items in lists |

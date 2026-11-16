@@ -36,18 +36,52 @@ Dashboard, Platforms, Routes, Repos, Stars, Log, History, Tools and Settings.
 
 Every TUI feature has a web equivalent — accounts, routes (pause a route *or*
 one target), the repo browser with selective sync and save-to-file, star copy,
-the full log viewer, run history, options, notifications, webhook control,
-scheduler install, and the tools (doctor, compare, fix, tokens, disk, gc,
-restore, mirror). **Sync now / Dry run** stream the real
-`python3 -m gitsync sync` subprocess to the browser over Server-Sent Events,
-with a live `[done/total]` progress bar — nothing is reimplemented, so it can
-never drift from the CLI.
+the full log viewer, run history, options, notifications (all five channels),
+webhook control, scheduler install, web sessions, config export **and**
+import, and the tools (doctor, `doctor --fix`, compare, **verify**, fix,
+tokens, disk, gc, restore, mirror, update, uninstall). **Sync now / Dry run**
+stream the real `python3 -m gitsync sync` subprocess to the browser over
+Server-Sent Events, with a live `[done/total]` progress bar — nothing is
+reimplemented, so it can never drift from the CLI.
+
+**Verify** (Tools) is the read-only "is the backup really a backup?" check: it
+compares the hub against every target branch by branch and tag by tag, and
+creates, pushes and deletes nothing. `compare` answers the narrower question
+"do the HEADs match?".
+
+**Config backup** (Settings → Paths) downloads the config with every
+credential blanked — safe to keep in a downloads folder — and the paste box
+under it imports one back. Import merges by default (or replaces), keeps any
+credential already stored on this box, backs the current config up first, and
+names any platform that arrives without a token. Import is deliberately not a
+file picker: pasting is reviewable, and `gitsync config import FILE` on the
+CLI does the same thing.
+
+**Update / Uninstall** live in Tools too. Update reinstalls and says the page
+you are reading keeps the old code until the web service is restarted;
+Uninstall removes the scheduler and the command (config and mirrors are kept)
+and needs you to type `uninstall`, because the page being removed is the one
+you are reading.
+
+**Narrow windows:** below ~1100px the top bar drops the wordmark and becomes
+an icon row (every button keeps its tooltip and `aria-label`, and the page
+headers repeat **Sync now** / **Dry run** with labels). The status pill
+ellipsises; hover it for the full sentence.
 
 **First run:** with no route configured the dashboard shows a four-step wizard
 — add two sites, connect them with a route, pick (or take all) repos, preview
 with a dry run, then sync. It disappears as soon as a route exists and can be
 hidden for the rest of the browser session. Nothing is pushed until the last
 step.
+
+**Delete one repo, not all of them.** The Repos page lists every extra repo (a
+repo a target has and the source does not) as a checkbox, with select all /
+none / clear and a **Delete selected…** button that stays disabled at zero. It
+sends exactly the ticked rows to `gitsync prune --only=target:name`, so the
+local-only repo next to a dead one survives. Nothing is deletable until the
+route names the target in `prune_repos` — the page links to Routes when it
+does not — and it never runs from the timer. The TUI's equivalent is `X` on the
+Routes tab.
 
 **Restore previews first.** Tools → Restore always runs the dry run and streams
 it, then asks you to type `restore` before pushing hub mirrors out. A checkbox

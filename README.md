@@ -44,7 +44,7 @@ curl -fsSL .../quickinstall.sh | bash -s -- --user
 # unattended, daily, cron instead of systemd
 curl -fsSL .../quickinstall.sh | bash -s -- --yes --schedule daily --cron
 # a pinned, checksum-verified release
-curl -fsSL .../quickinstall.sh | bash -s -- --tag v2.1.12
+curl -fsSL .../quickinstall.sh | bash -s -- --tag v2.1.20
 ```
 
 | Flag | Effect |
@@ -77,6 +77,48 @@ gitsync doctor   # full diagnostics, --fix repairs what it can
 New here? The step-by-step walkthrough — install, log in, pick a backup
 folder — is in **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.
 
+## Install and set up with an AI agent
+
+Paste this to Claude Code, Codex, OpenCode, Cline — anything that can run
+shell commands. It is written so the agent cannot guess wrong about the parts
+that matter (tokens, the mirror hub, and what is safe to delete).
+
+```text
+Install gitsync (https://github.com/SeaXen/gitsync) on this machine and set it
+up to back my git repositories up. Python 3.8+ standard library only — do not
+pip install anything.
+
+1. Install:  curl -fsSL https://raw.githubusercontent.com/SeaXen/gitsync/main/quickinstall.sh | bash
+   From a clone instead: git clone … && cd gitsync && bash install.sh
+2. Configure: run `gitsync setup` and walk me through it. It asks for
+   platforms (GitHub / GitLab / Forgejo / Gitea / Bitbucket / local folder),
+   a token per platform, the sync direction, and a schedule. Ask me for each
+   answer — never invent a token, a username, or a path.
+3. Verify:   gitsync doctor        (must say ALL HEALTHY)
+             gitsync status
+             gitsync compare       (all in sync)
+             gitsync verify        (hub vs every target, branch by branch)
+4. Show me the result and stop. Do not sync, delete, or change anything else
+   until I say so.
+
+Rules for this machine:
+- Never print, echo, log, or commit a token. Read them from
+  ~/.config/gitsync/config.json only when a command needs them.
+- The mirror hub (default ~/.local/share/gitsync/mirrors, or the local-folder
+  platform's path) is the only other copy of my repos. Never delete, move,
+  `git gc --prune=now`, or reclaim space in it without asking me first.
+- Keep the default `mode: safe` (never deletes, never force-pushes). Do not
+  switch to `full`, and do not run `gitsync prune` or `disk --gc` unless I ask.
+- After editing gitsync's source, re-run `bash install.sh` before testing the
+  TUI — the TUI and every subprocess run the installed copy.
+- Run `python3 -m gitsync ci` before proposing any commit; it must pass 6/6.
+- Isolate any test config: export GITSYNC_CONFIG_DIR=/tmp/x/config
+  GITSYNC_DATA_DIR=/tmp/x/data — never point a test at the live config.
+```
+
+Once it is installed, `gitsync` opens the dashboard and `gitsync web` serves
+the same thing in a browser — both can do everything the CLI can.
+
 ## What you can do
 
 | | |
@@ -86,7 +128,8 @@ folder — is in **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)**.
 | **Same-site too** | `github → github`, `gitlab → gitlab` — several accounts per site, side by side |
 | **Two-way (mesh)** | every peer is source and target: edit on GitLab, it lands everywhere else |
 | **Safe by default** | `mode: safe` never deletes and never force-pushes; mesh reports a disagreement instead of overwriting |
-| **Everything in a UI** | accounts, routes, repos, stars, disk, doctor, compare, mirror — TUI, web UI, or CLI |
+| **Everything in a UI** | accounts, routes, repos, stars, disk, doctor, compare, verify, notifications, sessions, config backup — TUI, web UI, or CLI, with the same actions on all three |
+| **Delete one repo, not all of them** | `gitsync prune --only name` (or `target:name`); the web Repos page ticks the rows, the TUI has an Extras screen — and the route must opt in per target first |
 | **Restore from the hub** | `gitsync restore --to gitlab` pushes every local mirror back out (the web UI previews it first) |
 | **Alerts you actually get** | Discord, Telegram, ntfy, any JSON webhook, or email — globally or per route |
 | **Drift detection** | `gitsync compare` (HEADs) and `gitsync verify` (every branch and tag, hub vs targets) |

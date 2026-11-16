@@ -72,7 +72,7 @@ scripts and `docker exec`.
 | `gitsync doctor` | health check: tokens, routes, storage, scheduler |
 | `gitsync verify` | **is the backup real?** every branch + tag, hub vs each target, read-only |
 | `gitsync verify --json` | the same report as JSON (exit 1 when anything drifted) |
-| `gitsync prune [ROUTE]` | **prune deleted repositories** from target platforms (needs full mode) |
+| `gitsync prune [ROUTE]` | **prune deleted repositories** from target platforms (needs full mode). `--only NAME` or `--only TARGET:NAME` deletes just those repos instead of every extra (repeatable, comma-separated); `--yes` is required to actually delete |
 | `gitsync config export` | print the config with **every credential blanked** |
 | `gitsync config export --out cfg.json` | write that export to a file (mode 0600) |
 | `gitsync config import cfg.json` | import a config, **keeping the secrets on this machine** |
