@@ -696,6 +696,9 @@
     var t = document.getElementById("top-status-text");
     if (!s || !t) return;
     t.textContent = text;
+    // the pill ellipsises on a narrow window (style.css caps it below
+    // 1100px), so the full sentence stays reachable as a tooltip
+    s.title = text;
     s.className = "status" + (cls ? " " + cls : "");
   }
 

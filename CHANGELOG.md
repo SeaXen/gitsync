@@ -4,6 +4,28 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.20] - 2026-11-16
+
+### Web UI — one row of top bar at every width
+Verified on a live 912px window (the content column is 672px): the brand +
+a full status pill + six labelled/icon buttons came to 750px, so the theme
+and sign-out buttons wrapped to a second row and the sticky bar grew to
+117px — 17% of a 670px-tall window.
+
+- Below ~1100px the wordmark goes (the sidebar already carries it) and every
+  top-bar button becomes an icon. Each keeps its `title` and `aria-label`,
+  and the page headers repeat **Sync now** / **Dry run** with their labels.
+- The status pill caps at 240px and ellipsises; `setStatus()` now also puts
+  the full sentence in its `title`, so nothing is lost — and the dashboard's
+  SCHEDULE card shows the next run anyway.
+- Above ~1100px nothing changed: that is the layout that has been in
+  production, and the new rule starts exactly where the old one stopped
+  fitting.
+
+Measured on all nine pages at 912px: a 65px bar, the last button inside the
+viewport, no horizontal page scroll, nothing clipped. Lighthouse on the
+dashboard: accessibility 100, best practices 100.
+
 ## [2.1.19] - 2026-11-16
 
 ### Web and TUI are now the same product

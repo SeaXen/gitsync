@@ -277,18 +277,19 @@ td .mono{color:var(--nav)}
   .form-grid{grid-template-columns:1fr}
 }
 @media (max-width:1100px){
-  /* Between ~861px and ~1100px the brand + a long status pill ("idle · 6h ·
-     next Mon 2026-11-16 18:00:00 +06") + the action buttons is ~820px of
-     content in a 760px box, so the theme/account/sign-out buttons ran off
-     the right edge and the page itself scrolled sideways. The sidebar
-     already carries the wordmark, so drop it here, take the ghost buttons
-     down to icons (each keeps its title and aria-label) and leave the
-     primary "Sync now" labelled — it is the one control that must stay
-     readable. The pause icon is itself a <span>, so the text spans are
-     excluded by id rather than by position. */
+  /* Between ~861px and ~1100px the brand + a long status pill + the action
+     buttons is more than the content column holds, so the last icons wrapped
+     to a second row (a 117px sticky bar on a 670px window). The sidebar
+     already carries the wordmark, so drop it; every button here has a title
+     and an aria-label and the page headers repeat Sync now / Dry run with
+     their labels, so the bar becomes a pure icon toolbar. The pill caps and
+     ellipsises — setStatus() puts the full text in its title attribute, and
+     the dashboard's SCHEDULE card shows the next run anyway. The pause icon
+     is itself a <span>, so text spans are excluded by id, not position. */
   .top .brand{display:none}
-  .top .btn.ghost span:not(#top-pause-icon){display:none}
-  .top .btn.ghost{padding:8px 10px;min-width:40px;justify-content:center}
+  .top .btn span:not(#top-pause-icon){display:none}
+  .top .btn{padding:8px 10px;min-width:40px;justify-content:center}
+  .top .status{max-width:240px}
 }
 @media (min-width:541px){
   .side .mobile-logout{display:none}
