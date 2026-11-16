@@ -3280,6 +3280,26 @@ class TestTenOutOfTenFixes(unittest.TestCase):
         self.assertIn("formatDate: formatDate", app)
         self.assertIn("Intl.RelativeTimeFormat", app)
 
+    def test_webui_shows_the_effective_route_mode(self):
+        # a route with no override has mode=null; the engine still runs the
+        # global mode. The dashboard and the routes page both printed
+        # "mode: safe" for such a route while it force-pushed and pruned —
+        # the one label an operator checks before trusting a route. The API
+        # exposes effective_mode for exactly this; the UI has to read it.
+        pages = os.path.join(C.APP_DIR, "gitsync", "webui", "pages")
+        for name in ("dashboard.js", "routes.js"):
+            with open(os.path.join(pages, name), encoding="utf-8") as fp:
+                src = fp.read()
+            self.assertIn("effective_mode", src, name)
+            self.assertNotIn('G.esc(r.mode || "safe")', src, name)
+
+    def test_webui_route_mode_matches_the_api_field(self):
+        # guard the server half too: route_view must expose the resolved
+        # mode, or no UI can show it
+        import inspect
+        src = inspect.getsource(W)
+        self.assertIn('"effective_mode": C.route_mode(cfg, r)', src)
+
 
 class TestTUIDrawPerformance(unittest.TestCase):
     def test_draw_dashboard_makes_no_subprocess_calls(self):

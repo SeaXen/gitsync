@@ -1,10 +1,10 @@
 class Gitsync < Formula
   desc "Multi-platform git repository sync tool (GitHub, GitLab, Forgejo, local)"
   homepage "https://github.com/SeaXen/gitsync"
-  url "https://github.com/SeaXen/gitsync/archive/refs/tags/v2.1.11.tar.gz"
+  url "https://github.com/SeaXen/gitsync/archive/refs/tags/v2.1.12.tar.gz"
   # Template formula: update sha256 upon release tag creation via:
-  #   curl -fsSL https://github.com/SeaXen/gitsync/archive/refs/tags/v2.1.11.tar.gz | sha256sum
-  sha256 "62dcc98c40ce9618d2053404e4c69c8e6ffd91aca749fab7838921104e60c8dd"
+  #   curl -fsSL https://github.com/SeaXen/gitsync/archive/refs/tags/v2.1.12.tar.gz | sha256sum
+  # sha256 "REPLACE_WITH_V2_1_12_SHA256"
   license "MIT"
 
   depends_on "python@3.12"

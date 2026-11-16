@@ -621,11 +621,16 @@
       return;
     }
     host.innerHTML = rows.map(function (r) {
-      var badge = '<span class="chip ' + (r.mode === "full" ? "warn" : "") + '" title="' +
-        (r.mode === "full"
+      // r.mode is the route's OVERRIDE and is null when the route inherits
+      // the global setting — printing that as "safe" told the operator a
+      // force-pushing, pruning route was harmless. effective_mode is what
+      // the engine will actually use.
+      var mode = r.effective_mode || r.mode || "safe";
+      var badge = '<span class="chip ' + (mode === "full" ? "warn" : "") + '" title="' +
+        (mode === "full"
           ? "full: prunes destination branches and tags that no longer exist on the source"
           : "safe: never deletes or force-pushes on destinations") +
-        '">mode: ' + G.esc(r.mode || "safe") + "</span>";
+        '">mode: ' + G.esc(mode) + (r.mode ? "" : " (inherited)") + "</span>";
       var state = !r.enabled ? '<span class="chip paused">paused</span>' : '<span class="chip">active</span>';
       return '<div class="row u-py4"><span><strong>' + G.esc(r.name) + '</strong> (' +
         G.esc(r.source) + ' → ' + G.esc(r.targets.join(", ")) + ')</span><span>' + badge + ' ' + state + '</span></div>';

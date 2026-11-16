@@ -8,8 +8,9 @@
   function chips(r) {
     var c = [];
     c.push('<span class="chip">' + (r.direction === "mesh" ? "two-way mesh" : "one-way") + "</span>");
-    var mode = r.mode || "safe";
-    c.push('<span class="chip ' + (mode === "full" ? "warn" : "") + '">mode: ' + G.esc(mode) + "</span>");
+    var mode = r.effective_mode || r.mode || "safe";
+    c.push('<span class="chip ' + (mode === "full" ? "warn" : "") + '">mode: ' +
+      G.esc(mode) + (r.mode ? "" : " (inherited)") + "</span>");
     c.push('<span class="chip">' + G.esc(r.effective_schedule) +
       (r.schedule ? "" : " (inherited)") + "</span>");
     if (r.direction === "mesh" && r.mesh_conflict) {

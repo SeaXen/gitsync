@@ -4,6 +4,27 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.12] - 2026-11-16
+
+### Web UI — the route list understated what a route does
+A route with no per-route override stores `mode: null`; the engine then runs
+the **global** mode. Both the dashboard's "Routes status" card and the
+Routes page printed `mode: safe` in that case, because they read the raw
+override field. A route configured `full` (force-push + prune heads/tags)
+was therefore labelled harmless — the one badge an operator checks before
+trusting a route with a destructive run.
+
+- Both now read `effective_mode` from `/api/routes` (the value
+  `C.route_mode()` resolves), and show `(inherited)` when there is no
+  override — the same convention the schedule chip already used.
+- The TUI was correct all along: it calls `C.route_mode()` directly.
+- Regression test asserts the pages read `effective_mode` and that the API
+  keeps exposing it.
+
+Found while visually verifying the dashboard against a live 4-platform
+config; the platforms card looked empty in a screenshot only because the
+capture raced its fetch.
+
 ## [2.1.11] - 2026-11-16
 
 ### Scheduler — 6h/12h timers were wrong by an order of magnitude
