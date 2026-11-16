@@ -4,6 +4,24 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.11] - 2026-11-16
+
+### Scheduler — 6h/12h timers were wrong by an order of magnitude
+`SCHEDULES["6h"]` shipped `OnCalendar=*:0/6`. In systemd's calendar syntax
+the part after the colon is *minutes*, so that normalises to
+`*-*-* *:00/6:00` — **every six minutes**, not every six hours. The timer
+woke ten times an hour; only the per-route "not due yet" check kept it from
+syncing that often, so the setting appeared to work while quietly ignoring
+the schedule the user chose.
+
+- `6h` → `*-*-* 00/6:00:00`, `12h` → `*-*-* 00/12:00:00` (step the hour
+  field).
+- Regression test asserts the step lands in the hour field, and cross-checks
+  the normalisation with `systemd-analyze calendar` when it is available.
+
+Anyone on 2.1.10 or earlier with a 6h/12h timer should re-run
+`gitsync install`. Hourly, daily and weekly were unaffected.
+
 ## [2.1.10] - 2026-11-16
 
 ### Auth — `auth: "gh"` really works now

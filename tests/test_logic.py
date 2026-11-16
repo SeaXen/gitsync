@@ -1303,7 +1303,31 @@ class TestScheduler(unittest.TestCase):
     def test_install_uses_the_finest_route_schedule(self):
         cfg = {"routes": [{"name": "a", "schedule": "daily"},
                           {"name": "b", "schedule": "6h"}]}
-        self.assertEqual(S.timer_calendar(cfg), "*:0/6")
+        self.assertEqual(S.timer_calendar(cfg), "*-*-* 00/6:00:00")
+
+    def test_stepped_schedules_step_hours_not_minutes(self):
+        # "6h" was installed as OnCalendar=*:0/6, which systemd normalises to
+        # *-*-* *:00/6:00 — minute 0,6,12,… i.e. EVERY SIX MINUTES. The timer
+        # then woke ten times an hour and only the route's own "not due yet"
+        # check stopped it from syncing.
+        for key, hours in (("6h", 6), ("12h", 12)):
+            cal = C.SCHEDULES[key]["calendar"]
+            date_part, time_part = cal.split()
+            hh, mm = time_part.split(":")[:2]
+            self.assertEqual(mm, "00", "%s must not step minutes: %s"
+                             % (key, cal))
+            self.assertIn("00/%d" % hours, hh,
+                          "%s must step the hour field: %s" % (key, cal))
+        if shutil.which("systemd-analyze"):
+            for key, hours in (("6h", 6), ("12h", 12)):
+                r = subprocess.run(["systemd-analyze", "calendar",
+                                    C.SCHEDULES[key]["calendar"]],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                norm = [l for l in r.stdout.splitlines()
+                        if "Normalized form" in l][0]
+                # the step must land in the HH field, not MM
+                self.assertRegex(norm, r"\s\d{2}/%d:00:00" % hours)
 
     def test_user_unit_has_no_home_override(self):
         # on a system unit %h expands to /root, so the timer would read

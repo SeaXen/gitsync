@@ -96,9 +96,9 @@ DEFAULT_CONFIG = {
 SCHEDULES = {
     "hourly": {"cron": "0 * * * *", "calendar": "hourly",
                "label": "Every hour"},
-    "6h":     {"cron": "0 */6 * * *", "calendar": "*:0/6",
+    "6h":     {"cron": "0 */6 * * *", "calendar": "*-*-* 00/6:00:00",
                "label": "Every 6 hours"},
-    "12h":    {"cron": "0 */12 * * *", "calendar": "*:0/12",
+    "12h":    {"cron": "0 */12 * * *", "calendar": "*-*-* 00/12:00:00",
                "label": "Every 12 hours"},
     "daily":  {"cron": "0 3 * * *", "calendar": "*-*-* 03:00:00",
                "label": "Once daily at 03:00"},
