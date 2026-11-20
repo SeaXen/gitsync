@@ -361,6 +361,25 @@ def _send_discord(url, title, fields, color="ok", content=None):
     return _post(url, payload)
 
 
+def _failure_lines(fails, limit=1000):
+    """label every failure PART/FAIL and keep the list inside a Discord field.
+
+    Without the label a partial and a hard failure looked identical in the
+    message, so "what failed, which repo" was only guessable from the totals.
+    """
+    out, used = [], 0
+    for i, f in enumerate(fails):
+        line = "%s %s/%s — %s" % (
+            "PART" if f.get("partial") else "FAIL",
+            f.get("route"), f.get("repo"), str(f.get("error", ""))[:140])
+        if used + len(line) > limit:
+            out.append("+%d more — see records.json" % (len(fails) - i))
+            break
+        out.append(line)
+        used += len(line) + 1
+    return "\n".join(out)
+
+
 def _route_stats(summary):
     """{route: {'failed': n, 'partial': n}} from a run summary.
 
@@ -435,10 +454,7 @@ def notify_run(cfg, summary, routes=None):
     ]
     fails = summary.get("failures") or []
     if fails:
-        lines = ["%s/%s — %s" % (f.get("route"), f.get("repo"),
-                                 str(f.get("error", ""))[:90])
-                 for f in fails[:8]]
-        fields.append(("Failures", "\n".join(lines), False))
+        fields.append(("Failures", _failure_lines(fails), False))
     return send(cfg, title, fields, color=color)
 
 

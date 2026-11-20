@@ -1199,6 +1199,22 @@ class TestNotifyFormats(unittest.TestCase):
         self.assertEqual(sent[0][1], "warn")
         self.assertIn(("Partial", "1", True), sent[0][2])
 
+    def test_failure_list_labels_part_vs_fail(self):
+        lines = NT._failure_lines([
+            {"route": "main", "repo": "a", "error": "gitlab: refused",
+             "partial": True},
+            {"route": "main", "repo": "b", "error": "forgejo: auth failed"},
+        ])
+        self.assertIn("PART main/a — gitlab: refused", lines)
+        self.assertIn("FAIL main/b — forgejo: auth failed", lines)
+
+    def test_failure_list_reports_overflow(self):
+        fails = [{"route": "main", "repo": "r%d" % i,
+                  "error": "x" * 140} for i in range(20)]
+        lines = NT._failure_lines(fails)
+        self.assertIn("more — see records.json", lines)
+        self.assertLessEqual(len(lines), 1100)
+
     def test_partial_fallback_without_per_route(self):
         summary = {"failures": [{"route": "main", "repo": "r",
                                  "error": "x", "partial": True},
