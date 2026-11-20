@@ -2372,9 +2372,10 @@ def cmd_notify(args):
         return 0 if ok else 1
     if getattr(args, "set_url", None):
         url = args.set_url.strip()
-        if not url.startswith(NT.DISCORD_PREFIXES):
-            print("that does not look like a Discord webhook "
-                  "(expected %s...)" % NT.DISCORD_PREFIXES[0])
+        if not NT.discord_url_ok(url):
+            print("that is not a complete Discord webhook URL — copy the "
+                  "whole URL from Discord (Server Settings > Integrations "
+                  "> Webhooks > Copy Webhook URL)")
             return 2
         cfg.setdefault("settings", {}).setdefault("notify", {})
         cfg["settings"]["notify"]["discord_webhook"] = url

@@ -1127,6 +1127,87 @@ class TestNotifyChannels(unittest.TestCase):
         self.assertEqual(calls, [])
 
 
+class TestNotifyFormats(unittest.TestCase):
+    """each channel gets a payload its own API can actually render."""
+
+    def test_discord_url_must_be_complete(self):
+        good = "https://discord.com/api/webhooks/" + "1" * 19 + "/" + "a" * 68
+        self.assertTrue(NT.discord_url_ok(good))
+        for bad in ("https://discord.com/api/webhooks/<id>/<token>",
+                    "https://discord.com/api/webhooks/X/Y",
+                    "https://discord.com/api/webhooks/",
+                    "https://example.com/api/webhooks/" + "1" * 19 + "/" + "a" * 68):
+            self.assertFalse(NT.discord_url_ok(bad), bad)
+
+    def test_discord_has_visible_content_and_fenced_failures(self):
+        seen = {}
+        orig = NT._post_json
+        NT._post_json = lambda url, payload, headers=None: seen.update(
+            payload=payload) or True
+        cfg = {"settings": {"notify": {
+            "discord_webhook": "https://discord.com/api/webhooks/1/a"}}}
+        try:
+            NT.send(cfg, "gitsync: partial sync",
+                    [("Partial", "1", True),
+                     ("Failures", "r/x — refused\nr/y — timed out", False)])
+        finally:
+            NT._post_json = orig
+        p = seen["payload"]
+        self.assertIn("gitsync: partial sync", p["content"])
+        self.assertIn("Partial 1", p["content"])
+        self.assertIn("```", p["embeds"][0]["fields"][1]["value"])
+
+    def test_telegram_uses_escaped_html(self):
+        seen = {}
+        orig = NT._post_json
+        NT._post_json = lambda url, payload, headers=None: seen.update(
+            payload=payload) or True
+        cfg = {"settings": {"notify": {
+            "telegram_token": "T", "telegram_chat_id": "1"}}}
+        try:
+            NT.send(cfg, "gitsync: sync FAILED",
+                    [("Failures", "a/b → <denied>", False)])
+        finally:
+            NT._post_json = orig
+        p = seen["payload"]
+        self.assertEqual(p["parse_mode"], "HTML")
+        self.assertTrue(p["text"].startswith("<b>gitsync: sync FAILED</b>"))
+        self.assertIn("&lt;denied&gt;", p["text"])
+        self.assertNotIn("<denied>", p["text"])
+
+    def test_partial_counts_once_and_pages_as_partial(self):
+        cfg = {"settings": {"notify": {
+            "ntfy_url": "https://ntfy.sh/t", "on": "failure"}}}
+        summary = {"ok": 2, "failed": 0, "partial": 1,
+                   "per_route": {"main": {"ok": 2, "failed": 0,
+                                          "partial": 1}},
+                   "failures": [{"route": "main", "repo": "r",
+                                 "error": "one target refused",
+                                 "partial": True}]}
+        self.assertEqual(NT._route_stats(summary),
+                         {"main": {"failed": 0, "partial": 1}})
+        sent = []
+        orig = NT.send
+        NT.send = lambda c, t, f, color="ok", content=None: sent.append(
+            (t, color, f)) or True
+        try:
+            self.assertTrue(NT.notify_run(cfg, summary,
+                                          routes=[{"name": "main"}]))
+        finally:
+            NT.send = orig
+        self.assertEqual(sent[0][0], "gitsync: partial sync")
+        self.assertEqual(sent[0][1], "warn")
+        self.assertIn(("Partial", "1", True), sent[0][2])
+
+    def test_partial_fallback_without_per_route(self):
+        summary = {"failures": [{"route": "main", "repo": "r",
+                                 "error": "x", "partial": True},
+                                {"route": "main", "repo": "q",
+                                 "error": "y"}]}
+        self.assertEqual(NT._route_stats(summary),
+                         {"main": {"failed": 1, "partial": 1}})
+
+
 class TestNotifyExtras(unittest.TestCase):
     """ntfy / generic webhook / email, and per-route notify rules.
 
@@ -2304,7 +2385,7 @@ class TestNotifyCli(unittest.TestCase):
                 rc, out = self._run(["notify", "--set-url",
                                      "https://evil.example/x"])
                 self.assertEqual(rc, 2)
-                self.assertIn("does not look like", out)
+                self.assertIn("not a complete Discord webhook URL", out)
                 self.assertFalse(os.path.exists(
                     os.path.join(td, "config.json")))
             finally:
@@ -2314,12 +2395,12 @@ class TestNotifyCli(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             os.environ["GITSYNC_CONFIG_DIR"] = td
             try:
-                rc, _ = self._run(["notify", "--set-url",
-                                   "https://discord.com/api/webhooks/1/a"])
+                url = ("https://discord.com/api/webhooks/"
+                       + "1" * 19 + "/" + "a" * 68)
+                rc, _ = self._run(["notify", "--set-url", url])
                 self.assertEqual(rc, 0)
                 saved = C.load_config()["settings"]["notify"]
-                self.assertEqual(saved["discord_webhook"],
-                                 "https://discord.com/api/webhooks/1/a")
+                self.assertEqual(saved["discord_webhook"], url)
             finally:
                 os.environ.pop("GITSYNC_CONFIG_DIR", None)
 

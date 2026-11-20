@@ -2429,8 +2429,8 @@ def h_settings_put(handler):
                 raise _Http(400, "unknown notify target: %r" % (what,))
         if (b.get("discord_webhook") or "").strip():
             url = b["discord_webhook"].strip()
-            if not url.startswith(NT.DISCORD_PREFIXES):
-                raise _Http(400, "that is not a Discord webhook URL")
+            if not NT.discord_url_ok(url):
+                raise _Http(400, "that is not a complete Discord webhook URL")
             notify["discord_webhook"] = url
         if (b.get("telegram_token") or "").strip():
             tok = b["telegram_token"].strip()

@@ -32,6 +32,7 @@ turn a successful sync into a failure.
 """
 
 import email.message
+import html
 import json
 import os
 import smtplib
@@ -187,8 +188,35 @@ def http_url_ok(url):
     return u.scheme in ("http", "https") and bool(u.netloc)
 
 
+def discord_url_ok(url):
+    """prefix alone is not enough — a placeholder saves but never delivers."""
+    if not isinstance(url, str) or not url.startswith(DISCORD_PREFIXES):
+        return False
+    parts = urllib.parse.urlsplit(url).path.strip("/").split("/")
+    return (len(parts) == 4 and parts[:2] == ["api", "webhooks"]
+            and parts[2].isdigit() and len(parts[2]) >= 15
+            and len(parts[3]) >= 40)
+
+
+def _headline(title, fields):
+    """one readable line — Discord previews `content`, not embed fields."""
+    short = ", ".join("%s %s" % (n, v) for n, v, i in fields if i)[:280]
+    return "%s%s" % (title, (" — " + short) if short else "")
+
+
 def _text(title, fields):
     return "\n".join([title] + ["%s: %s" % (n, v) for n, v, _ in fields])
+
+
+def _telegram_text(title, fields):
+    """Telegram's HTML mode: bold title, escaped values, <pre> for lists."""
+    lines = ["<b>%s</b>" % html.escape(str(title))]
+    for n, v, _ in fields:
+        val = html.escape(str(v))
+        if "\n" in val:
+            val = "<pre>%s</pre>" % val
+        lines.append("%s: %s" % (html.escape(str(n)), val))
+    return "\n".join(lines)
 
 
 def _post_raw(url, data, headers=None, method="POST"):
@@ -215,14 +243,17 @@ def _post(url, payload):
     return _post_json(url, payload)
 
 
-def telegram_send(cfg, text):
-    """send a plain message via the Telegram Bot API"""
+def telegram_send(cfg, text, parse_mode="HTML"):
+    """send via the Telegram Bot API; callers pass HTML-escaped text."""
     token, chat = _telegram(cfg)
     if not token or not chat:
         return False
     url = "https://api.telegram.org/bot%s/sendMessage" % token
-    return _post_json(url, {"chat_id": chat, "text": text[:4000],
-                            "disable_web_page_preview": True})
+    payload = {"chat_id": chat, "text": text[:4000],
+               "disable_web_page_preview": True}
+    if parse_mode:
+        payload["parse_mode"] = parse_mode
+    return _post_json(url, payload)
 
 
 def ntfy_send(cfg, title, text):
@@ -291,13 +322,14 @@ def send(cfg, title, fields, color="ok", content=None):
     claim success with an empty config).
     """
     text = _text(title, fields)
+    headline = content or _headline(title, fields)
     results = []
     url = _settings(cfg)[0]
     if url:
-        results.append(_send_discord(url, title, fields, color, content))
+        results.append(_send_discord(url, title, fields, color, headline))
     token, chat = _telegram(cfg)
     if token and chat:
-        results.append(telegram_send(cfg, text))
+        results.append(telegram_send(cfg, _telegram_text(title, fields)))
     if _ntfy(cfg)[0]:
         results.append(ntfy_send(cfg, title, text))
     if _webhook(cfg):
@@ -310,31 +342,41 @@ def send(cfg, title, fields, color="ok", content=None):
 def _send_discord(url, title, fields, color="ok", content=None):
     if not url:
         return False
+
+    def value(v):
+        v = str(v)
+        return "```\n%s\n```" % v if "\n" in v else v
+
     embed = {
         "title": title[:256],
         "color": COLORS.get(color, COLORS["info"]),
-        "fields": [{"name": str(n)[:256], "value": str(v)[:1024],
+        "fields": [{"name": str(n)[:256], "value": value(v)[:1024],
                     "inline": bool(i)} for n, v, i in fields][:25],
         "footer": {"text": "gitsync"},
     }
-    payload = {"embeds": [embed]}
-    if content:
-        payload["content"] = content[:2000]
+    # a message with only an embed shows as a blank row in the mobile channel
+    # list — `content` is what Discord previews there
+    payload = {"content": (content or _headline(title, fields))[:2000],
+               "embeds": [embed]}
     return _post(url, payload)
 
 
 def _route_stats(summary):
     """{route: {'failed': n, 'partial': n}} from a run summary.
 
-    Built from the failure list plus an optional per_route map, so an old
-    records.json (written before per_route existed) still works.
+    Per-route counters win when present; the failure list is only a fallback
+    for old records.json files written before per_route existed. Adding both
+    used to double-count a partial as a hard failure.
     """
+    per_route = summary.get("per_route") or {}
     stats = {}
-    for k, v in (summary.get("per_route") or {}).items():
+    for k, v in per_route.items():
         stats[k] = {"failed": int(v.get("failed") or 0),
                     "partial": int(v.get("partial") or 0)}
     for f in summary.get("failures") or []:
         r = f.get("route") or "?"
+        if r in per_route:
+            continue
         stats.setdefault(r, {"failed": 0, "partial": 0})
         if f.get("partial"):
             stats[r]["partial"] += 1
@@ -396,7 +438,7 @@ def notify_run(cfg, summary, routes=None):
         lines = ["%s/%s — %s" % (f.get("route"), f.get("repo"),
                                  str(f.get("error", ""))[:90])
                  for f in fails[:8]]
-        fields.append(("Failures", "```\n%s\n```" % "\n".join(lines), False))
+        fields.append(("Failures", "\n".join(lines), False))
     return send(cfg, title, fields, color=color)
 
 
@@ -414,7 +456,7 @@ def notify_test(cfg):
         if name == "discord":
             ok = _send_discord(_settings(cfg)[0], title, fields, color="info")
         elif name == "telegram":
-            ok = telegram_send(cfg, text)
+            ok = telegram_send(cfg, _telegram_text(title, fields))
         elif name == "ntfy":
             ok = ntfy_send(cfg, title, text)
         elif name == "webhook":

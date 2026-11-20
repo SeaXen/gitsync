@@ -1617,7 +1617,7 @@ def run_sync(cfg=None, route_name=None, quiet=False, only=None,
                     totals["partial"] += 1
                     totals["failures"].append(
                         {"route": route.get("name"), "repo": repo["name"],
-                         "error": "; ".join(errors)[:200]})
+                         "error": "; ".join(errors)[:200], "partial": True})
                 else:
                     totals["failed"] += 1
                     totals["failures"].append(
