@@ -575,9 +575,11 @@ def import_config(path, cfg=None, replace=False):
     if os.path.exists(CONFIG_FILE):
         stamp = time.strftime("%Y%m%d-%H%M%S")
         try:
-            with open(CONFIG_FILE, "rb") as src, \
-                    open(CONFIG_FILE + ".bak-" + stamp, "wb") as dst:
-                dst.write(src.read())
+            with open(CONFIG_FILE, "rb") as src:
+                fd = os.open(CONFIG_FILE + ".bak-" + stamp,
+                             os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as dst:
+                    dst.write(src.read())
         except OSError:
             pass
     save_config(merged)

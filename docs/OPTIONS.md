@@ -320,3 +320,7 @@ submodules`), and when `git-lfs` is installed the run also does
 `git lfs fetch --all` into the hub. Without it, a clone from a target will
 have the refs but not the large files — which is exactly what the log line
 says, instead of a silently incomplete mirror.
+
+LFS is only a note for the local hub. A *target* that rejects a push because
+LFS is disabled or over quota now reports the real LFS/quota error; check the
+destination's LFS settings rather than enabling `relax_protection`.

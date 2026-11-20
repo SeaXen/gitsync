@@ -262,7 +262,7 @@
         f("Parallel workers", G.select("s-workers", S.workers, [1, 2, 4, 8]), "repos synced in parallel") +
         f("Mirror mode", G.select("s-mode", S.mode, [{ v: "safe", l: "safe (never delete)" }, { v: "full", l: "full (prunes)" }])) +
         f("Mesh conflicts", G.select("s-conflict", S.mesh_conflict, [{ v: "newest", l: "newest wins" }, { v: "skip", l: "skip (report)" }])) +
-        f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "The timer fires at the finest route schedule") +
+        f("Schedule", G.select("s-schedule", S.schedule, scheduleOpts), "Install / Update applies a schedule change to the timer") +
         f("Include forks", '<label class="check"><input type="checkbox" id="s-forks" name="include_forks"' + (S.include_forks ? " checked" : "") + "> Mirror forked repos</label>", "Include repositories you have forked") +
         f("Pause between repos", G.select("s-pace", S.pace || 0, [0, 1, 2, 5, 10]), "Seconds — spare laptop heat / disk") +
         f("Keep free disk", G.select("s-minfree", S.min_free_gb === undefined ? 0.5 : S.min_free_gb,
@@ -366,7 +366,6 @@
       workers: document.getElementById("s-workers").value,
       mode: document.getElementById("s-mode").value,
       mesh_conflict: document.getElementById("s-conflict").value,
-      schedule: document.getElementById("s-schedule").value,
       include_forks: document.getElementById("s-forks").checked,
       pace: document.getElementById("s-pace").value,
       token_warn_days: document.getElementById("s-warn").value,
@@ -399,6 +398,10 @@
     if (spv) body.smtp_password = spv;
     return G.api("PUT", "/api/settings", body).then(function () {
       G.toast("settings saved", "ok");
+      // Save does not persist Schedule; show the value that is actually in
+      // effect so a changed dropdown is not reported as saved
+      var schedSel = document.getElementById("s-schedule");
+      if (schedSel) schedSel.value = S.schedule;
       var dirtyPill = document.getElementById("settings-dirty");
       if (dirtyPill) dirtyPill.classList.add("hide");
       document.getElementById("n-discord").value = "";
@@ -418,6 +421,9 @@
       .then(function (d) {
         G.toast(d.status, d.ok ? "ok" : "warn");
         document.getElementById("sched-status").textContent = d.status;
+        if (sched) S.schedule = sched;
+        var dirtyPill = document.getElementById("settings-dirty");
+        if (dirtyPill) dirtyPill.classList.add("hide");
         G.refreshStatus();
       }).catch(function (e) { G.toast(G.apiError(e), "bad"); });
   }

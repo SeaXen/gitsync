@@ -18,9 +18,12 @@ names the repo and the reason. The three common causes are handled
 automatically now:
 
 - **`You are not allowed to force push code to a protected branch`** — the
-  target's branch protection refuses a mirror push. gitsync enables
-  `allow_force_push` on that branch (access levels are left alone) and
-  retries. You will see `force-push enabled on 'master'` in the log.
+  target's branch protection refuses a mirror push. By default gitsync reports
+  this and leaves the branch alone; force-push is only enabled when
+  `settings.relax_protection=true` (see OPTIONS.md). Other pre-receive
+  rejections — LFS objects missing, quota exceeded — can surface with similar
+  wording, so check the destination's LFS/quota settings before enabling
+  `relax_protection`.
 - **`Rate limit exceeded`** (GitLab) — the API answered 429. Requests are
   retried with backoff; a large run may simply take longer.
 - **`GitLab create failed for '<name>': path: can only include ...`** —

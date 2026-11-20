@@ -4,6 +4,30 @@ All notable changes to gitsync are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.22] - 2026-11-21
+
+### Review-team fixes: accurate schedule, errors and dashboard health
+A route's `at` stamp was rewritten at run end, so a run that finished just
+before a timer tick made that tick "not due" and doubled the effective cadence.
+The completion mark now keeps the start stamp recorded when the route began,
+so the documented 6h timer fires on time again. No timer hack is needed.
+
+`_protection_error()` treated any `pre-receive hook declined` as branch
+protection. GitLab emits the same text for missing LFS objects, so operators
+were told to set `relax_protection=true` — a lasting force-push change — for
+an LFS problem. The matcher now only accepts protection-specific text.
+
+The dashboard's "Sync is overdue" banner measured staleness from the last
+*perfectly clean* run, so one chronically partial repo made healthy syncs look
+three days overdue. Staleness now tracks the last run that actually did work;
+fully-clean runs remain separately visible. The Settings Save button no longer
+writes the schedule behind the timer's back — only Install / Update applies it.
+The scheduler-install API now persists under the shared config lock, config
+import backups are created 0600, and the troubleshooting/LFS docs match the
+current behavior. A plain `bash install.sh` no longer resets the saved
+schedule to hourly — it now derives the timer from config, as the CLI does.
+
+
 ## [2.1.21] - 2026-11-16
 
 ### install.sh — an update no longer leaves the old guides behind

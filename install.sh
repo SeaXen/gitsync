@@ -17,7 +17,7 @@
 set -euo pipefail
 
 APP_NAME="gitsync"
-SCHEDULE="hourly"
+SCHEDULE=""
 USE_CRON=0
 USER_MODE=0
 SYSTEM_UNIT=0
@@ -42,7 +42,7 @@ done
 
 # allowlist the schedule, so a typo cannot silently install hourly
 case "$SCHEDULE" in
-    hourly|6h|12h|daily|weekly|off) ;;
+    ""|hourly|6h|12h|daily|weekly|off) ;;
     *) echo "unknown schedule: $SCHEDULE (hourly 6h 12h daily weekly off)" >&2
        exit 2 ;;
 esac
@@ -100,7 +100,10 @@ mkdir -p "$HOME/.config/$APP_NAME" "$HOME/.local/share/$APP_NAME/mirrors"
 # $HOME (gh CLI, tokens) is invisible to it.
 if [ "$SCHEDULE" != "off" ]; then
     GITSYNC_BIN="$BIN_DIR/gitsync"
-    SCHED_ARGS="--schedule $SCHEDULE"
+    # no explicit --schedule: let gitsync install derive the timer from config
+    # instead of silently resetting the operator's saved schedule
+    SCHED_ARGS=""
+    [ -n "$SCHEDULE" ] && SCHED_ARGS="--schedule $SCHEDULE"
     [ "$USE_CRON" = "1" ] && SCHED_ARGS="$SCHED_ARGS --cron"
     [ "$SYSTEM_UNIT" = "1" ] && SCHED_ARGS="$SCHED_ARGS --system"
     if "$GITSYNC_BIN" install $SCHED_ARGS --yes; then

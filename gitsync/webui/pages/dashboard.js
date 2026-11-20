@@ -335,7 +335,7 @@
       var every = st.every_hours;
       var what = st.age_hours === null || st.age_hours === undefined
         ? "Nothing has synced yet."
-        : "The last successful sync was " + G.ago(Math.round(st.age_hours * 3600)) + ".";
+        : "The last sync was " + G.ago(Math.round(st.age_hours * 3600)) + ".";
       var span = every ? ("This is set to run every " + every + "h.") : "";
       host.innerHTML =
         '<div class="banner ' + (st.age_hours === null ? "bad" : "warn") + '">' +

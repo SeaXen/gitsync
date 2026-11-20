@@ -1206,8 +1206,14 @@ def mark_route_run(route, now=None, status="ok", ok_count=0, failed_count=0, par
     import time as _t
     st = _load_route_state()
     rname = route.get("name") if isinstance(route, dict) else str(route)
+    at = now or _t.time()
+    prev = st.get(rname)
+    # the final mark must not move the next due time past the run's start
+    if status != "running" and isinstance(prev, dict) \
+            and prev.get("status") == "running":
+        at = prev.get("at", at)
     st[rname] = {
-        "at": now or _t.time(),
+        "at": at,
         "status": status,
         "ok": ok_count,
         "failed": failed_count,
@@ -1242,9 +1248,10 @@ def next_due_text(route, cfg, now=None):
 def _protection_error(err):
     """did the push fail because a branch is protected?"""
     e = (err or "").lower()
-    return ("protected branch" in e or "pre-receive hook declined" in e
-            or "protected branches" in e or "force push" in e
-            or "not allowed to force push" in e)
+    # a generic pre-receive decline is also emitted for LFS/quota rejections;
+    # treating it as protection used to advise relaxing protection for those
+    return ("protected branch" in e or "protected branches" in e
+            or "force push" in e or "not allowed to force push" in e)
 
 
 import re as _re

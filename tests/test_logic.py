@@ -602,6 +602,12 @@ class TestSyncHelpers(unittest.TestCase):
             'branch'))
         self.assertFalse(SY._protection_error('some other failure'))
         self.assertFalse(SY._protection_error(''))
+        self.assertFalse(SY._protection_error(
+            'remote: GitLab: LFS objects are missing\n'
+            '! [remote rejected] main -> main (pre-receive hook declined)'))
+        self.assertTrue(SY._protection_error(
+            'remote: error: GH006: Protected branch update failed for refs/heads/main.\n'
+            '! [remote rejected] main -> main (pre-receive hook declined)'))
 
     def test_short_error(self):
         self.assertEqual(SY._short_error('remote: nope\nTo example'), 'nope')
@@ -5468,7 +5474,7 @@ class TestFirstRunWizardAndStaleState(unittest.TestCase):
     def test_has_runnable_routes_and_stale_state(self):
         # Fresh install config has no runnable routes
         self.assertFalse(C.has_runnable_routes(C.DEFAULT_CONFIG))
-        stale_fresh = W._stale_state(C.DEFAULT_CONFIG, None)
+        stale_fresh = W._stale_state(C.DEFAULT_CONFIG, None, None)
         self.assertFalse(stale_fresh["stale"])
 
         # Config with unready routes is not runnable
@@ -5481,7 +5487,7 @@ class TestFirstRunWizardAndStaleState(unittest.TestCase):
             "settings": {},
         }
         self.assertFalse(C.has_runnable_routes(cfg_unready))
-        self.assertFalse(W._stale_state(cfg_unready, None)["stale"])
+        self.assertFalse(W._stale_state(cfg_unready, None, None)["stale"])
 
         # Config with ready route but no last_ok is overdue
         cfg_ready = {
@@ -5493,7 +5499,59 @@ class TestFirstRunWizardAndStaleState(unittest.TestCase):
             "settings": {"schedule": "hourly"},
         }
         self.assertTrue(C.has_runnable_routes(cfg_ready))
-        self.assertTrue(W._stale_state(cfg_ready, None)["stale"])
+        self.assertTrue(W._stale_state(cfg_ready, None, None)["stale"])
+
+        # a recent real run is not stale just because one repo was PARTIAL
+        import datetime as _dt
+        recent = {"finished_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                  "ok": 47, "partial": 1, "failed": 0}
+        st = W._stale_state(cfg_ready, recent, None)
+        self.assertFalse(st["stale"])
+        self.assertEqual(st["partial"], 1)
+        self.assertIn("partial", st["reason"])
+
+    def test_stale_ignores_noop_ticks(self):
+        import types
+        import datetime as _dt
+        old_records, old_load = W.SYNC.last_records, C.load_config
+        cfg = {
+            "platforms": {
+                "loc1": {"type": "local", "path": "/p1", "enabled": True},
+                "loc2": {"type": "local", "path": "/p2", "enabled": True},
+            },
+            "routes": [{"name": "r", "source": "loc1", "targets": ["loc2"],
+                        "enabled": True}],
+            "settings": {"schedule": "hourly"},
+        }
+        recs = [
+            {"finished_at": "2026-01-01 00:00:00", "ok": 48, "repos": 48,
+             "partial": 0, "failed": 0},
+            {"finished_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+             "ok": 0, "repos": 0, "partial": 0, "failed": 0},
+        ]
+        handler = types.SimpleNamespace(
+            server=types.SimpleNamespace(bind_host="127.0.0.1", port=7765))
+        try:
+            W.SYNC.last_records = lambda n: recs
+            C.load_config = lambda: cfg
+            st = W._status_payload(handler)["stale"]
+            self.assertTrue(st["stale"])
+            self.assertGreater(st["age_hours"], 1000)
+
+            # a dry run is read-only: it must not mask a stale real backup
+            cfg["settings"]["schedule"] = "daily"
+            recs[:] = [
+                {"finished_at": "2026-01-01 00:00:00", "ok": 48, "repos": 48,
+                 "partial": 0, "failed": 0},
+                {"finished_at": _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                 "ok": 48, "repos": 48, "partial": 0, "failed": 0,
+                 "dry_run": True},
+            ]
+            st = W._status_payload(handler)["stale"]
+            self.assertTrue(st["stale"])
+            self.assertGreater(st["age_hours"], 48)
+        finally:
+            W.SYNC.last_records, C.load_config = old_records, old_load
 
 
 class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
@@ -5681,6 +5739,21 @@ class TestWindowsTaskSchedulerAndRouteResults(unittest.TestCase):
                 self.assertEqual(st["r1"]["ok"], 2)
             finally:
                 C.DATA_DIR = orig_data
+
+    def test_final_mark_keeps_start_and_due_is_measured_from_it(self):
+        with tempfile.TemporaryDirectory() as td:
+            orig = C.DATA_DIR
+            C.DATA_DIR = td
+            try:
+                SY.mark_route_run({"name": "r"}, now=1000.0, status="running")
+                SY.mark_route_run({"name": "r"}, now=2000.0, status="ok")
+                self.assertEqual(SY.last_route_run("r"), 1000.0)
+                cfg = {"settings": {"schedule": "hourly"}}
+                route = {"name": "r"}
+                self.assertFalse(SY.route_due(route, cfg, now=4599.0)[0])
+                self.assertTrue(SY.route_due(route, cfg, now=4600.0)[0])
+            finally:
+                C.DATA_DIR = orig
 
     def test_an_interrupted_route_is_not_recorded_as_ok(self):
         """`mark_route_run(route)` ran before any repo work, so a run killed

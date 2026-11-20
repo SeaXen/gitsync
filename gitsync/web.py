@@ -1427,7 +1427,7 @@ def h_logout(handler):
                          {"Set-Cookie": _expire_cookie()})
 
 
-def _stale_state(cfg, last_ok):
+def _stale_state(cfg, last, last_ok):
     """is a sync overdue? {"stale": bool, "age_hours": n, "every_hours": n}.
 
     Docker and a freshly-installed host both look healthy while nothing has
@@ -1438,24 +1438,30 @@ def _stale_state(cfg, last_ok):
     if not C.has_runnable_routes(cfg):
         return {"stale": False, "age_hours": None, "every_hours": None,
                 "reason": "no runnable routes"}
-    schedule = C.setting(cfg, "schedule", "hourly")
-    every = C.SCHEDULE_HOURS.get(schedule)
+    # keep the banner in step with the "Timer:" label, which shows the global
+    # setting; route-level overrides are already reflected in the routes tab
+    every = C.SCHEDULE_HOURS.get(C.setting(cfg, "schedule", "hourly"))
     if not every:
         return {"stale": False, "age_hours": None, "every_hours": None,
                 "reason": "schedule off"}
-    if not last_ok:
+    if not last:
         return {"stale": True, "age_hours": None, "every_hours": every,
                 "reason": "no successful sync yet"}
     try:
-        when = datetime.strptime(last_ok.get("finished_at"),
+        when = datetime.strptime(last.get("finished_at"),
                                  "%Y-%m-%d %H:%M:%S")
     except (TypeError, ValueError):
         return {"stale": False, "age_hours": None, "every_hours": every,
                 "reason": "unknown last run"}
     age = (datetime.now() - when).total_seconds() / 3600.0
-    return {"stale": age > 2 * every, "age_hours": round(age, 2),
-            "every_hours": every,
-            "reason": "nothing synced for %s" % _ago(age)}
+    stale = age > 2 * every
+    part, fail = last.get("partial") or 0, last.get("failed") or 0
+    reason = "nothing synced for %s" % _ago(age)
+    if not stale and last_ok is None and (part or fail):
+        reason = "last sync had %d partial and %d failed repo(s)" % (part, fail)
+    return {"stale": stale, "age_hours": round(age, 2),
+            "every_hours": every, "partial": part, "failed": fail,
+            "reason": reason}
 
 
 def _ago(hours):
@@ -1532,6 +1538,13 @@ def _status_payload(handler):
     cfg = C.load_config()
     recs = SYNC.last_records(60)
     last = recs[-1] if recs else None
+    # a skipped timer tick writes a 0-repo record: it must not make a stalled
+    # sync look fresh. Staleness tracks the last run that actually did work.
+    last_real = None
+    for rec in reversed(recs):
+        if (rec.get("ok") or rec.get("repos")) and not rec.get("dry_run"):
+            last_real = rec
+            break
     last_ok = None
     for rec in reversed(recs):
         if rec.get("ok") and not (rec.get("failed") or 0) \
@@ -1551,7 +1564,7 @@ def _status_payload(handler):
         "port": handler.server.port,
         "last_run": _public_record(last) if last else None,
         "last_ok_run": _public_record(last_ok) if last_ok else None,
-        "stale": _stale_state(cfg, last_ok),
+        "stale": _stale_state(cfg, last_real, last_ok),
         "has_runnable_routes": C.has_runnable_routes(cfg),
         "counts": {"platforms": len(cfg.get("platforms") or {}),
                    "routes": len(C.routes(cfg))},
@@ -2651,24 +2664,29 @@ def h_health(handler):
 
 def h_scheduler_install(handler):
     b = handler._body()
-    cfg = C.load_config()
-    key = b.get("schedule") or C.finest_schedule(cfg) \
-        or C.setting(cfg, "schedule", "hourly")
-    if key != "off" and key not in C.SCHEDULES:
-        raise _Http(400, "unknown schedule '%s' (choose from: %s)"
-                    % (key, ", ".join(C.SCHEDULES)))
+
+    def do(cfg):
+        key = b.get("schedule") or C.finest_schedule(cfg) \
+            or C.setting(cfg, "schedule", "hourly")
+        if key != "off" and key not in C.SCHEDULES:
+            raise _Http(400, "unknown schedule '%s' (choose from: %s)"
+                        % (key, ", ".join(C.SCHEDULES)))
+        if key == "off" or b.get("schedule"):
+            # persist under the same lock as every other config write
+            cfg.setdefault("settings", {})["schedule"] = key
+        return key
+
+    key, code = _locked(do)
+    if code != 200:
+        handler._json(key, code)
+        return
     if key == "off":
-        # persist the choice, or the dashboard keeps showing the old
-        # schedule and its "Install timer" button re-enables hourly
-        C.set_setting(cfg, "schedule", "off")
         S.uninstall_systemd(system=True)
         S.uninstall_systemd()
         S.install_cron("off")
         _audit("scheduler disabled")
         _invalidate("next", "sched")
         return handler._json({"ok": True, "status": "scheduler disabled"})
-    if b.get("schedule"):
-        C.set_setting(cfg, "schedule", key)
     _invalidate("next", "sched")
     if b.get("cron") or not S.have_systemd():
         S.install_cron(key)
